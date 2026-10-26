@@ -98,6 +98,10 @@ jobs:
             - name: Run tests
               run: xmake run TPTests
 
+            - name: Test diagnostic binary identities
+              shell: powershell
+              run: ./Tools/VR/tests/binary-identities.tests.ps1
+
             # Create distrib
             - name: Output distrib binaries via xmake
               run: |

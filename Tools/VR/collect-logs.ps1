@@ -18,6 +18,39 @@ function Add-File([string]$Path, [string]$Name = (Split-Path $Path -Leaf)) {
     }
 }
 
+# Observe only files beside the collector. A hash identifies the bytes read; it does not
+# establish which source revision produced them. Never include file paths or binary contents.
+function Get-BinaryIdentityManifest([string]$Folder) {
+    $entries = foreach ($name in @('urSovngarde.exe', 'SkyrimTogether.exe', 'TPProcess.exe', 'EarlyLoad.dll', 'urSovngardeServer.exe', 'STServer.dll')) {
+        $entry = [ordered]@{ filename = $name; status = 'unreadable'; size = $null; sha256 = $null }
+        $stream = $null
+        $algorithm = $null
+        try {
+            $stream = [IO.File]::Open((Join-Path $Folder $name), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            $entry.size = $stream.Length
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            $entry.sha256 = ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+            $entry.status = 'present'
+        } catch [IO.FileNotFoundException] {
+            $entry.status = 'missing'
+        } catch [IO.DirectoryNotFoundException] {
+            $entry.status = 'missing'
+        } catch {
+            # Do not expose exception text: it can contain personal paths.
+            $entry.size = $null
+            $entry.sha256 = $null
+        } finally {
+            if ($algorithm) { $algorithm.Dispose() }
+            if ($stream) { $stream.Dispose() }
+        }
+        [pscustomobject]$entry
+    }
+    [pscustomobject]@{
+        description = 'Observed files beside the collector; hashes do not establish source-to-binary provenance.'
+        binaries = @($entries)
+    }
+}
+
 Write-Host "Collecting urSovngarde logs..."
 
 # Client logs (the rotated ones hold earlier sessions of the same day).
@@ -80,6 +113,11 @@ if (-not (Get-ChildItem $staging)) {
     Remove-Item $staging -Recurse -Force
     exit 1
 }
+
+# Add this only after checking for logs: binary metadata alone is not a log bundle.
+Get-BinaryIdentityManifest $ClientFolder | ConvertTo-Json -Depth 4 |
+    Set-Content (Join-Path $staging 'binary-identities.json') -Encoding UTF8
+Write-Host '  + binary-identities.json'
 
 # What Windows itself recorded in the last day: crash events, Windows Error Reporting files, display driver resets.
 # A heap corruption (0xc0000374) ends the game without our crash report; only Windows records it.

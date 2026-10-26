@@ -3,6 +3,10 @@
 #include "TargetConfig.h"
 #include "launcher.h"
 
+#ifdef SKYRIMVR
+#include "../client/VRSupportedVersion.h"
+#endif
+
 #include "loader/ExeLoader.h"
 #include "loader/PathRerouting.h"
 
@@ -131,6 +135,15 @@ bool LoadProgram(LaunchContext& LC)
     LC.Version = QueryFileVersion(LC.exePath.c_str());
     if (LC.Version.empty())
         DIE_NOW(L"Failed to query game version");
+#ifdef SKYRIMVR
+    // Check before mapping the executable or installing the launcher start hook.
+    if (!VRSupportedVersion::IsSupported(LC.Version.c_str()))
+    {
+        const std::wstring detectedVersion(LC.Version.begin(), LC.Version.end());
+        const std::wstring message = L"urSovngarde requires Skyrim VR 1.4.15.0, but this executable is " + detectedVersion + L".";
+        DIE_NOW(message.c_str());
+    }
+#endif
     LC.SetLoaded();
 
     ExeLoader loader(CurrentTarget.exeLoadSz);

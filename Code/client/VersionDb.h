@@ -7,6 +7,8 @@
 #include <sstream>
 #include <vector>
 
+#include "VRSupportedVersion.h"
+
 #ifdef SKYRIMVR
 #include "VRAddressOverrides.h"
 #endif
@@ -376,8 +378,12 @@ public:
         return true;
     }
 
-    bool LoadCSV(const std::filesystem::path& acGamePath)
+    bool LoadCSV(const std::filesystem::path& acGamePath, std::string_view aExeVersion)
     {
+        // Reject before opening the CSV or changing any database state.
+        if (!VRSupportedVersion::IsSupported(aExeVersion))
+            return false;
+
         std::ifstream file(acGamePath / "Data" / "SKSE" / "Plugins" / "version-1-4-15-0.csv");
         if (!file.good())
             return false;

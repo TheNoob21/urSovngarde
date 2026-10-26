@@ -1,5 +1,8 @@
 ## urSovngarde
 
+This fork integrates compatible work from the earlier Unified Skyrim projects. See
+[Existing project integration](INTEGRATION.md) for changes, source revisions, verification, and remaining mixed SE/VR work.
+
 Co-op for Skyrim VR: a port of Skyrim Together Reborn (Tilted Online) to Skyrim VR 1.4.15. Playable, and played
 by the two of us; still early, and only ever tested with two players at once.
 
