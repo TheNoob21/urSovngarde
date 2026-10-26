@@ -29,7 +29,7 @@ Binary hashes identify the observed bytes. They do not establish which source re
 | Remote pose renderer and native bridge | Retain the sampling, interpolation, lifecycle, and readback lessons from `native/UnifiedSkyrimPoseBridge/README.md` and the pose contracts. Extend urSovngarde's existing `VRBodySync`, `InterpolationSystem`, and renderer paths rather than introducing a second pose system. | Implement and witness VR pose presentation on an SE receiver, including actor teardown, reconnect, cell transitions, and stale tracking. Existing VR-specific engine layouts cannot be transplanted into SE. |
 | HIGGS, PLANCK, and VRIK integration | Use the API-version and callback-lifecycle requirements described in the earlier `ADR-0007-vr-interaction-mod-boundary.md` as design input. Inventory, damage, ownership, and persistence must remain consistent with this fork's authority model. | Qualify actual installed mod versions and runtime behavior; verify that remote network actors and local physics do not compete. |
 | Shared content and mod counterparts | Adapt the earlier content-ledger and record-comparison approach after vanilla mixed play works. Skyrim VR and SE need compatible shared content, not an inherited assumption of byte-identical load orders. | Validate each counterpart and reject missing or ambiguous mappings against actual game data. |
-| Campaign persistence, save barriers, quests, dialogue, and NPC behavior | Preserve the product requirements as future acceptance criteria. Reassess each requirement against urSovngarde's current implementation before designing an extension. | Real campaign sessions, transitions, late joins, reconnects, and checkpoint restoration. The old server and synthetic-save code are not drop-in implementations. |
+| Campaign, quests, dialogue, and NPC behavior | Follow the newer Skyrim Together plan: each player keeps their own character/save and party quest progress uses the existing system. Older server-owned campaign storage is historical, not a requirement to restore. | Real campaign sessions, transitions, late joins and reconnects. The old server and synthetic-save code are not drop-in implementations. |
 | Isolation and evidence capture | Adapt copy-only staging, save protection, timestamped receipts, and two-client witnesses when game installations are available. | New urSovngarde-specific receipts and observations. Old SkyMP gate results cannot qualify this fork. |
 
 The earlier `0x40000000` launcher reservation is obsolete for this base. Its VR launcher deliberately reserves `0x05000000` to preserve space for SKSE trampolines; that setting remains. The historical build record describes the older checkout and is not imported as evidence for this one.
@@ -37,6 +37,8 @@ The earlier `0x40000000` launcher reservation is obsolete for this base. Its VR 
 SkyMP's synthetic-save entry, profile binding, custom protocol, and ownership implementation remain in the frozen project. EOS or PlayFab integration, native Quest execution, static recompilation, and Xbox support require separate engineering; cloning or integrating these checks does not provide them.
 
 ## Validation
+
+Subsequent mixed-client preparation and its separate checks are recorded in [Mixed SE and VR preparation](MIXED-SE-VR.md).
 
 Local validation uses Windows x64, Visual Studio 2022 MSVC `14.44.35207`, xmake `3.1.1`, and the repository's `releasedbg` configuration. Neither Skyrim SE nor Skyrim VR is installed for these checks. No game, VM, or deployed mod profile is launched or modified.
 

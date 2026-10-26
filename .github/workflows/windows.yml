@@ -16,6 +16,7 @@ on:
                 required: false
                 type: boolean
                 default: false
+    workflow_dispatch:
 
 env:
     BUILD_MODE: ${{ inputs.build-mode || 'releasedbg' }}
@@ -78,15 +79,14 @@ jobs:
               run: xmake config --plat=windows --arch=${{ matrix.arch }} --mode="$BUILD_MODE" --yes -vD
 
             # Build the client
-            # A push builds what urSovngarde ships, as release.yml does: the VR client (through its launcher), the
-            # server, the menu's process and the tests. Upstream's flat-Skyrim client is never shipped and took about
-            # half of the 21 minutes `xmake -y` needed (2026-10-10). The playable-build packaging below still wants
-            # everything, so it keeps the full build.
+            # Check both desktop and VR clients through their launchers, along with the server, browser and tests.
+            # Playable-build packaging still uses the full build.
             - name: Build with xmake
               run: |
                   if [ "${{ inputs.upload-build-for-next-job }}" = "true" ]; then
                       xmake -y
                   else
+                      xmake build -y SkyrimImmersiveLauncher
                       xmake build -y SkyrimImmersiveLauncherVR
                       xmake build -y SkyrimServerRunner
                       xmake build -y TPProcess

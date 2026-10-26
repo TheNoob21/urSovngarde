@@ -4,6 +4,7 @@
 
 #include <Systems/InterpolationSystem.h>
 #include <Systems/SpawnReveal.h>
+#include <Systems/RemotePoseInterpolation.h>
 #include <Components.h>
 
 #include <AI/AIProcess.h>
@@ -321,135 +322,7 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     // The pose and actor position must come from the same instant.
     // Different playback ticks put the visible body and hands ahead of the actor/controller that combat collides with.
     auto& vrPose = aInterpolationComponent.InterpolatedVRPose;
-    vrPose.HasData = false;
-    vrPose.NoBones = false;
-    vrPose.HasLegs = false;
-    vrPose.HasFingers = false;
-    vrPose.HasScale = false;
-    vrPose.HasRootPosition = false;
-    vrPose.HasWeapons = false;
-    {
-        const InterpolationComponent::TimePoint* pBefore = nullptr;
-        const InterpolationComponent::TimePoint* pAfter = nullptr;
-        for (const auto& point : movements)
-        {
-            if (!point.VRPoseData.HasData)
-                continue;
-            if (point.Tick <= aTick)
-                pBefore = &point;
-            else
-            {
-                pAfter = &point;
-                break;
-            }
-        }
-        if (!pBefore)
-            pBefore = pAfter;
-        if (!pAfter)
-            pAfter = pBefore;
-
-        if (pBefore && pAfter)
-        {
-            float poseDelta = 1.f;
-            if (pAfter->Tick > pBefore->Tick && aTick < pAfter->Tick)
-            {
-                poseDelta = 0.f;
-                if (aTick > pBefore->Tick)
-                    poseDelta = static_cast<float>(static_cast<double>(aTick - pBefore->Tick) / static_cast<double>(pAfter->Tick - pBefore->Tick));
-            }
-
-            vrPose.HasData = true;
-            // A body with no readable skeleton (VRPose::NoBones) has nothing to blend, so its bone arrays are left alone.
-            // The newest point wins, as for every other field that is a reading rather than a rotation.
-            vrPose.NoBones = pAfter->VRPoseData.NoBones || pBefore->VRPoseData.NoBones;
-            if (!vrPose.NoBones)
-            {
-                // Legs only between two points that both carry them (the sender's trackers can come and go).
-                vrPose.HasLegs = pBefore->VRPoseData.HasLegs && pAfter->VRPoseData.HasLegs;
-                const size_t boneCount = vrPose.HasLegs ? VRPose::kBoneCount : VRPose::kUpperBoneCount;
-                for (size_t i = 0; i < boneCount; ++i)
-                    vrPose.Bones[i] = glm::slerp(static_cast<glm::quat>(pBefore->VRPoseData.Bones[i]), static_cast<glm::quat>(pAfter->VRPoseData.Bones[i]), poseDelta);
-            }
-            // Fingers are sent only when they change, so the newest set around the pose tick is passed on.
-            // The body sync keeps the last one it received. No blending: a grip is a step.
-            const VRPose& fingerSource = pAfter->VRPoseData.HasFingers ? pAfter->VRPoseData : pBefore->VRPoseData;
-            if (fingerSource.HasFingers)
-            {
-                vrPose.HasFingers = true;
-                vrPose.Fingers = fingerSource.Fingers;
-            }
-            // The position of a body being dragged, blended like movement.
-            // Blended only when both points carry one, so it never blends against a stale origin.
-            if (pBefore->VRPoseData.HasRootPosition && pAfter->VRPoseData.HasRootPosition)
-            {
-                vrPose.HasRootPosition = true;
-                for (size_t i = 0; i < 3; ++i)
-                    vrPose.RootPosition[i] = TiltedPhoques::Lerp(pBefore->VRPoseData.RootPosition[i], pAfter->VRPoseData.RootPosition[i], poseDelta);
-            }
-            else if (pAfter->VRPoseData.HasRootPosition)
-            {
-                vrPose.HasRootPosition = true;
-                std::copy(std::begin(pAfter->VRPoseData.RootPosition), std::end(pAfter->VRPoseData.RootPosition), std::begin(vrPose.RootPosition));
-            }
-
-            const VRPose& scaleSource = pAfter->VRPoseData.HasScale ? pAfter->VRPoseData : pBefore->VRPoseData;
-            if (scaleSource.HasScale)
-            {
-                vrPose.HasScale = true;
-                vrPose.RootScale = scaleSource.RootScale;
-            }
-
-            // Hips, blended like movement, since the whole body is offset by this.
-            // Blended only when both points carry one, so it never blends against a stale origin.
-            //
-            // This layer rebuilds the pose from the buffer and copies only the fields it knows.
-            // A new field in VRPose must be added here too, or it is silently dropped on arrival.
-            if (pBefore->VRPoseData.HasHips && pAfter->VRPoseData.HasHips)
-            {
-                vrPose.HasHips = true;
-                for (size_t i = 0; i < 3; ++i)
-                    vrPose.HipOffset[i] = TiltedPhoques::Lerp(pBefore->VRPoseData.HipOffset[i], pAfter->VRPoseData.HipOffset[i], poseDelta);
-            }
-            else if (pAfter->VRPoseData.HasHips)
-            {
-                vrPose.HasHips = true;
-                std::copy(std::begin(pAfter->VRPoseData.HipOffset), std::end(pAfter->VRPoseData.HipOffset), std::begin(vrPose.HipOffset));
-            }
-
-            // The copy's hands are put where these say (VRBodySync::ReachHands), so they are blended when both ends have them.
-            // Otherwise the newest wins; older senders send them only once a second.
-            if (pBefore->VRPoseData.HasHandCheck && pAfter->VRPoseData.HasHandCheck)
-            {
-                vrPose.HasHandCheck = true;
-                for (size_t i = 0; i < 3; ++i)
-                {
-                    vrPose.LeftHandOffset[i] = TiltedPhoques::Lerp(pBefore->VRPoseData.LeftHandOffset[i], pAfter->VRPoseData.LeftHandOffset[i], poseDelta);
-                    vrPose.RightHandOffset[i] = TiltedPhoques::Lerp(pBefore->VRPoseData.RightHandOffset[i], pAfter->VRPoseData.RightHandOffset[i], poseDelta);
-                }
-            }
-            else
-            {
-                const VRPose& handSource = pAfter->VRPoseData.HasHandCheck ? pAfter->VRPoseData : pBefore->VRPoseData;
-                if (handSource.HasHandCheck)
-                {
-                    vrPose.HasHandCheck = true;
-                    std::copy(std::begin(handSource.LeftHandOffset), std::end(handSource.LeftHandOffset), std::begin(vrPose.LeftHandOffset));
-                    std::copy(std::begin(handSource.RightHandOffset), std::end(handSource.RightHandOffset), std::begin(vrPose.RightHandOffset));
-                }
-            }
-
-            // Where the weapons are held, sent when the grip changes.
-            // Like the fingers, the newest set around the pose tick is passed on. No blending: a grip is a step.
-            const VRPose& weaponSource = pAfter->VRPoseData.HasWeapons ? pAfter->VRPoseData : pBefore->VRPoseData;
-            if (weaponSource.HasWeapons)
-            {
-                vrPose.HasWeapons = true;
-                vrPose.WeaponHeld = weaponSource.WeaponHeld;
-                vrPose.WeaponRotation = weaponSource.WeaponRotation;
-                std::copy(&weaponSource.WeaponOffset[0][0], &weaponSource.WeaponOffset[0][0] + 6, &vrPose.WeaponOffset[0][0]);
-            }
-        }
-    }
+    vrPose = RemotePoseInterpolation::Sample(movements, aTick);
 
 #ifdef SKYRIMVR
     VRBodySync::SetRemotePose(apActor, vrPose);
