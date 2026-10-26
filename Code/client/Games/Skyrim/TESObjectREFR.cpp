@@ -790,8 +790,9 @@ Inventory TESObjectREFR::GetInventory(std::function<bool(TESForm&)> aFilter) con
             if (!aFilter(*pGameEntry->form))
                 continue;
 
-            Inventory::Entry entry;
-            modSystem.GetServerModId(pGameEntry->form->formID, entry.BaseId);
+            Inventory::Entry entry{};
+            if (!modSystem.GetServerModId(pGameEntry->form->formID, entry.BaseId))
+                continue;
             entry.Count = pGameEntry->count;
 
             inventory.Entries.push_back(std::move(entry));
@@ -810,7 +811,8 @@ Inventory TESObjectREFR::GetInventory(std::function<bool(TESForm&)> aFilter) con
             continue;
 
         Inventory::Entry entry{};
-        modSystem.GetServerModId(pGameEntry->form->formID, entry.BaseId);
+        if (!modSystem.GetServerModId(pGameEntry->form->formID, entry.BaseId))
+            continue;
         entry.Count = pGameEntry->count;
 
         for (ExtraDataList* pExtraDataList : *pGameEntry->dataList)

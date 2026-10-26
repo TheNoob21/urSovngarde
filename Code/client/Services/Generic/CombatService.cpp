@@ -61,18 +61,18 @@ void CombatService::OnProjectileLaunchedEvent(const ProjectileLaunchedEvent& acE
     request.OriginY = acEvent.Origin.y;
     request.OriginZ = acEvent.Origin.z;
 
-    modSystem.GetServerModId(acEvent.ProjectileBaseID, request.ProjectileBaseID);
-    modSystem.GetServerModId(acEvent.WeaponID, request.WeaponID);
-    modSystem.GetServerModId(acEvent.AmmoID, request.AmmoID);
+    if (!modSystem.GetServerModId(acEvent.ProjectileBaseID, request.ProjectileBaseID) ||
+        !modSystem.GetServerModId(acEvent.WeaponID, request.WeaponID) ||
+        !modSystem.GetServerModId(acEvent.AmmoID, request.AmmoID) ||
+        !modSystem.GetServerModId(acEvent.ParentCellID, request.ParentCellID) ||
+        !modSystem.GetServerModId(acEvent.SpellID, request.SpellID))
+        return;
 
     request.ShooterID = localComponent.Id;
 
     request.ZAngle = acEvent.ZAngle;
     request.XAngle = acEvent.XAngle;
     request.YAngle = acEvent.YAngle;
-
-    modSystem.GetServerModId(acEvent.ParentCellID, request.ParentCellID);
-    modSystem.GetServerModId(acEvent.SpellID, request.SpellID);
 
     request.CastingSource = acEvent.CastingSource;
 

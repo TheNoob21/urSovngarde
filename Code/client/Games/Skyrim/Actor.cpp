@@ -721,9 +721,9 @@ Factions Actor::GetFactions() const noexcept
 
         for (auto i = 0u; i < factions.length; ++i)
         {
-            Faction faction;
-
-            modSystem.GetServerModId(factions[i].faction->formID, faction.Id);
+            Faction faction{};
+            if (!modSystem.GetServerModId(factions[i].faction->formID, faction.Id))
+                continue;
             faction.Rank = factions[i].rank;
 
             result.NpcFactions.push_back(faction);
@@ -735,9 +735,9 @@ Factions Actor::GetFactions() const noexcept
     {
         for (auto i = 0u; i < pChanges->entries.length; ++i)
         {
-            Faction faction;
-
-            modSystem.GetServerModId(pChanges->entries[i].faction->formID, faction.Id);
+            Faction faction{};
+            if (!modSystem.GetServerModId(pChanges->entries[i].faction->formID, faction.Id))
+                continue;
             faction.Rank = pChanges->entries[i].rank;
 
             result.ExtraFactions.push_back(faction);

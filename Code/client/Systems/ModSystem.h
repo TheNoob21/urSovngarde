@@ -1,6 +1,9 @@
 #pragma once
 
+#include <Systems/ModIdMapping.h>
+
 struct Mods;
+struct DisconnectedEvent;
 struct GameId;
 
 /**
@@ -20,16 +23,10 @@ struct ModSystem
 
 protected:
     void HandleMods(const Mods& acMods) noexcept;
+    void HandleDisconnected(const DisconnectedEvent&) noexcept;
 
 private:
-    struct GameMod
-    {
-        uint16_t id;
-        bool isLite;
-    };
-
     entt::scoped_connection m_modsConnection;
-    Map<uint16_t, uint32_t> m_liteToServer;
-    Map<uint32_t, GameMod> m_serverToGame;
-    uint32_t m_standardToServer[0x100];
+    entt::scoped_connection m_disconnectedConnection;
+    ModIdMapping m_mapping;
 };
