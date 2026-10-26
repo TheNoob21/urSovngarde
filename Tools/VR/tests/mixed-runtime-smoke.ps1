@@ -5,6 +5,8 @@ Runs a game-free, two-bot server routing smoke test.
 The server listens on wildcard interfaces, not just loopback. The bots connect to
 127.0.0.1 using a randomly generated per-run password. Public listing and status
 publication are disabled. This test does not run or validate SE or VR clients.
+Synthetic VR poses traverse the actual server between two headless bots; this
+does not prove visible game animation, real tracking, or engine node placement.
 No firewall or network settings are changed. Logs and a receipt are retained in
 one new directory under build. Use matching protocol builds of all three binaries.
 #>
@@ -80,12 +82,18 @@ try {
     $ini = Set-IniValue $ini 'GameServer' 'uPort' "$port"
     $ini = Set-IniValue $ini 'GameServer' 'sPassword' $password
     Set-Content -LiteralPath (Join-Path $work 'config\STServer.ini') -Value $ini -Encoding UTF8
-    @('waitfor connected 45','waitfor known other 40','wait 3','markpos other',
+    @('waitfor connected 45','waitfor known other 40',
+      'posemark Actor','waitfor pose Actor a 30','expect pose Actor a','wait 2','markpos other',
       'waitfor movedfrommark other >= 200 40','expect movedfrommark other >= 200',
+      'posemark Actor','waitfor pose Actor b 30','expect pose Actor b',
+      'posemark Actor','waitfor pose Actor none 30','expect pose Actor none',
       'disconnect','wait 2','reconnect','waitfor connected 45','waitfor known other 40',
+      'posemark Actor','waitfor pose Actor recovery 40','expect pose Actor recovery',
       'expect known other','expect connected','stop') | Set-Content -LiteralPath (Join-Path $work 'watch.txt') -Encoding ASCII
-    @('waitfor connected 45','waitfor known other 40','wait 8','walk rel 600 0 200',
-      'wait 60','expect connected','stop') | Set-Content -LiteralPath (Join-Path $work 'actor.txt') -Encoding ASCII
+    @('waitfor connected 45','waitfor known other 40','wait 3',
+      'posefixture a','wait 4','walk rel 600 0 200','wait 5',
+      'posefixture b','wait 12','posefixture none','wait 12',
+      'posefixture recovery','wait 12','expect connected','stop') | Set-Content -LiteralPath (Join-Path $work 'actor.txt') -Encoding ASCII
 
     $server = Start-Process -FilePath (Join-Path $BinaryDir 'urSovngardeServer.exe') -WorkingDirectory $work -WindowStyle Hidden -PassThru
     $processes += $server
@@ -137,10 +145,24 @@ try {
     Assert-Log $watchText 'disconnecting on purpose' 'intentional disconnect'
     Assert-Log $watchText 'reconnecting \(number 1\)' 'reconnect initiated'
     Assert-Log $watchText '(?s)reconnecting \(number 1\).*ok: known other' 'remote character rediscovered after reconnect'
+    foreach ($phase in @('a', 'b', 'none', 'recovery')) {
+        Assert-Log $actorText ("\[pose\] sending fixture " + $phase + ' through ClientReferencesMoveRequest') "actor sends synthetic VR pose phase $phase through client movement"
+        Assert-Log $watchText ("ok: pose Actor " + $phase + ' \(received Actor player \d+ actor [0-9A-F]+ seq \d+ > mark \d+, age \d+ms;') "watcher receives fresh named Actor VR pose phase $phase through actual server"
+    }
+    Assert-Log $watchText '(?s)ok: pose Actor a .*ok: pose Actor b .*ok: pose Actor none ' 'distinct head and arm rotations, hips, scale, fingers, hand checks and weapons compared; then HasData=false transition observed'
+    $receipt.checks += @('received head quaternion matches each distinct fixture',
+        'received left and right arm quaternions match each distinct fixture',
+        'received tracked-leg bones and hip offsets match each distinct fixture',
+        'received root scale matches each distinct fixture',
+        'received left and right hand-check offsets match each distinct fixture',
+        'received finger quaternions and weapon transforms match each distinct fixture',
+        'no-data requires a prior received VR pose and a newer remote movement snapshot')
+    Assert-Log $watchText '(?s)disconnecting on purpose.*\[pose\] receive cache and freshness marks cleared on disconnect.*reconnecting \(number 1\).*ok: pose Actor recovery ' 'received pose cache cleared on disconnect and distinct fresh pose recovered after reconnect'
+    $receipt['poseEvidence'] = @($watchText -split '\r?\n' | Where-Object { $_ -match '\[script\] ok: pose Actor (a|b|none|recovery) ' })
     Assert-Log $watchText 'all \d+ checks passed' 'watcher script checks passed'
     Assert-Log $actorText 'all \d+ checks passed' 'actor script checks passed'
     $receipt.result = 'passed'
-    Write-Host "PASS: authentication, assignment, movement relay, disconnect and reconnect. Receipt: $receiptPath"
+    Write-Host "PASS: authentication, assignment, movement relay, synthetic VR pose A/B/no-data/recovery, disconnect and reconnect. Receipt: $receiptPath"
 }
 catch {
     $receipt.error = $_.Exception.Message

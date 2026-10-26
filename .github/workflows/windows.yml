@@ -90,6 +90,7 @@ jobs:
                       xmake build -y SkyrimImmersiveLauncherVR
                       xmake build -y SkyrimServerRunner
                       xmake build -y TPProcess
+                      xmake build -y STBot
                       xmake build -y TPTests
                   fi
                   echo "STR_BUILD_DIR=build/windows/${{ matrix.arch }}/${BUILD_MODE}/" >> "$GITHUB_ENV"
@@ -101,6 +102,10 @@ jobs:
             - name: Test diagnostic binary identities
               shell: powershell
               run: ./Tools/VR/tests/binary-identities.tests.ps1
+
+            - name: Test server VR pose relay and reconnect
+              shell: powershell
+              run: ./Tools/VR/tests/mixed-runtime-smoke.ps1 -BinaryDir (Join-Path $PWD "build/windows/x64/$env:BUILD_MODE")
 
             # Create distrib
             - name: Output distrib binaries via xmake

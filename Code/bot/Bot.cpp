@@ -340,6 +340,8 @@ void Bot::OnDisconnected(EDisconnectReason aReason)
     // for: after reconnecting, anything the bot knows must have arrived again.
     m_actors.clear();
     m_players.clear();
+    m_poseMarks.clear();
+    spdlog::info("[pose] receive cache and freshness marks cleared on disconnect");
     m_downStates.clear();
     m_respawnPoints.clear();
     m_lastRefusal = "none";
@@ -741,7 +743,9 @@ void Bot::SendMovement() noexcept
     movement.CellId = m_cell;
     movement.WorldSpaceId = m_worldSpace;
     movement.Direction = 0.f;
-    if (m_holdPose && m_lastReplayedPose.HasData)
+    if (m_poseFixture)
+        update.UpdatedVRPose = PoseFixture::Make(*m_poseFixture);
+    else if (m_holdPose && m_lastReplayedPose.HasData)
         update.UpdatedVRPose = m_lastReplayedPose;
 
     // Unreliable, as the game's client sends movement: the next one, 50 ms later, makes good a lost one.
@@ -1096,6 +1100,10 @@ void Bot::HandleMessage(const ServerMessage& acMessage) noexcept
             {
                 pActor->Position = FromNet(entry.second.UpdatedMovement.Position);
                 pActor->PositionKnown = true;
+                pActor->ReceivedPose.Receive(entry.second.UpdatedVRPose);
+                // Globally monotonic even when a spawn replaces a character or we reconnect.
+                pActor->ReceivedPose.Count = ++m_poseReceiveSequence;
+                pActor->PoseReceivedAt = Clock::now();
                 if (entry.second.UpdatedVRPose.HasData)
                     pActor->BonesAt = Clock::now();
             }
@@ -2657,6 +2665,35 @@ bool Bot::StepCommand(const Command& acCommand, const bool aFirstTick) noexcept
         return true;
     }
 
+    // posefixture a|b|none|recovery: use the ordinary held-pose movement path with
+    // recognizable synthetic data; none explicitly sends HasData=false.
+    if (name == "posefixture")
+    {
+        const auto phase = args.size() == 1 ? PoseFixture::Parse(args[0]) : std::nullopt;
+        if (!phase)
+        {
+            m_failures.push_back(fmt::format("line {}: posefixture needs a|b|none|recovery", acCommand.Line));
+            return true;
+        }
+        m_poseFixture = phase;
+        SendMovement();
+        spdlog::info("[pose] sending fixture {} through ClientReferencesMoveRequest", args[0]);
+        return true;
+    }
+
+    // Mark by exact player name; no observation is invented if the player is absent.
+    if (name == "posemark")
+    {
+        if (args.size() != 1)
+            m_failures.push_back(fmt::format("line {}: posemark needs a player name", acCommand.Line));
+        else
+        {
+            m_poseMarks[args[0]] = m_poseReceiveSequence;
+            spdlog::info("[pose] marked {} after receive sequence {}", args[0], m_poseReceiveSequence);
+        }
+        return true;
+    }
+
     // "holdpose on|off": after a replay, keep sending the last VR pose it sent with this character's movement, so the
     // copy stays posed for as long as a test needs (the replayed stream alone ends, and the copy's pose with it).
     if (name == "holdpose")
@@ -3456,6 +3493,49 @@ std::optional<bool> Bot::Evaluate(const std::vector<std::string>& acArgs, std::s
         }
         aOutWhy = fmt::format("{:X} dead={}", id, pActor->Dead);
         return what == "dead" ? pActor->Dead : !pActor->Dead;
+    }
+
+    if (what == "pose")
+    {
+        // pose <exact player name> a|b|none|recovery; the named spawned actor,
+        // not our generated fixture, is the only source of actual values.
+        const auto phase = acArgs.size() == 3 ? PoseFixture::Parse(acArgs[2]) : std::nullopt;
+        if (!phase)
+            return std::nullopt;
+        const auto mark = m_poseMarks.find(acArgs[1]);
+        if (mark == m_poseMarks.end())
+        {
+            aOutWhy = "posemark is required before checking received data";
+            return false;
+        }
+        const KnownPlayer* player = nullptr;
+        for (const auto& candidate : m_players)
+        {
+            if (candidate.Name != acArgs[1] || candidate.PlayerId == m_playerId || candidate.ServerId == m_serverId)
+                continue;
+            if (player)
+            {
+                aOutWhy = "remote player name is ambiguous";
+                return false;
+            }
+            player = &candidate;
+        }
+        const auto actor = player ? findActor(player->ServerId) : nullptr;
+        if (!actor || !actor->IsPlayer || actor->OwnedByUs || actor->PoseReceivedAt == Clock::time_point{})
+        {
+            aOutWhy = "no received movement for the named remote player character";
+            return false;
+        }
+        const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - actor->PoseReceivedAt).count();
+        const auto& pose = actor->ReceivedPose.Last;
+        const bool hasBones = pose.HasData && !pose.NoBones;
+        aOutWhy = fmt::format("received {} player {} actor {:X} seq {} > mark {}, age {}ms; HasData={} head={:08X} leftarm={:08X} rightarm={:08X} scale={} hips={},{},{} hands={},{},{} / {},{},{}; full wire-field comparison",
+            player->Name, player->PlayerId, player->ServerId, actor->ReceivedPose.Count, mark->second, age, pose.HasData,
+            hasBones ? pose.Bones[VRPose::kHead].Pack() : 0, hasBones ? pose.Bones[VRPose::kLeftUpperArm].Pack() : 0,
+            hasBones ? pose.Bones[VRPose::kRightUpperArm].Pack() : 0, pose.RootScale,
+            pose.HipOffset[0], pose.HipOffset[1], pose.HipOffset[2], pose.LeftHandOffset[0], pose.LeftHandOffset[1], pose.LeftHandOffset[2],
+            pose.RightHandOffset[0], pose.RightHandOffset[1], pose.RightHandOffset[2]);
+        return age <= 2000 && actor->ReceivedPose.Matches(*phase, mark->second);
     }
 
     if (what == "known")

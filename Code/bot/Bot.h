@@ -7,6 +7,7 @@
 // already accepts.
 
 #include <EncodingPch.h>
+#include "PoseFixture.h"
 
 // The transport's headers expect the standard clocks to be declared already.
 #include <chrono>
@@ -96,6 +97,9 @@ struct KnownActor
     //! What this actor was last seen equipping, by base form id. Empty once it unequips. Last, so that
     //! KnownActor{serverId} still initialises the id.
     std::vector<uint32_t> Equipped;
+    //! Raw movement pose received from the server, including HasData=false transitions.
+    PoseFixture::Observation ReceivedPose{};
+    std::chrono::steady_clock::time_point PoseReceivedAt{};
 };
 
 //! What a run is allowed to record. A test that collects everything drowns in movement, so a script says what it
@@ -287,6 +291,9 @@ private:
     mutable uint32_t m_lastOtherPlayerId{0};
     //! `markpos <who>`: where that actor was reported when the script marked it, by server id, for `movedfrommark`.
     std::map<uint32_t, glm::vec3> m_positionMarks;
+    //! posemark uses a global receive sequence so replacing a character cannot reuse a mark.
+    uint64_t m_poseReceiveSequence{};
+    std::map<std::string, uint64_t> m_poseMarks;
     //! How many times the server sent each downed state for each player id, for `downcount`.
     std::map<uint32_t, std::map<std::string, int>> m_downCounts;
     // Quest updates the server relayed to this bot, by quest base id (`questupdates`).
@@ -382,6 +389,7 @@ private:
     //! replay ends, so the copy stays posed (a stream without a pose hands the copy back to its animation).
     bool m_holdPose{false};
     VRPose m_lastReplayedPose{};
+    std::optional<PoseFixture::Phase> m_poseFixture;
     //! Where the NPC this bot registered stands, which is where a replay for it starts from.
     glm::vec3 m_npcPosition{};
     //! The base form of the last character captured, as the server names it: what "npc captured" registers a
