@@ -23,6 +23,19 @@
         "CONNECTION": "Could not connect to the specified server. Please make sure you've entered the correct address and that you're not experiencing network issues",
         "VERSION_MISMATCH": "You cannot connect to the server because it does not have the same version of Skyrim Together as you.",
         "INVALID_ADDRESS": "The address is of invalid format."
+      },
+      "SAVED": {
+        "TITLE": "Saved servers",
+        "LAST_USED": "Last used",
+        "EDIT": "Edit",
+        "EMPTY": "No saved servers yet.",
+        "NEW": "New server",
+        "IMPORT": "Import from connect.txt",
+        "NAME": "Server name (optional)",
+        "PASSWORD_HINT": "Leave the password blank to keep it for this address. Uncheck Save password to remove it.",
+        "SAVE": "Save server",
+        "UPDATE": "Update saved server",
+        "REMOVE": "Remove saved server"
       }
     },
     "DISCONNECT": {

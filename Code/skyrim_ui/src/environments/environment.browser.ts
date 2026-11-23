@@ -11,7 +11,6 @@ export const environment = {
   url: 'localhost:4200',
   overwriteVersion: "v1.3.2",
   chatMessageLengthLimit: 512,
-  nbReconnectionAttempts: 5,
 
   providers: [
     {

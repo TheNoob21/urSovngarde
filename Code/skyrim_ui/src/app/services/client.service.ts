@@ -9,11 +9,29 @@ import { ChatService } from './chat.service';
 import { ErrorEvents, ErrorService } from './error.service';
 import { LoadingService } from './loading.service';
 
+export interface SavedServer {
+  id: number;
+  name: string;
+  address: string;
+  hasPassword: boolean;
+}
+
+export interface SavedServerList {
+  request?: number;
+  savedId?: number;
+  servers: SavedServer[];
+  lastUsed: number;
+  error: string;
+  status?: number;
+}
+
 /** Client game service. */
 @Injectable({
   providedIn: 'root',
 })
 export class ClientService implements OnDestroy {
+  public savedServers = new BehaviorSubject<SavedServerList>({ servers: [], lastUsed: 0, error: '' });
+
   /** Initialization done. */
   public initDone = new AsyncSubject<undefined>();
 
@@ -39,6 +57,9 @@ export class ClientService implements OnDestroy {
 
   /** Client version setting. */
   public versionSet = new BehaviorSubject(environment.game ? '' : 'browser');
+
+  /** Client protocol, empty when unknown (the page in a browser). */
+  public protocolSet = new BehaviorSubject('');
 
   /** Debug state change. */
   public debugStateChange = new Subject<boolean>();
@@ -76,7 +97,7 @@ export class ClientService implements OnDestroy {
   public protocolMismatchChange = new BehaviorSubject(false);
 
   /** Receive error from core */
-  public triggerError = new ReplaySubject<ErrorEvents>(1);
+  public triggerError = new ReplaySubject<ErrorEvents | string>(1);
 
   /** Used purely for debugging. */
   public debugChange = new Subject<void>();
@@ -102,11 +123,7 @@ export class ClientService implements OnDestroy {
 
   private _host: string;
 
-  private _port: number;
-
-  private _password: string;
-
-  private _remainingReconnectionAttempt = environment.nbReconnectionAttempts;
+  private migratingSavedServer = false;
 
   /**
    * Instantiate.
@@ -118,6 +135,32 @@ export class ClientService implements OnDestroy {
     private readonly translocoService: TranslocoService,
     private readonly chatService: ChatService,
   ) {
+    skyrimtogether.on('connectionStatus', status => this.zone.run(() => this.applyConnectionStatus(status)));
+    skyrimtogether.on('savedServers', (text: string) => {
+      this.zone.run(() => {
+        const list = JSON.parse(text) as SavedServerList;
+        this.savedServers.next(list);
+        if (typeof list.status === 'number') this.applyConnectionStatus(list.status);
+        if (this.migratingSavedServer) {
+          if (list.request !== -1) return;
+          this.migratingSavedServer = false;
+          if (!list.error && list.savedId) localStorage.setItem('native_saved_servers_migrated', '1');
+          return;
+        }
+        if (environment.game && !list.error && !localStorage.getItem('native_saved_servers_migrated')) {
+          const address = localStorage.getItem('last_connected_address') || '';
+          const endpoint = (value: string) => value.includes(':') ? value : value + ':10578';
+          if (!address || list.servers.some(server => endpoint(server.address) === endpoint(address))) {
+            localStorage.setItem('native_saved_servers_migrated', '1');
+            this.migratingSavedServer = false;
+          } else {
+            const password = localStorage.getItem('last_connected_password') || '';
+            this.migratingSavedServer = true;
+            skyrimtogether.saveServer(0, address, address, password, !!password, -1);
+          }
+        }
+      });
+    });
     skyrimtogether.on('init', this.onInit.bind(this));
     skyrimtogether.on('activate', this.onActivate.bind(this));
     skyrimtogether.on('deactivate', this.onDeactivate.bind(this));
@@ -161,6 +204,8 @@ export class ClientService implements OnDestroy {
    * Dispose.
    */
   public ngOnDestroy(): void {
+    skyrimtogether.off('connectionStatus');
+    skyrimtogether.off('savedServers');
     skyrimtogether.off('init');
     skyrimtogether.off('activate');
     skyrimtogether.off('deactivate');
@@ -202,16 +247,40 @@ export class ClientService implements OnDestroy {
     skyrimtogether.connect(host, port, password);
     this.isConnectionInProgressChange.next(true);
     this._host = host;
-    this._port = port;
-    this._password = password;
+  }
+
+  private applyConnectionStatus(status: number): void {
+    this.isConnectionInProgressChange.next(status === 1 || status === 3);
+  }
+
+  public refreshSavedServers(): void {
+    skyrimtogether.getSavedServers();
+  }
+
+  public connectSavedServer(id: number, password?: string): void {
+    const server = this.savedServers.value.servers.find(item => item.id === id);
+    if (!server) {
+      this.refreshSavedServers();
+      return;
+    }
+    this.joiningFriend(server.name);
+    if (password === undefined) skyrimtogether.connectSavedServer(id);
+    else skyrimtogether.connectSavedServer(id, password, server.address);
+  }
+
+  public connectLastUsedServer(): void {
+    const server = this.savedServers.value.servers.find(item => item.id === this.savedServers.value.lastUsed);
+    if (server) {
+      this.connectSavedServer(server.id);
+    } else {
+      skyrimtogether.connectLastUsedServer();
+    }
   }
 
   /** The launcher set a friend's server and the game connects to it by itself; the menu names the friend meanwhile. */
   public joiningFriend(name: string): void {
     this.isConnectionInProgressChange.next(true);
     this._host = name;
-    this._port = 0;
-    this._password = '';
   }
 
   /** The address of the last connection this menu started. */
@@ -224,7 +293,6 @@ export class ClientService implements OnDestroy {
    */
   public disconnect(): void {
     skyrimtogether.disconnect();
-    this._remainingReconnectionAttempt = 0;
   }
 
   /**
@@ -288,7 +356,6 @@ export class ClientService implements OnDestroy {
    */
   public reconnect(): void {
     skyrimtogether.reconnect();
-    this._remainingReconnectionAttempt = 0;
   }
 
   public teleportToPlayer(playerId: number): void {
@@ -386,7 +453,6 @@ export class ClientService implements OnDestroy {
    */
   private onConnect(): void {
     this.zone.run(async () => {
-      this._remainingReconnectionAttempt = environment.nbReconnectionAttempts;
       this.isConnectionInProgressChange.next(false);
       this.connectionStateChange.next(true);
 
@@ -397,20 +463,13 @@ export class ClientService implements OnDestroy {
   /**
    * Called when a connection is terminated.
    */
-  private onDisconnect(isError: boolean): void {
-    void this.zone.run(async () => {
+  private onDisconnect(retrying = false): void {
+    this.zone.run(() => {
       this.localPlayerId = undefined;
-      // In this order: a launcher join going on sets "in progress" again when told of the disconnection.
-      this.isConnectionInProgressChange.next(false);
+      this.isConnectionInProgressChange.next(retrying);
+      if (retrying && !this.connectionStateChange.value) return;
       this.connectionStateChange.next(false);
-
-      if (isError && this._remainingReconnectionAttempt > 0) {
-        this._remainingReconnectionAttempt--;
-        this.chatService.pushSystemMessage('SERVICE.CLIENT.CONNECTION_LOST');
-        this.connect(this._host, this._port, this._password);
-      } else {
-        this.chatService.pushSystemMessage('SERVICE.CLIENT.DISCONNECTED');
-      }
+      this.chatService.pushSystemMessage(retrying ? 'SERVICE.CLIENT.CONNECTION_LOST' : 'SERVICE.CLIENT.DISCONNECTED');
     });
   }
 
@@ -430,10 +489,11 @@ export class ClientService implements OnDestroy {
    *
    * @param version Game's version.
    */
-  private onSetVersion(version: string): void {
+  private onSetVersion(version: string, protocol?: string): void {
     version = environment.overwriteVersion || version;
 
     this.zone.run(() => {
+      this.protocolSet.next(protocol ?? '');
       this.versionSet.next(version);
     });
   }
@@ -595,7 +655,7 @@ export class ClientService implements OnDestroy {
 
   private onTriggerError(rawError: string) {
     this.zone.run(() => {
-      const error = JSON.parse(rawError) as ErrorEvents;
+      const error = JSON.parse(rawError) as ErrorEvents | string;
       this.triggerError.next(error);
       void this.errorService.setError(error);
     });

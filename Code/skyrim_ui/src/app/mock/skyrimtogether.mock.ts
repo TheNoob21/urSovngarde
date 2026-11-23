@@ -31,6 +31,47 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
   private pendingConnect: ReturnType<typeof setTimeout> | undefined;
   public readonly players$ = playerStore.pipe(selectAllEntities());
 
+  private savedServerList: Array<{ id: number; name: string; address: string; hasPassword: boolean; password: string }> = [];
+  private lastUsedServer = 0;
+  private nextSavedId = 1;
+  private pendingSavedId = 0;
+
+  getSavedServers(request = 0, savedId = 0): void {
+    this.emit('savedServers', JSON.stringify({
+      servers: this.savedServerList.map(({ password, ...server }) => server),
+      request, savedId, lastUsed: this.lastUsedServer,
+      error: '',
+    }));
+  }
+
+  saveServer(id: number, name: string, address: string, password: string, remember: boolean, request = 0): void {
+    const current = this.savedServerList.find(server => server.id === id);
+    const sameEndpoint = current && (current.address.includes(':') ? current.address : current.address + ':10578') === (address.includes(':') ? address : address + ':10578');
+    const server = { id: id || this.nextSavedId++, name, address, hasPassword: remember, password: remember ? password || (sameEndpoint ? current.password : '') : '' };
+    if (current) Object.assign(current, server);
+    else this.savedServerList.push(server);
+    this.getSavedServers(request, server.id);
+  }
+
+  removeSavedServer(id: number): void {
+    this.savedServerList = this.savedServerList.filter(server => server.id !== id);
+    if (this.lastUsedServer === id) this.lastUsedServer = 0;
+    this.getSavedServers();
+  }
+
+  importSavedServer(): void { this.getSavedServers(); }
+
+  connectSavedServer(id: number, password?: string, expectedAddress?: string): void {
+    const server = this.savedServerList.find(item => item.id === id);
+    if (server && (password === undefined || expectedAddress === server.address)) {
+      const endpoint = server.address.match(/^(.+?)(?::([0-9]+))?$/);
+      this.pendingSavedId = id;
+      this.connect(endpoint[1], Number(endpoint[2]) || 10578, password === undefined ? server.password : password);
+    }
+  }
+
+  connectLastUsedServer(): void { this.connectSavedServer(this.lastUsedServer); }
+
   connect(host: string, port: number, password: string): void {
     if (!this.connected) {
       let error: ErrorEvents | boolean;
@@ -77,8 +118,10 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
       clearTimeout(this.pendingConnect);
       this.pendingConnect = setTimeout(() => {
         this.pendingConnect = undefined;
-        this.emit(!!error ? 'disconnect' : 'connect');
         this.connected = !error;
+        if (!error && this.pendingSavedId) this.lastUsedServer = this.pendingSavedId;
+        this.pendingSavedId = 0;
+        this.emit(!!error ? 'disconnect' : 'connect');
         if (error && typeof error !== 'boolean') {
           this.emit('triggerError', JSON.stringify(error));
         } else {
@@ -99,6 +142,7 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
   }
 
   disconnect(): void {
+    this.pendingSavedId = 0;
     if (this.pendingConnect) {
       clearTimeout(this.pendingConnect);
       this.pendingConnect = undefined;

@@ -29,7 +29,6 @@ import {
   fontSizeToPixels,
 } from '../../services/setting.service';
 import { Sound, SoundService } from '../../services/sound.service';
-import { StoreService } from '../../services/store.service';
 import { UiRepository } from '../../store/ui.repository';
 import { ChatComponent } from '../chat/chat.component';
 import { GroupComponent } from '../group/group.component';
@@ -140,7 +139,6 @@ export class RootComponent implements OnInit {
     private readonly groupService: GroupService,
     private readonly playerListService: PlayerListService,
     private readonly popupNotificationService: PopupNotificationService,
-    private readonly storeService: StoreService,
     public readonly overlay: Overlay, // used for mockup
     private readonly voiceService: VoiceService, // sends the voice settings to the game from the start
     private readonly joinService: JoinService,
@@ -152,7 +150,8 @@ export class RootComponent implements OnInit {
 
   /** The last server this menu joined, for the Rejoin button. */
   public get lastServer(): string {
-    return this.storeService.get('last_joined_address', '');
+    const list = this.client.savedServers.value;
+    return list.servers.find(server => server.id === list.lastUsed)?.name || '';
   }
 
   public ngOnInit(): void {
@@ -176,6 +175,9 @@ export class RootComponent implements OnInit {
     this.client.activationStateChange
       .pipe(takeUntil(this.destroy$))
       .subscribe(state => {
+        if (state) {
+          this.client.refreshSavedServers();
+        }
         if (
           this.client.inGameStateChange.getValue() &&
           state &&
@@ -232,7 +234,10 @@ export class RootComponent implements OnInit {
   }
 
   public rejoin() {
-    this.uiRepository.openConnectNow(this.lastServer);
+    const list = this.client.savedServers.value;
+    const server = list.servers.find(item => item.id === list.lastUsed);
+    if (server && !server.hasPassword) this.uiRepository.openSavedServer(server.id);
+    else this.client.connectLastUsedServer();
     this.sound.play(Sound.Focus);
   }
 

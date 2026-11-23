@@ -9,7 +9,7 @@ interface UiProps {
   connectIp: string;
   connectPort: number;
   connectName: string;
-  connectNow: boolean | string;
+  connectNow: boolean | string | { savedId: number };
   hideVersionMismatchedServers: boolean;
   hideFullServers: boolean;
   hidePasswordProtectedServers: boolean;
@@ -126,6 +126,10 @@ export class UiRepository {
       view: View.CONNECT,
       connectNow: address,
     }));
+  }
+
+  openSavedServer(savedId: number) {
+    uiStore.update(state => ({ ...state, view: View.CONNECT, connectNow: { savedId } }));
   }
 
   /** Whether the connect window was opened to connect at once, and to what; asking clears it. */

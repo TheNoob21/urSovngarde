@@ -6,6 +6,20 @@
 
 <ng-template #form>
   <div class="container">
+    <section class="saved-servers" *ngIf="savedServers$ | async as saved" [attr.aria-label]="'COMPONENT.CONNECT.SAVED.TITLE' | transloco">
+      <h3>{{ 'COMPONENT.CONNECT.SAVED.TITLE' | transloco }}</h3>
+      <p *ngIf="saved.error" role="alert">{{ saved.error }}</p>
+      <div class="saved-server" *ngFor="let server of saved.servers">
+        <button class="menu-button compact" [disabled]="!!pendingSave" (click)="joinSaved(server)">
+          {{ server.name }}<span *ngIf="saved.lastUsed === server.id"> ({{ 'COMPONENT.CONNECT.SAVED.LAST_USED' | transloco }})</span>
+        </button>
+        <button class="menu-button compact" (click)="editSaved(server)" [attr.aria-label]="('COMPONENT.CONNECT.SAVED.EDIT' | transloco) + ' ' + server.name">{{ 'COMPONENT.CONNECT.SAVED.EDIT' | transloco }}</button>
+      </div>
+      <p *ngIf="!saved.servers.length">{{ 'COMPONENT.CONNECT.SAVED.EMPTY' | transloco }}</p>
+      <button class="menu-button compact" (click)="newServer()">{{ 'COMPONENT.CONNECT.SAVED.NEW' | transloco }}</button>
+      <button class="menu-button compact" (click)="importServer()">{{ 'COMPONENT.CONNECT.SAVED.IMPORT' | transloco }}</button>
+    </section>
+
     <div class="instructions">
       <p [innerHtml]="'COMPONENT.CONNECT.INFO.SERVER_ADDRESS' | transloco"></p>
       <p class="warning">
@@ -13,9 +27,11 @@
       </p>
     </div>
 
+    <input type="text" [attr.aria-label]="'COMPONENT.CONNECT.SAVED.NAME' | transloco" [placeholder]="'COMPONENT.CONNECT.SAVED.NAME' | transloco" [(ngModel)]="serverName" spellcheck="false" />
     <input
       #input
       type="text"
+      [attr.aria-label]="'COMPONENT.CONNECT.ADDRESS' | transloco"
       [placeholder]="'COMPONENT.CONNECT.ADDRESS' | transloco"
       (keydown.enter)="connect()"
       [(ngModel)]="address"
@@ -23,6 +39,7 @@
     />
     <input
       [type]="hidePassword ? 'password' : 'text'"
+      [attr.aria-label]="'COMPONENT.CONNECT.PASSWORD' | transloco"
       [placeholder]="'COMPONENT.CONNECT.PASSWORD' | transloco"
       spellcheck="false"
       [(ngModel)]="password"
@@ -43,10 +60,16 @@
       </span>
     </div>
 
+    <p *ngIf="selectedServerId && savePassword">{{ 'COMPONENT.CONNECT.SAVED.PASSWORD_HINT' | transloco }}</p>
+    <div class="saved-actions">
+      <button class="menu-button compact" [disabled]="!address.trim() || !!pendingSave" (click)="saveServer()">{{ (selectedServerId ? 'COMPONENT.CONNECT.SAVED.UPDATE' : 'COMPONENT.CONNECT.SAVED.SAVE') | transloco }}</button>
+      <button class="menu-button compact" *ngIf="selectedServerId" (click)="removeSaved()">{{ 'COMPONENT.CONNECT.SAVED.REMOVE' | transloco }}</button>
+    </div>
+
     <app-action-buttons>
       <button
         class="menu-button compact primary"
-        [disabled]="!address.trim()"
+        [disabled]="!address.trim() || !!pendingSave"
         (click)="connect()"
       >
         {{ 'COMPONENT.CONNECT.CONNECT' | transloco }}

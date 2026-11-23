@@ -32,6 +32,7 @@ import {
   SettingService,
 } from '../../services/setting.service';
 import { Sound, SoundService } from '../../services/sound.service';
+import { isJoinableBuild } from '../../services/server-build';
 import { StoreService } from '../../services/store.service';
 import { UiRepository } from '../../store/ui.repository';
 import { SortOrder } from '../order/order.component';
@@ -108,20 +109,27 @@ export class ServerListComponent {
           this.loader.serverlist.track(),
         ),
       ),
-      combineLatestWith(this.favoriteServers, this.clientService.versionSet),
-      map(([servers, favorites, clientVersion]) => {
-        return servers.map(server => {
-          const shortVersion = this.getServerVersion(server);
-          const shortClientVersion = this.getClientVersion(clientVersion);
-          return {
-            ...server,
-            hasPassword: server.pass,
-            isFavorite: !!favorites[`${server.ip}:${server.port}`],
-            isFull: server.player_count >= server.max_player_count,
-            shortVersion,
-            isCompatible: shortVersion === shortClientVersion,
-          };
-        });
+      combineLatestWith(
+        this.favoriteServers,
+        this.clientService.versionSet,
+        this.clientService.protocolSet,
+      ),
+      map(([servers, favorites, clientVersion, protocol]) => {
+        // Only servers this build can join are listed.
+        return servers
+          .filter(server => isJoinableBuild(server.tags, protocol))
+          .map(server => {
+            const shortVersion = this.getServerVersion(server);
+            const shortClientVersion = this.getClientVersion(clientVersion);
+            return {
+              ...server,
+              hasPassword: server.pass,
+              isFavorite: !!favorites[`${server.ip}:${server.port}`],
+              isFull: server.player_count >= server.max_player_count,
+              shortVersion,
+              isCompatible: shortVersion === shortClientVersion,
+            };
+          });
       }),
       share({
         connector: () => new ReplaySubject(1),

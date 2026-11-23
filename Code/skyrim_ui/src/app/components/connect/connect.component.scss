@@ -69,3 +69,7 @@ hr {
   background-color: grey;
   height: 1px;
 }
+
+.saved-servers { width: 100%; max-height: 15em; overflow-y: auto; }
+.saved-server, .saved-actions { display: flex; gap: 0.5em; width: 100%; }
+.saved-server > :first-child { flex: 1; }

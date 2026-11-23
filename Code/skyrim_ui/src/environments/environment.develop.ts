@@ -7,7 +7,6 @@ export const environment = {
   url: 'skyrim-reborn-list.skyrim-together.com',
   overwriteVersion: "",
   chatMessageLengthLimit: 512,
-  nbReconnectionAttempts: 5,
 
   providers: [] as Provider[],
 };

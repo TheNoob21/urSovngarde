@@ -38,13 +38,13 @@ declare namespace SkyrimTogetherTypes {
   type ConnectCallback = () => void;
 
   /** Disconnection callback */
-  type DisconnectCallback = (isError: boolean) => void;
+  type DisconnectCallback = (retrying?: boolean) => void;
 
   /** Name change callback */
   type SetNameCallback = (name: string) => void;
 
   /** Version set callback */
-  type SetVersionCallback = (version: string) => void;
+  type SetVersionCallback = (version: string, protocol?: string) => void;
 
   /**  */
   type OnDebugCallback = (isDebug: boolean) => void;
@@ -110,6 +110,17 @@ declare const skyrimtogether: SkyrimTogether;
 
 /** Global Skyrim: Together object type. */
 interface SkyrimTogether {
+  on(event: 'connectionStatus', callback: (status: number) => void): void;
+  off(event: 'connectionStatus', callback?: (status: number) => void): void;
+  on(event: 'savedServers', callback: (text: string) => void): void;
+  off(event: 'savedServers', callback?: (text: string) => void): void;
+  getSavedServers(): void;
+  saveServer(id: number, name: string, address: string, password: string, remember: boolean, request?: number): void;
+  removeSavedServer(id: number): void;
+  importSavedServer(): void;
+  connectSavedServer(id: number, password?: string, expectedAddress?: string): void;
+  connectLastUsedServer(): void;
+
   /** Add listener to when the UI is first initialized. */
   on(event: 'init', callback: SkyrimTogetherTypes.InitCallback): void;
 
