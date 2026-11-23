@@ -1,5 +1,7 @@
 """Holds the game's own input back while the in-game menu is open, without pausing the game.
 
+Requires an upstream test build with menu proof exports. For public builds, use the menu controls in the play-test guide.
+
     python Tools/VR/live-menu-hold.py           the VR game (headless.ps1 up), once its panel can be shown
     python Tools/VR/live-menu-hold.py --flat    the flat game (Tools/Flat/flat-rig.ps1 up), alone on the PC
 
@@ -38,6 +40,7 @@ def walk(game):
 
 
 def main():
+    menu.require_upstream_test_build()
     results = []
 
     def check(name, ok, detail=''):

@@ -11,10 +11,51 @@ $staging = Join-Path $env:TEMP "urSovngarde-logs-$stamp"
 $zip = Join-Path ([Environment]::GetFolderPath('Desktop')) "urSovngarde-logs-$stamp.zip"
 New-Item -ItemType Directory -Force $staging | Out-Null
 
-function Add-File([string]$Path, [string]$Name = (Split-Path $Path -Leaf)) {
+function Add-File([string]$Path, [string]$Name = (Split-Path $Path -Leaf), [switch]$SharedSource) {
     if (Test-Path $Path) {
-        Copy-Item $Path (Join-Path $staging $Name)
+        if ($SharedSource) {
+            $in = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            try {
+                $out = [IO.File]::Create((Join-Path $staging $Name))
+                try { $in.CopyTo($out) } finally { $out.Dispose() }
+            } finally { $in.Dispose() }
+        } else {
+            Copy-Item $Path (Join-Path $staging $Name)
+        }
         Write-Host "  + $Name"
+    }
+}
+
+# Observe only files beside the collector. A hash identifies the bytes read; it does not
+# establish which source revision produced them. Never include file paths or binary contents.
+function Get-BinaryIdentityManifest([string]$Folder) {
+    $entries = foreach ($name in @('urSovngarde.exe', 'urSovngardeSE.exe', 'SkyrimTogether.exe', 'TPProcess.exe', 'EarlyLoad.dll', 'urSovngardeServer.exe', 'STServer.dll')) {
+        $entry = [ordered]@{ filename = $name; status = 'unreadable'; size = $null; sha256 = $null }
+        $stream = $null
+        $algorithm = $null
+        try {
+            $stream = [IO.File]::Open((Join-Path $Folder $name), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            $entry.size = $stream.Length
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            $entry.sha256 = ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+            $entry.status = 'present'
+        } catch [IO.FileNotFoundException] {
+            $entry.status = 'missing'
+        } catch [IO.DirectoryNotFoundException] {
+            $entry.status = 'missing'
+        } catch {
+            # Do not expose exception text: it can contain personal paths.
+            $entry.size = $null
+            $entry.sha256 = $null
+        } finally {
+            if ($algorithm) { $algorithm.Dispose() }
+            if ($stream) { $stream.Dispose() }
+        }
+        [pscustomobject]$entry
+    }
+    [pscustomobject]@{
+        description = 'Observed files beside the collector; hashes do not establish source-to-binary provenance.'
+        binaries = @($entries)
     }
 }
 
@@ -52,8 +93,13 @@ Get-ChildItem $skse -Filter 'crash-*.log' -ErrorAction SilentlyContinue |
 
 # Newest crash dump from the last day. They are large, but compress well.
 $dumps = @(Get-ChildItem $ClientFolder -Filter 'crash_*.dmp' -ErrorAction SilentlyContinue)
-# Our crash handler writes its small dumps next to the client log.
-$dumps += @(Get-ChildItem (Join-Path $ClientFolder 'logs') -Filter 'crash_*.dmp' -ErrorAction SilentlyContinue)
+# Include both the legacy log folder and first-party per-run folders.
+$logs = Join-Path $ClientFolder 'logs'
+$dumps += @(Get-ChildItem $logs -Filter 'crash_*.dmp' -File -ErrorAction SilentlyContinue)
+$crashRuns = @(Get-ChildItem $logs -Filter 'crash-run-*' -Directory -ErrorAction SilentlyContinue)
+foreach ($run in $crashRuns) {
+    $dumps += @(Get-ChildItem $run.FullName -Filter 'crash_UTC_*.dmp' -File -ErrorAction SilentlyContinue)
+}
 $overwrite = Join-Path (Split-Path (Split-Path $ClientFolder -Parent) -Parent) 'overwrite\Root'
 $dumps += @(Get-ChildItem $overwrite -Filter 'crash_*.dmp' -ErrorAction SilentlyContinue)
 # Two, not one: a crash and the one before it are often the pair that tells them apart. They are large, so not
@@ -61,12 +107,26 @@ $dumps += @(Get-ChildItem $overwrite -Filter 'crash_*.dmp' -ErrorAction Silently
 $dumps = @($dumps | Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-1) })
 $small = @($dumps | Where-Object { $_.Name -like '*.small.dmp' })
 if ($small.Count -gt 0) { $dumps = $small }
-# The freeze watchdog's dump of every thread (one file, the latest freeze), when it is from the last day.
-$freeze = Get-Item (Join-Path $ClientFolder 'logs\freeze.small.dmp') -ErrorAction SilentlyContinue
-if ($freeze -and $freeze.LastWriteTime -gt (Get-Date).AddDays(-1)) { Add-File $freeze.FullName }
+# The latest freeze dump and process-end record from the last day, including legacy locations.
+$freeze = @(Get-Item (Join-Path $logs 'freeze.small.dmp') -ErrorAction SilentlyContinue)
+$processEnd = @(Get-Item (Join-Path $logs 'process-end.log') -ErrorAction SilentlyContinue)
+foreach ($run in $crashRuns) {
+    $freeze += @(Get-Item (Join-Path $run.FullName 'freeze.small.dmp') -ErrorAction SilentlyContinue)
+    $processEnd += @(Get-Item (Join-Path $run.FullName 'process-end.log') -ErrorAction SilentlyContinue)
+}
+$freeze | Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-1) } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1 | ForEach-Object { Add-File $_.FullName -SharedSource }
+$processEnd | Where-Object { $_.Length -gt 0 -and $_.LastWriteTime -gt (Get-Date).AddDays(-1) } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1 | ForEach-Object { Add-File $_.FullName -SharedSource }
+$dumpNames = @{}
 $dumps |
     Sort-Object LastWriteTime -Descending | Select-Object -First 2 |
-    ForEach-Object { Add-File $_.FullName }
+    ForEach-Object {
+        $name = $_.Name
+        if ($dumpNames.ContainsKey($name)) { $name = $name -replace '\.dmp$', '-2.dmp' }
+        $dumpNames[$_.Name] = $true
+        Add-File $_.FullName $name -SharedSource
+    }
 
 # Build of the client, from the first log line that names it.
 $log = Join-Path $ClientFolder 'logs\tp_client.log'
@@ -80,6 +140,11 @@ if (-not (Get-ChildItem $staging)) {
     Remove-Item $staging -Recurse -Force
     exit 1
 }
+
+# Add this only after checking for logs: binary metadata alone is not a log bundle.
+Get-BinaryIdentityManifest $ClientFolder | ConvertTo-Json -Depth 4 |
+    Set-Content (Join-Path $staging 'binary-identities.json') -Encoding UTF8
+Write-Host '  + binary-identities.json'
 
 # What Windows itself recorded in the last day: crash events, Windows Error Reporting files, display driver resets.
 # A heap corruption (0xc0000374) ends the game without our crash report; only Windows records it.

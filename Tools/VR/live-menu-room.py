@@ -1,5 +1,7 @@
 """The in-game menu panel stays where it opened while the head turns, and shows where the hand points, as a player sees it.
 
+Requires an upstream test build with menu proof exports. For public builds, use the menu controls in the play-test guide.
+
     python Tools/VR/live-menu-room.py
 
 The VR rig must be up (headless.ps1 up) in a loaded save. DevBench holds the headset at 1.6 m looking ahead while the panel
@@ -50,6 +52,7 @@ def drawn(log, what, colour):
 
 
 def main():
+    laser.require_upstream_test_build()
     results = []
     skipped = []
 

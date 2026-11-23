@@ -32,14 +32,19 @@ if (-not $ClientFolder) {
 # Nor anything set aside before a change: `.old-*`, or `.before-*` (`UI.before-logo`, a whole old menu, 2026-10-09).
 # A program or script set aside under any other name keeps its extension in the middle (`urSovngarde.exe.red-20261017-1204`).
 # A folder of the client never has a dot in its name, so one that has is a set-aside copy too.
-$skip = @('logs', 'cache', 'SkyrimTogetherVR.exe', 'SkyrimTogetherVR.pdb', 'urSovngarde.exe', 'urSovngarde.pdb', 'urSovngardeSE.exe', 'urSovngardeSE.pdb',
-    'SkyrimTogether.exe', 'SkyrimTogether.pdb', 'EarlyLoad.dll')
+$skip = @('logs', 'cache', 'Packages', 'choose-packages.cmd', 'SkyrimTogetherVR.exe', 'SkyrimTogetherVR.pdb', 'urSovngarde.exe', 'urSovngarde.pdb', 'urSovngardeSE.exe', 'urSovngardeSE.pdb',
+    'SkyrimTogether.exe', 'SkyrimTogether.pdb', 'EarlyLoad.dll', 'urSovngardeEssentials.dll')
 $clientFiles = @(Get-ChildItem $ClientFolder | Where-Object {
     $skip -notcontains $_.Name -and
     -not ($_.PSIsContainer -and $_.Name -match '\.') -and
     $_.Name -notmatch '\.(exe|pdb|dll|ps1|bat)\.' -and
     $_.Name -notmatch '\.old|\.before-|\.running|^crash_.*\.dmp$|\.threaddiag\.|\.map$|\.zip$'
 })
+# This script makes the Vanilla base package only, which must never carry the Essentials add-on. The Essentials and Full
+# packages are made separately, and their release check refuses any Full package that does not carry
+# urSovngardeEssentials.dll identical to the Essentials package's copy: Full players need Essentials.
+$optionalDll = Get-ChildItem -LiteralPath $ClientFolder, (Join-Path $RepoRoot 'GameFiles\Skyrim') -File -Recurse | Where-Object { $_.Name -ieq 'urSovngardeEssentials.dll' } | Select-Object -First 1
+if ($optionalDll) { throw "Optional plugin found in client folder: $($optionalDll.FullName)" }
 if ($ListOnly) {
     $clientFiles | ForEach-Object { $_.Name }
     Write-Host ("{0} entries from {1}" -f $clientFiles.Count, $ClientFolder)
@@ -147,12 +152,43 @@ if (Test-Path $bridge) { Remove-Item $bridge -Recurse -Force }
 New-Item -ItemType Directory -Force $bridge | Out-Null
 Copy-Item (Join-Path $buildFolder "$exeBase.exe") $bridge
 Copy-Item (Join-Path $buildFolder "$exeBase.pdb") $bridge
-# Flat Skyrim's client never had another name.
+if ($Flat) {
+    Copy-Item (Join-Path $buildFolder 'urSovngardeSE.exe') (Join-Path $bridge 'SkyrimTogether.exe')
+    Copy-Item (Join-Path $buildFolder 'urSovngardeSE.pdb') (Join-Path $bridge 'SkyrimTogether.pdb')
+    $payload = Join-Path $bridge 'client-payload'
+    New-Item -ItemType Directory -Force $payload | Out-Null
+    $runtime = @('TPProcess.exe', 'EarlyLoad.dll', 'UI', 'assets', 'locales', 'swiftshader', 'libcef.dll',
+        'chrome_elf.dll', 'd3dcompiler_47.dll', 'dxcompiler.dll', 'dxil.dll', 'libEGL.dll', 'libGLESv2.dll', 'vk_swiftshader.dll',
+        'vk_swiftshader_icd.json', 'vulkan-1.dll', 'icudtl.dat', 'resources.pak', 'chrome_100_percent.pak',
+        'chrome_200_percent.pak', 'snapshot_blob.bin', 'v8_context_snapshot.bin', 'discord_game_sdk.dll')
+    foreach ($required in 'TPProcess.exe', 'EarlyLoad.dll', 'UI', 'assets', 'locales', 'libcef.dll', 'icudtl.dat', 'resources.pak') {
+        if (-not (Test-Path (Join-Path $client $required))) { throw "SE update is missing $required" }
+    }
+    foreach ($entry in $runtime) {
+        $source = Join-Path $client $entry
+        if (Test-Path $source) { Copy-Item $source $payload -Recurse -Force }
+    }
+    $serverUpdate = Join-Path $bridge 'Server'
+    New-Item -ItemType Directory -Force $serverUpdate | Out-Null
+    foreach ($file in 'urSovngardeServer.exe', 'STServer.dll') {
+        Copy-Item (Join-Path $server $file) $serverUpdate
+    }
+}
+Copy-Item (Join-Path $staging $modFolderName) $bridge -Recurse
+Copy-Item (Join-Path $PSScriptRoot 'update.ps1') $bridge
+Copy-Item (Join-Path $PSScriptRoot 'update.bat') $bridge
+@'
+To migrate an existing installation to Vanilla, close the game and server.
+Extract update.ps1 and update.bat into the existing tools folder and drag this zip onto update.bat.
+When prompted, enter the existing mod folder containing SkyrimTogether.esp.
+The updater moves retired project files into a backup in the tools folder and keeps saved connections and user files.
+For unattended use, run update.ps1 with -Zip <zip> -ClientFolder <tools folder> -ModFolder <mod folder>.
+If the server is installed separately, pass -ServerFolder <server folder>.
+'@ | Set-Content -Encoding ASCII (Join-Path $bridge 'README-update.txt')
 if (-not $Flat) {
     Copy-Item (Join-Path $buildFolder 'urSovngarde.exe') (Join-Path $bridge 'SkyrimTogetherVR.exe')
     Copy-Item (Join-Path $buildFolder 'urSovngarde.pdb') (Join-Path $bridge 'SkyrimTogetherVR.pdb')
 }
-# update.ps1 places only the program files it knows, so these three stay in the zip.
 Add-Licence $bridge
 Compress-Archive -Path (Join-Path $bridge '*') -DestinationPath $updateZip
 Remove-Item $bridge -Recurse -Force

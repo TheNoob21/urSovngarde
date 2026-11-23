@@ -42,4 +42,4 @@ try {
 }
 Write-Host ""
 Write-Host "Friends from outside your home network need UDP $port forwarded to this PC on the router,"
-Write-Host "and allowed in Windows Firewall (see VR_MULTIPLAYER_GUIDE.md)."
+Write-Host "and allowed in Windows Firewall."

@@ -1,5 +1,7 @@
 """Opens and closes the in-game menu panel with both thumbstick clicks held, as a player does.
 
+Requires an upstream test build with menu proof exports. For public builds, use the menu controls in the play-test guide.
+
     python Tools/VR/live-menu-chord.py
 
 The VR rig must be up (headless.ps1 up) in a loaded save. DevBench presses the controllers' stick clicks (OpenVR's touchpad
@@ -55,6 +57,7 @@ def press(game, left, right, seconds):
 
 
 def main():
+    menu.require_upstream_test_build()
     results = []
 
     def check(name, ok, detail=''):

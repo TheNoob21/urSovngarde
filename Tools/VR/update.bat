@@ -5,5 +5,7 @@ if "%~1"=="" (
     pause
     exit /b 1
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update.ps1" -Zip "%~1" -ClientFolder "%~dp0."
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update.ps1" -Zip "%~1" -ClientFolder "%~dp0." -PromptForModFolder
+set "updateResult=%ERRORLEVEL%"
 pause
+exit /b %updateResult%

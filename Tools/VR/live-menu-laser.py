@@ -1,5 +1,7 @@
 """Points at the in-game menu panel with a controller, as a player does: the dot follows, the trigger clicks, the stick scrolls.
 
+Requires an upstream test build with menu proof exports. For public builds, use the menu controls in the play-test guide.
+
     python Tools/VR/live-menu-laser.py
 
 The VR rig must be up (headless.ps1 up) in a loaded save. DevBench holds the headset still at 1.6 m looking ahead, and
@@ -139,7 +141,11 @@ def open_panel(game, pid, head=None):
     return shared.wait(lambda: call(pid, 'urSovngarde_IsMenuOpen'), 5)
 
 
+require_upstream_test_build = menu.require_upstream_test_build
+
+
 def main():
+    menu.require_upstream_test_build()
     results = []
 
     def check(name, ok, detail=''):

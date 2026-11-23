@@ -13,7 +13,7 @@
 # Its executable "Skyrim Together" starts tools\Skyrim Together\urSovngardeSE.exe; deploy-flat-client.ps1 puts each build there.
 # The game never needs its window in front, where it would take the mouse and keyboard of whoever uses the PC.
 # It connects by itself to the server its connect.txt names (%LOCALAPPDATA%\SkyrimTogetherSE), which this script points at the local test server for the run.
-# It is started with URSOVNGARDE_TEST_RIG set, so it reads DevBench's keys with its window in the background.
+# It reads DevBench's keys with its window in the background.
 # Whenever its window takes the focus (when it opens), the script gives it back to the window that had it.
 # With both rigs: this one first, then headless.ps1 up -AutoConnect.
 
@@ -273,15 +273,13 @@ if ($KeepConnect) { Write-Host "Connect file kept: $((Get-Content -LiteralPath $
 else { Set-RigConnect }
 
 try {
-    # This instance's Mod Organizer is started anew, so the game inherits the variable below from it.
+    # This instance's Mod Organizer is started anew.
     # With another instance's running (the VR game's or the player's), this one starts beside it.
     Close-Mo2 @(Get-Mo2Processes | Where-Object { $_.Own })
     Start-SteamIfNeeded
     $mo2Running = @(Get-Mo2Processes)
     $mo2Options = if ($mo2Running.Count -gt 0) { '--multiple ' } else { '' }
-    $env:URSOVNGARDE_TEST_RIG = '1'
     Start-Process -FilePath $mo2 -ArgumentList "${mo2Options}`"moshortcut://:Skyrim Together`""
-    Remove-Item Env:URSOVNGARDE_TEST_RIG
     Wait-Until { Test-Running $gamePattern } 120 'the game to start'
     Wait-Until { Get-Health } $MenuTimeout 'DevBench to answer (the game to start)' -NeedsGame
     Wait-Until { (Invoke-Tool 'menu' @{ action = 'list' }).openMenus -contains 'Main Menu' } $MenuTimeout 'the main menu' -NeedsGame

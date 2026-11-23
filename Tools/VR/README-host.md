@@ -12,16 +12,18 @@ game side like everyone else (see the other README), plus this.
 4. Optional: a password. Open `Server\config\STServer.ini`, set `sPassword=` to something, and tell the
    others; they type it in `setup-connect.bat`.
 5. You connect to your own server with `127.0.0.1:10578`.
+6. Sleeping and waiting together is on in the shipped `STServer.ini` (`bEnableSleep=true`): time moves once every
+   player has confirmed the Sleep/Wait menu. Set it to `false` to turn sleeping off for everyone.
 
 Builds that exchange the same network messages connect to each other, whatever their version. When a release
 changes them it says so; then everyone updates, the server included, or the server refuses them at connect and
 tells both versions.
 
 Updating: when a new build says the server changed, close the server window and drag the server update zip onto
-`update.bat` in the mod's folder (it finds a `Server` or `urSovngarde Server` folder next to it; otherwise run
+`update.bat` in the `urSovngarde` tools folder (it finds a `Server` or `urSovngarde Server` folder next to it; otherwise run
 `update.bat` from a copy placed inside the server's folder). By hand: replace `urSovngardeServer.exe`
 and `STServer.dll`, then start the server again. The others update their client.
 
 The server program was `SkyrimTogetherServer.exe` before the rename; `host-server.bat` starts either.
 
-A Linux build of the server is being fixed; ask if you need one.
+The release also ships a Linux build of the server.

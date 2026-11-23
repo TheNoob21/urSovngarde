@@ -1,5 +1,7 @@
 """Types with the page's own keyboard on the in-game menu panel, aiming and pulling the trigger as a player does.
 
+Requires an upstream test build with menu proof exports. For public builds, use the menu controls in the play-test guide.
+
     python Tools/VR/live-menu-keyboard.py
 
 The VR rig must be up (headless.ps1 up) in a loaded save, with the page that has the keyboard deployed.
@@ -37,6 +39,7 @@ def pull_at(game, point):
 
 
 def main():
+    laser.require_upstream_test_build()
     results = []
 
     def check(name, ok, detail=''):

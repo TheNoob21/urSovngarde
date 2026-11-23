@@ -100,8 +100,12 @@ this game did reached the other player.
 `log DO record <name> copy|npc|placed|player|ref <hex> <seconds>` samples in the background while the script goes on: a body's
 pelvis and height (its whole body in the last 2 s), or any other reference's open state. Checks on recordings:
 `pose <b> like <a> <units>` (resting poses), `fall <b> within <ms>` and `fall <b> like <a> <ms>` (from its death in this game to
-down), `place <b> like <a> <units>` (where it came to rest against where it stood), `still <a> <units>` (no jump once down), and
+down), `place <b> like <a> <units>` (where it came to rest against where it stood), `still <a> <units> [last <s>]` (no jump once
+down, or over the recording's last seconds only), `down <b> like <a> <units>` (where it came to rest the first time it lay
+flat, against where it stood), `up <b> like <a> <ms>` (from lying flat to on its feet again), and
 `door <a> once open|closed|toggled` (one movement to that end, no flicker; only doors show their moving state).
+`log CHECK copy|npc bleedout true|false` asks whether the game has that copy in its own bleedout (IsBleedingOut).
+On a flat game, which has no headset, `DO look` turns the player instead, and turns it back once the look is over.
 After a run, logs/live-report.html shows every script's verdict, checks, jank and screenshots. Tools/VR/README-rig-checks.md
 says how these fit together and what to know before writing a test with them.
 `log CHECK spot mark` notes where the player stands; `spot back <units>` passes when the player is within that many
@@ -152,8 +156,16 @@ CLIENT_DIR = next(
     (path for path in (os.path.join(FUS_ROOT, 'tools', name) for name in ('Skyrim Together VR', 'urSovngarde')) if os.path.isfile(os.path.join(path, 'urSovngarde.exe'))),
     os.path.join(FUS_ROOT, 'tools', 'Skyrim Together VR'),
 )
+# With LIVE_CHECK_DEVBENCH on the flat rig, its client's log (SKYRIM_FLAT_ROOT, Tools/Flat/flat-rig.ps1).
+if os.environ.get('LIVE_CHECK_DEVBENCH') and os.environ.get('SKYRIM_FLAT_ROOT'):
+    CLIENT_DIR = os.path.join(os.environ['SKYRIM_FLAT_ROOT'], 'tools', 'Skyrim Together')
 CLIENT_LOG = os.path.join(CLIENT_DIR, 'logs', 'tp_client.log')
-DEVBENCH = 'http://127.0.0.1:8921/api/tool/'
+# LIVE_CHECK_CLIENT_LOG: a game started some other way (the play-test's SE launcher keeps its log in its run folder).
+if os.environ.get('LIVE_CHECK_CLIENT_LOG'):
+    CLIENT_LOG = os.environ['LIVE_CHECK_CLIENT_LOG']
+# The game asked: the VR rig's DevBench by default; LIVE_CHECK_DEVBENCH=http://127.0.0.1:8922 asks the flat rig (Tools/Flat/flat-rig.ps1).
+DEVBENCH_ROOT = os.environ.get('LIVE_CHECK_DEVBENCH', 'http://127.0.0.1:8921').rstrip('/')
+DEVBENCH = DEVBENCH_ROOT + '/api/tool/'
 HEALTH_TOLERANCE = 1.5
 PLAYER_TOLERANCE = 2.0
 DROP_TOLERANCE = 4.0    # units; a position travels packed to about one unit
@@ -429,6 +441,45 @@ def fall_delay(recording, lines):
         return None, 'no death of %s in the log' % recording.form
     down = next((at for at, nodes in recording.done() if at >= died - 0.1 and (body_height(nodes) or 99) < 40.0), None)
     return (down - died, '') if down is not None else (None, '%s never down in its samples after its death' % recording.form)
+
+
+# A body lying flat, and one on its feet again (body_height): between them it kneels, bleeds out or gets up.
+LYING_HEIGHT = 25.0
+STANDING_HEIGHT = 50.0
+
+
+def down_rest(samples):
+    """Where a body came to rest the first time it lay down, from where it stood: (dx, dy) of its pelvis, from its first
+    sample to the last one of its first lying spell, or None when it never lay down."""
+    if not samples:
+        return None
+    first = samples[0][1]['pelvis']
+    rest = None
+    for at, nodes in samples:
+        if (body_height(nodes) or 99) < LYING_HEIGHT:
+            rest = nodes['pelvis']
+        elif rest is not None:
+            break
+    return (rest[0] - first[0], rest[1] - first[1]) if rest else None
+
+
+def down_to_up(samples):
+    """Seconds from a body's first lying sample to its first sample on its feet after it, or None: never down, or not up again."""
+    down = next((at for at, nodes in samples if (body_height(nodes) or 99) < LYING_HEIGHT), None)
+    if down is None:
+        return None
+    return next((at - down for at, nodes in samples if at > down and (body_height(nodes) or 0) > STANDING_HEIGHT), None)
+
+
+def still_steps(samples, last=None):
+    """How far the pelvis moved between each two samples once the body had been down 1.5 s, and only over the recording's
+    last <last> seconds when given: (the steps, when it went down or None)."""
+    down = next((at for at, nodes in samples if (body_height(nodes) or 99) < 40.0), None)
+    since = down + 1.5 if down is not None else None
+    if since is not None and last is not None and samples:
+        since = max(since, samples[-1][0] - last)
+    after = [nodes['pelvis'] for at, nodes in samples if since is not None and at >= since]
+    return [math.dist(a, b) for a, b in zip(after, after[1:])], down
 
 
 def log_time(line):
@@ -923,7 +974,7 @@ class Run:
         try:
             if who == 'game':
                 # "game alive": it still answers, and has run frames since the last time it was asked.
-                health = json.loads(urllib.request.urlopen('http://127.0.0.1:8921/api/health', timeout=6).read().decode())
+                health = json.loads(urllib.request.urlopen(DEVBENCH_ROOT + '/api/health', timeout=6).read().decode())
                 ok = bool(health.get('ok'))
                 detail = 'frame %s, %s' % (health.get('frame'), health.get('lastLifecycle'))
                 if ok and what == 'inworld':
@@ -1036,6 +1087,19 @@ class Run:
                 state = papyrus('ObjectReference', 'GetOpenState', words[1])
                 ok = state in ((1, 2) if words[2] == 'open' else (3, 4))
                 detail = 'door %s, GetOpenState %s (1 open, 2 opening, 3 closed, 4 closing)' % (words[1], state)
+            elif who == 'count' and what == 'base' and len(words) >= 6 and words[3] == 'within':
+                # "count base <hex> within <units> <n>": exactly that many actors of that base this near the player (DevBench inspect refs).
+                try:
+                    answer = tool('inspect', {'kind': 'refs', 'formType': 'NPC_', 'radius': float(words[4]), 'limit': 2000})
+                    found = answer.get('refs')
+                    if not isinstance(found, list) or answer.get('truncated') is not False:
+                        raise ValueError('complete nearby reference enumeration is unavailable')
+                    wanted = int(words[2], 16)
+                    mine = [r for r in found if not r.get('disabled') and int((r.get('base') or {}).get('formId', '0x0'), 16) == wanted]
+                    ok = len(mine) == int(words[5])
+                    detail = '%d actor(s) of base %s within %s: %s; wanted %s' % (len(mine), words[2], words[4], ', '.join(r.get('formId', '?') for r in mine), words[5])
+                except Exception as e:
+                    ok, detail = False, 'ERR %s' % type(e).__name__
             elif who == 'ref' and words[2] in ('enabled', 'disabled'):
                 # "ref <hex> enabled|disabled": a reference of the game's own is switched on, or off (IsDisabled).
                 disabled = papyrus('ObjectReference', 'IsDisabled', words[1])
@@ -1144,7 +1208,7 @@ class Run:
                 found = jank(session_lines()[self.log_from:], kinds)
                 ok = not found
                 detail = jank_text(found) + ('; first: ' + next(iter(found.values()))[2][35:200].strip() if found else '')
-            elif who in ('pose', 'fall', 'place', 'still', 'door') and what not in self.records:
+            elif who in ('pose', 'fall', 'place', 'still', 'door', 'down', 'up') and what not in self.records:
                 detail = 'nothing was recorded as %s ("DO record")' % what
             elif who == 'pose':
                 # "pose <b> like <a> <units>": the body recorded as b came to rest laid out as a did: the distances between its
@@ -1189,19 +1253,41 @@ class Run:
                     detail = '%s came to rest %.0f units from where %s would have (it moved %.0f, %s %.0f; limit %s)' % (
                         what, apart, words[3], math.hypot(*found[what]), words[3], math.hypot(*found[words[3]]), words[4])
             elif who == 'still':
-                # "still <a> <units>": once the body recorded as a had been down 1.5 s, its pelvis never moved more than that between
-                # two samples: no corpse jump, pop or slide after it landed.
-                samples = self.records[what].done()
-                down = next((at for at, nodes in samples if (body_height(nodes) or 99) < 40.0), None)
-                after = [nodes['pelvis'] for at, nodes in samples if down is not None and at >= down + 1.5]
-                steps = [math.dist(a, b) for a, b in zip(after, after[1:])]
+                # "still <a> <units> [last <seconds>]": once the body recorded as a had been down 1.5 s, its pelvis never moved more than that between
+                # two samples: no corpse jump, pop or slide after it landed. With "last", only over the recording's last that many seconds:
+                # a body moved out of view on purpose lies still once the player looks again.
+                last = float(words[4]) if len(words) > 4 and words[3] == 'last' else None
+                steps, down = still_steps(self.records[what].done(), last)
                 if down is None:
                     detail = '%s never went down in its samples' % what
                 elif not steps:
                     ok, detail = None, 'SKIPPED: fewer than two samples after %s landed' % what
                 else:
                     ok = max(steps) <= float(words[2])
-                    detail = 'after landing, its pelvis moved at most %.0f units between two samples (limit %s, %d samples)' % (max(steps), words[2], len(after))
+                    detail = '%s, its pelvis moved at most %.0f units between two samples (limit %s, %d samples)' % (
+                        'over the last %.0f s' % last if last is not None else 'after landing', max(steps), words[2], len(steps) + 1)
+            elif who == 'down':
+                # "down <b> like <a> <units>": the body recorded as b came to rest lying down as far, and the same way, from where it stood
+                # as a did (down_rest): a knocked copy lies where its owner's fall put the original, not where it collapsed itself.
+                found = {name: down_rest(self.records[name].done()) for name in (what, words[3]) if name in self.records and self.records[name].body}
+                missing = [name for name in (what, words[3]) if not found.get(name)]
+                if missing:
+                    detail = '%s never lay down in its samples' % ' or '.join(missing)
+                else:
+                    apart = math.dist(found[what], found[words[3]])
+                    ok = apart <= float(words[4])
+                    detail = '%s lay down %.0f units from where %s would have (it moved %.0f, %s %.0f; limit %s)' % (
+                        what, apart, words[3], math.hypot(*found[what]), words[3], math.hypot(*found[words[3]]), words[4])
+            elif who == 'up':
+                # "up <b> like <a> <ms>": the body recorded as b was on its feet again as long after it lay down as a was (down_to_up),
+                # give or take that many ms.
+                found = {name: down_to_up(self.records[name].done()) for name in (what, words[3]) if name in self.records and self.records[name].body}
+                missing = [name for name in (what, words[3]) if found.get(name) is None]
+                if missing:
+                    detail = '%s never lay down and got up again in its samples' % ' or '.join(missing)
+                else:
+                    ok = abs(found[what] - found[words[3]]) * 1000 <= float(words[4])
+                    detail = '%s up %.0f ms after it lay down, %s %.0f ms (limit %s apart)' % (what, found[what] * 1000, words[3], found[words[3]] * 1000, words[4])
             elif who == 'door':
                 # "door <a> once open|closed|toggled": the reference recorded as a went to that end once (toggled: the other end
                 # from where it started), through its moving state, with no turn back on the way (open, closing, open: a
@@ -1623,6 +1709,14 @@ class Run:
                     held = papyrus('Actor', 'IsEquipped', form, [{'form': '0x' + words[2]}])
                     ok = isinstance(held, bool) and held is (what == 'equipped')
                     detail = 'actor %s, IsEquipped(%s) %s' % (form, words[2], held)
+                elif what == 'bleedout' and len(words) > 2 and words[2] in ('true', 'false'):
+                    # "npc bleedout true|false": whether the game has the copy in its own bleedout (IsBleedingOut).
+                    bleeding = papyrus('Actor', 'IsBleedingOut', form)
+                    if bleeding == TIMED_OUT:
+                        detail = UNASKED
+                    else:
+                        ok = isinstance(bleeding, bool) and bleeding is (words[2] == 'true')
+                        detail = 'actor %s, IsBleedingOut %s' % (form, bleeding)
                 elif what in ('standing', 'lying', 'down'):
                     # "npc standing|lying|down": the copy's body height now (body_pose), the middle of three readings a half second apart.
                     # Down is kneeling or lying: a bleedout kneels at about 26 units, under the 25 of lying flat only once it curls up.
@@ -1661,6 +1755,14 @@ class Run:
                     else:
                         ok = (down - applied) * 1000 <= limit
                         detail = 'actor %s was down %.0f ms after its owner\'s death was applied here (limit %.0f; %d samples)' % (form, (down - applied) * 1000, limit, len(times))
+                elif what == 'was' and words[2:3] == ['down']:
+                    # A native bleedout may kneel rather than lie flat. Its native IsBleedingOut proof is separate;
+                    # here require two consecutive body samples below the existing "npc down" limit of 40.
+                    heights = [h for _, _, h, _ in self.watch]
+                    down = [i for i, h in enumerate(heights) if h < 40.0]
+                    ok = any(i + 1 in down for i in down)
+                    detail = ('actor %s, %d samples, %d of them down; body height lowest %.0f, highest %.0f' %
+                              (form, len(heights), len(down), min(heights), max(heights)) if heights else 'no "DO watch npc" samples to judge')
                 elif what == 'went' and words[2:3] == ['down']:
                     # "npc went down": two "DO watch npc" samples in a row with the body under 25 units high.
                     # The precondition of a downed-copy test: a copy that never lay down proves nothing about getting up.
@@ -1732,7 +1834,7 @@ class Run:
 
     def run(self):
         exe = os.path.join(RELEASE, 'STBot.exe')
-        cmd = [exe, os.path.join('scripts', self.script + '.txt'), '--server', '127.0.0.1:10578', '--name', 'Bot']
+        cmd = [exe, os.path.join('scripts', self.script + '.txt'), '--server', os.environ.get('LIVE_CHECK_SERVER', '127.0.0.1:10578'), '--name', 'Bot']
         # Where the player stands, asked of the game. Left to itself the bot looks for a position line near the end
         # of the client log, and after a busy script there is none there: it then waits at the world origin for
         # five minutes and the script never starts (second run of live-temp-reuse, 2026-10-02).
@@ -1895,37 +1997,50 @@ class Run:
                         degrees, ms = float(words[2]), int(words[3])
                         hold = int(words[5]) if len(words) > 5 and words[4] == 'hold' else 0
                         back = words[-1] == 'back'
-                        base = tool('input', {'action': 'observe', 'device': 'vrTrackedSet'})['frame']
-                        steps = max(2, ms // 20)
-                        held = hold // 20
-                        frames = []
-                        for i in range(steps + 1 + held + (steps if back else 0)):
-                            if i <= steps + held:
-                                share = min(i, steps) / steps
-                            else:
-                                share = 1.0 - (i - steps - held) / steps
-                            yaw = math.radians(degrees) * share
-                            c_, s_ = math.cos(yaw), math.sin(yaw)
-                            f = json.loads(json.dumps(base))
-                            f.pop('seq', None)
-                            f['tMs'] = i * 20
-                            f['hmd']['matrix'] = [c_, 0, s_, 0, 0, 1, 0, 1.6, -s_, 0, c_, 0]
-                            f['left']['matrix'] = [1, 0, 0, -0.25, 0, 1, 0, 1.0, 0, 0, 1, -0.1]
-                            f['right']['matrix'] = [1, 0, 0, 0.25, 0, 1, 0, 1.0, 0, 0, 1, -0.1]
-                            for d in ('hmd', 'left', 'right'):
-                                f[d].update({'available': True, 'connected': True, 'valid': True, 'trackingResult': 200})
-                                if f[d].get('index') is None:
-                                    f[d]['index'] = {'hmd': 0, 'left': 2, 'right': 3}[d]
-                                for key in ('velocity', 'angularVelocity'):
-                                    f[d].setdefault(key, [0.0, 0.0, 0.0])
-                                if d != 'hmd' and not f[d].get('controller'):
-                                    f[d]['controller'] = {'axes': [[0.0, 0.0]] * 5, 'packetNumber': 1, 'pressed': 0, 'touched': 0}
-                            for d in ('left', 'right'):
-                                f[d]['controller']['packetNumber'] = (base[d].get('controller') or {}).get('packetNumber', 1) + i + 1
-                            frames.append(f)
-                        r = tool('input', {'action': 'sequence', 'device': 'vrTrackedSet', 'frames': frames, 'owner': 'live-check'}, timeout=15)
-                        print('   (headset turns %.0f degrees over %d ms%s%s: %s)' % (degrees, ms, ', then holds %d ms' % hold if hold else '', ' and back' if back else '',
-                                                                              'queued' if r.get('queued') else r), flush=True)
+                        try:
+                            base = tool('input', {'action': 'observe', 'device': 'vrTrackedSet'})['frame']
+                        except urllib.error.HTTPError:
+                            base = None
+                        if base is None:
+                            # A flat game has no headset: the player itself turns, and turns back once the look is over, as a headset
+                            # comes back to straight ahead when its sequence ends. SetAngle turns a flat player (not a VR one).
+                            heading = papyrus('ObjectReference', 'GetAngleZ', '14')
+                            if not isinstance(heading, (int, float)):
+                                raise RuntimeError('no heading for the player')
+                            papyrus('ObjectReference', 'SetAngle', '14', [0.0, 0.0, (heading - degrees) % 360.0])
+                            threading.Timer((ms * (2 if back else 1) + hold) / 1000.0, papyrus, ('ObjectReference', 'SetAngle', '14', [0.0, 0.0, heading])).start()
+                            print('   (no headset: the player turns %.0f degrees for %d ms, then back)' % (degrees, ms * (2 if back else 1) + hold), flush=True)
+                        else:
+                            steps = max(2, ms // 20)
+                            held = hold // 20
+                            frames = []
+                            for i in range(steps + 1 + held + (steps if back else 0)):
+                                if i <= steps + held:
+                                    share = min(i, steps) / steps
+                                else:
+                                    share = 1.0 - (i - steps - held) / steps
+                                yaw = math.radians(degrees) * share
+                                c_, s_ = math.cos(yaw), math.sin(yaw)
+                                f = json.loads(json.dumps(base))
+                                f.pop('seq', None)
+                                f['tMs'] = i * 20
+                                f['hmd']['matrix'] = [c_, 0, s_, 0, 0, 1, 0, 1.6, -s_, 0, c_, 0]
+                                f['left']['matrix'] = [1, 0, 0, -0.25, 0, 1, 0, 1.0, 0, 0, 1, -0.1]
+                                f['right']['matrix'] = [1, 0, 0, 0.25, 0, 1, 0, 1.0, 0, 0, 1, -0.1]
+                                for d in ('hmd', 'left', 'right'):
+                                    f[d].update({'available': True, 'connected': True, 'valid': True, 'trackingResult': 200})
+                                    if f[d].get('index') is None:
+                                        f[d]['index'] = {'hmd': 0, 'left': 2, 'right': 3}[d]
+                                    for key in ('velocity', 'angularVelocity'):
+                                        f[d].setdefault(key, [0.0, 0.0, 0.0])
+                                    if d != 'hmd' and not f[d].get('controller'):
+                                        f[d]['controller'] = {'axes': [[0.0, 0.0]] * 5, 'packetNumber': 1, 'pressed': 0, 'touched': 0}
+                                for d in ('left', 'right'):
+                                    f[d]['controller']['packetNumber'] = (base[d].get('controller') or {}).get('packetNumber', 1) + i + 1
+                                frames.append(f)
+                            r = tool('input', {'action': 'sequence', 'device': 'vrTrackedSet', 'frames': frames, 'owner': 'live-check'}, timeout=15)
+                            print('   (headset turns %.0f degrees over %d ms%s%s: %s)' % (degrees, ms, ', then holds %d ms' % hold if hold else '', ' and back' if back else '',
+                                                                                  'queued' if r.get('queued') else r), flush=True)
                     except Exception as e:
                         print('   FAIL  look: %s' % type(e).__name__, flush=True)
                         self.results.append((False, text.strip(), type(e).__name__))
@@ -2597,7 +2712,7 @@ def main():
         started = time.strftime('%Y-%m-%d %H:%M:%S')
         # A game that went down takes every later script with it; say so once instead of failing each in turn.
         try:
-            urllib.request.urlopen('http://127.0.0.1:8921/api/health', timeout=6).read()
+            urllib.request.urlopen(DEVBENCH_ROOT + '/api/health', timeout=6).read()
         except Exception:
             table.append((name, 0, 0, 'NOT RUN: the game is gone'))
             failed += 1
