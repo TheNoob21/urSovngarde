@@ -1,4 +1,5 @@
 #include <Messages/PlayerPlaceRequest.h>
+#include <BoundedString.h>
 
 void PlayerPlaceRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -9,5 +10,5 @@ void PlayerPlaceRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) 
 {
     ClientMessage::DeserializeRaw(aReader);
 
-    Place = Serialization::ReadString(aReader);
+    Place = BoundedString::Read(aReader, 256);
 }

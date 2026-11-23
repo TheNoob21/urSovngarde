@@ -20,9 +20,9 @@ struct NotifyWorldObjectMove final : ServerMessage
 
     bool operator==(const NotifyWorldObjectMove& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && ObjectId == acRhs.ObjectId && CellId == acRhs.CellId && WorldSpaceId == acRhs.WorldSpaceId &&
-               Position == acRhs.Position && Rotation == acRhs.Rotation && AtRest == acRhs.AtRest &&
-               Taken == acRhs.Taken;
+        return GetOpcode() == acRhs.GetOpcode() && ObjectId == acRhs.ObjectId && CellId == acRhs.CellId && WorldSpaceId == acRhs.WorldSpaceId && Position == acRhs.Position &&
+               Rotation == acRhs.Rotation && AtRest == acRhs.AtRest && Taken == acRhs.Taken && Tick == acRhs.Tick && MoverPlayerId == acRhs.MoverPlayerId &&
+               Thrown == acRhs.Thrown && Velocity == acRhs.Velocity && Spin == acRhs.Spin;
     }
 
     //! The object's own reference id, the same in every game that has the plugin it comes from.
@@ -34,6 +34,16 @@ struct NotifyWorldObjectMove final : ServerMessage
     //! The last of a movement: the object has stopped, and the receiver hands it back to its own physics.
     bool AtRest{};
     //! Taken into a player's inventory: the receiver disables its own copy of the reference.
-    //! Only books are sent this way, the one item activation sync leaves out (TESObjectREFR.cpp, HookActivate).
+    //! Any placed item but a quest object (PlacedTakes); the server keeps it taken for a player who comes later.
     bool Taken{};
+    //! When the sender sampled the place, on the clock every movement report uses (0: not given), so the receiver shows the
+    //! move's speed and arc as the sender had it, whatever the network did to the packets.
+    uint64_t Tick{};
+    //! The player moving it (0: not given, as for a place sent again), so the receiver draws it from that player's hand and not the nearest one.
+    uint32_t MoverPlayerId{};
+    //! A hand let go of it and it flies on by itself from here: the receiver's own physics flies it, at Velocity and Spin.
+    bool Thrown{};
+    //! Its speed (game units a second) and spin (radians a second, about the world's axes) when Thrown.
+    glm::vec3 Velocity{};
+    glm::vec3 Spin{};
 };

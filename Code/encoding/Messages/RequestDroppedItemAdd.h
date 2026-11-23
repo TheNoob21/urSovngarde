@@ -21,7 +21,8 @@ struct RequestDroppedItemAdd final : ClientMessage
 
     bool operator==(const RequestDroppedItemAdd& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Announcement == acRhs.Announcement && Item == acRhs.Item && CellId == acRhs.CellId && WorldSpaceId == acRhs.WorldSpaceId && Position == acRhs.Position && Rotation == acRhs.Rotation;
+        return GetOpcode() == acRhs.GetOpcode() && Announcement == acRhs.Announcement && Item == acRhs.Item && CellId == acRhs.CellId && WorldSpaceId == acRhs.WorldSpaceId &&
+               Position == acRhs.Position && Rotation == acRhs.Rotation && RequestId == acRhs.RequestId;
     }
 
     Inventory::Entry Item{};
@@ -35,4 +36,8 @@ struct RequestDroppedItemAdd final : ClientMessage
     //! False for a fresh drop, which is always a new item.
     //! True for an earlier drop announced again; the server first matches it to a known item by base and place.
     bool Announcement{};
+
+    //! Set by a client that must know which reply answers this add; 0 for none. The server sends it back with the item's id
+    //! to this client alone (NotifyDroppedItem::RequestId).
+    uint32_t RequestId{};
 };

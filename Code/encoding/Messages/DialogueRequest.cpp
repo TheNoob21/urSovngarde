@@ -1,4 +1,5 @@
 #include <Messages/DialogueRequest.h>
+#include <BoundedString.h>
 
 void DialogueRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -13,7 +14,7 @@ void DialogueRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noe
     ClientMessage::DeserializeRaw(aReader);
 
     ServerId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-    SoundFilename = Serialization::ReadString(aReader);
+    SoundFilename = BoundedString::Read(aReader, 512);
     SceneId.Deserialize(aReader);
     ScenePhase = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
 }

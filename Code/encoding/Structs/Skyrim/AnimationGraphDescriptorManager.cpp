@@ -33,6 +33,21 @@
 #include <Structs/Skyrim/AnimationGraphDescriptor_Spriggan.h>
 #include <Structs/Skyrim/AnimationGraphDescriptor_Mudcrab.h>
 #include <Structs/Skyrim/AnimationGraphDescriptor_Rabbit.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_AtronachFlame.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_BenthicLurker.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_DwarvenSphere.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_DwarvenBallista.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_IceWraith.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_Netch.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_Riekling.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_Wisp.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_Slaughterfish.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_ChaurusFlyer.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_Seeker.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_Witchlight.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_DragonPriest.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_BoarRieklingBearMain.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_BoarRieklingBoarMain.h>
 
 AnimationGraphDescriptorManager::AnimationGraphDescriptorManager() noexcept
 {
@@ -73,5 +88,20 @@ AnimationGraphDescriptorManager::AnimationGraphDescriptorManager() noexcept
             AnimationGraphDescriptor_Spriggan initAnimationGraphDescriptor_Spriggan(*this);
             AnimationGraphDescriptor_Mudcrab initAnimationGraphDescriptor_Mudcrab(*this);
             AnimationGraphDescriptor_Rabbit initAnimationGraphDescriptor_Rabbit(*this);
+            AnimationGraphDescriptor_AtronachFlame initAnimationGraphDescriptor_AtronachFlame(*this);
+            AnimationGraphDescriptor_BenthicLurker initAnimationGraphDescriptor_BenthicLurker(*this);
+            AnimationGraphDescriptor_DwarvenSphere initAnimationGraphDescriptor_DwarvenSphere(*this);
+            AnimationGraphDescriptor_DwarvenBallista initAnimationGraphDescriptor_DwarvenBallista(*this);
+            AnimationGraphDescriptor_IceWraith initAnimationGraphDescriptor_IceWraith(*this);
+            AnimationGraphDescriptor_Netch initAnimationGraphDescriptor_Netch(*this);
+            AnimationGraphDescriptor_Riekling initAnimationGraphDescriptor_Riekling(*this);
+            AnimationGraphDescriptor_Wisp initAnimationGraphDescriptor_Wisp(*this);
+            AnimationGraphDescriptor_Slaughterfish initAnimationGraphDescriptor_Slaughterfish(*this);
+            AnimationGraphDescriptor_ChaurusFlyer initAnimationGraphDescriptor_ChaurusFlyer(*this);
+            AnimationGraphDescriptor_Seeker initAnimationGraphDescriptor_Seeker(*this);
+            AnimationGraphDescriptor_Witchlight initAnimationGraphDescriptor_Witchlight(*this);
+            AnimationGraphDescriptor_DragonPriest initAnimationGraphDescriptor_DragonPriest(*this);
+            AnimationGraphDescriptor_BoarRieklingBearMain initAnimationGraphDescriptor_BoarRieklingBearMain(*this);
+            AnimationGraphDescriptor_BoarRieklingBoarMain initAnimationGraphDescriptor_BoarRieklingBoarMain(*this);
         });
 }

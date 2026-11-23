@@ -17,11 +17,20 @@ enum DifferentialFlags
     kVariables = 1 << 7
 };
 
+enum ModIdFlags
+{
+    kModActionId = 1 << 0,
+    kModTargetId = 1 << 1,
+    kModIdleId = 1 << 2
+};
+
 bool ActionEvent::operator==(const ActionEvent& acRhs) const noexcept
 {
     return Tick == acRhs.Tick &&
            // ActorId == acRhs.ActorId && // ActorId is a local field as it is filled up latter by the game client
-           ActionId == acRhs.ActionId && State1 == acRhs.State1 && State2 == acRhs.State2 && Type == acRhs.Type && TargetId == acRhs.TargetId && IdleId == acRhs.IdleId && EventName == acRhs.EventName && TargetEventName == acRhs.TargetEventName && Variables == acRhs.Variables;
+           ActionId == acRhs.ActionId && State1 == acRhs.State1 && State2 == acRhs.State2 && Type == acRhs.Type && TargetId == acRhs.TargetId && IdleId == acRhs.IdleId &&
+           EventName == acRhs.EventName && TargetEventName == acRhs.TargetEventName && Variables == acRhs.Variables && ModActionId == acRhs.ModActionId &&
+           ModTargetId == acRhs.ModTargetId && ModIdleId == acRhs.ModIdleId;
 }
 
 bool ActionEvent::operator!=(const ActionEvent& acRhs) const noexcept
@@ -105,6 +114,22 @@ void ActionEvent::GenerateDifferential(const ActionEvent& aPrevious, TiltedPhoqu
     {
         Variables.GenerateDiff(aPrevious.Variables, aWriter);
     }
+
+    uint8_t modFlags = 0;
+    if (ModActionId != aPrevious.ModActionId)
+        modFlags |= kModActionId;
+    if (ModTargetId != aPrevious.ModTargetId)
+        modFlags |= kModTargetId;
+    if (ModIdleId != aPrevious.ModIdleId)
+        modFlags |= kModIdleId;
+
+    aWriter.WriteBits(modFlags, 3);
+    if (modFlags & kModActionId)
+        ModActionId.Serialize(aWriter);
+    if (modFlags & kModTargetId)
+        ModTargetId.Serialize(aWriter);
+    if (modFlags & kModIdleId)
+        ModIdleId.Serialize(aWriter);
 }
 
 void ActionEvent::ApplyDifferential(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -161,4 +186,13 @@ void ActionEvent::ApplyDifferential(TiltedPhoques::Buffer::Reader& aReader) noex
     {
         Variables.ApplyDiff(aReader);
     }
+
+    uint64_t modFlags = 0;
+    aReader.ReadBits(modFlags, 3);
+    if (modFlags & kModActionId)
+        ModActionId.Deserialize(aReader);
+    if (modFlags & kModTargetId)
+        ModTargetId.Deserialize(aReader);
+    if (modFlags & kModIdleId)
+        ModIdleId.Deserialize(aReader);
 }

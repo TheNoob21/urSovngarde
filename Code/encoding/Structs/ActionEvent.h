@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "AnimationVariables.h"
 #include "CachedString.h"
+#include "GameId.h"
 
 using TiltedPhoques::String;
 
@@ -19,6 +20,10 @@ struct ActionEvent
     CachedString EventName{};
     CachedString TargetEventName{};
     AnimationVariables Variables{};
+    //! The action, target and idle as server mod ids, empty where the sender has none (ActionModIds.h).
+    GameId ModActionId{};
+    GameId ModTargetId{};
+    GameId ModIdleId{};
 
     ActionEvent() = default;
     ActionEvent(const ActionEvent& acRhs) = default;

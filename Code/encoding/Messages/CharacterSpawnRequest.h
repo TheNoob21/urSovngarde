@@ -27,14 +27,13 @@ struct CharacterSpawnRequest final : ServerMessage
 
     bool operator==(const CharacterSpawnRequest& acRhs) const noexcept
     {
-        return ServerId == acRhs.ServerId && FormId == acRhs.FormId && BaseId == acRhs.BaseId &&
-               CellId == acRhs.CellId && Position == acRhs.Position && Rotation == acRhs.Rotation &&
-               ChangeFlags == acRhs.ChangeFlags && AppearanceBuffer == acRhs.AppearanceBuffer &&
-               InventoryContent == acRhs.InventoryContent && FactionsContent == acRhs.FactionsContent &&
-               ActionsToReplay == acRhs.ActionsToReplay && FaceTints == acRhs.FaceTints && PlayerId == acRhs.PlayerId &&
+        return ServerId == acRhs.ServerId && FormId == acRhs.FormId && BaseId == acRhs.BaseId && CellId == acRhs.CellId && Position == acRhs.Position &&
+               Rotation == acRhs.Rotation && ChangeFlags == acRhs.ChangeFlags && AppearanceBuffer == acRhs.AppearanceBuffer && InventoryContent == acRhs.InventoryContent &&
+               FactionsContent == acRhs.FactionsContent && ActionsToReplay == acRhs.ActionsToReplay && FaceTints == acRhs.FaceTints && PlayerId == acRhs.PlayerId &&
                OwnershipEpoch == acRhs.OwnershipEpoch && IsDead == acRhs.IsDead && IsPlayer == acRhs.IsPlayer && IsWeaponDrawn == acRhs.IsWeaponDrawn &&
-               IsPlayerSummon == acRhs.IsPlayerSummon && IsDragon == acRhs.IsDragon && LeveledNpcPickId == acRhs.LeveledNpcPickId && FollowerOfPlayerId == acRhs.FollowerOfPlayerId &&
-               RevivedSinceDeath == acRhs.RevivedSinceDeath && GetOpcode() == acRhs.GetOpcode();
+               IsPlayerSummon == acRhs.IsPlayerSummon && IsDragon == acRhs.IsDragon && LeveledNpcPickId == acRhs.LeveledNpcPickId &&
+               FollowerOfPlayerId == acRhs.FollowerOfPlayerId && RevivedSinceDeath == acRhs.RevivedSinceDeath && DismemberedLimbs == acRhs.DismemberedLimbs &&
+               SpawnGeneration == acRhs.SpawnGeneration && GetOpcode() == acRhs.GetOpcode();
     }
 
     uint32_t ServerId{};
@@ -63,4 +62,8 @@ struct CharacterSpawnRequest final : ServerMessage
     bool IsDragon{};
     //! Its owner's game revived it since its last death (ActorData::RevivedSinceDeath).
     bool RevivedSinceDeath{};
+    //! The limbs cut off it in any game, as RequestDismember told the server (0: none).
+    uint16_t DismemberedLimbs{};
+    //! The order the server made this player's character in, counted over all players (0: not a player, or an older server).
+    uint32_t SpawnGeneration{};
 };

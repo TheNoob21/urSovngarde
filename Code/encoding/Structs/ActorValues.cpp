@@ -1,4 +1,6 @@
 #include <Structs/ActorValues.h>
+#include <DecodeGuard.h>
+#include <Structs/ActorValueLimits.h>
 #include <TiltedCore/Serialization.hpp>
 
 using TiltedPhoques::Serialization;
@@ -32,19 +34,25 @@ void ActorValues::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexce
 
 void ActorValues::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
 {
-    auto count = Serialization::ReadVarInt(aReader);
-    for (int i = 0; i < count; i++)
+    const auto count = Serialization::ReadVarInt(aReader);
+    if (!DecodeGuard::Within(count, ActorValueLimits::kMaxEntries))
+        return;
+    for (uint64_t i = 0; i < count; i++)
     {
-        auto key = Serialization::ReadVarInt(aReader);
-        auto value = Serialization::ReadFloat(aReader);
-        ActorValuesList.insert({key, value});
+        const auto key = Serialization::ReadVarInt(aReader);
+        const auto value = Serialization::ReadFloat(aReader);
+        if (ActorValueLimits::IsKnownKey(key))
+            ActorValuesList.insert({static_cast<uint32_t>(key), value});
     }
 
-    auto maxCount = Serialization::ReadVarInt(aReader);
-    for (int i = 0; i < maxCount; i++)
+    const auto maxCount = Serialization::ReadVarInt(aReader);
+    if (!DecodeGuard::Within(maxCount, ActorValueLimits::kMaxEntries))
+        return;
+    for (uint64_t i = 0; i < maxCount; i++)
     {
-        auto key = Serialization::ReadVarInt(aReader);
-        auto value = Serialization::ReadFloat(aReader);
-        ActorMaxValuesList.insert({key, value});
+        const auto key = Serialization::ReadVarInt(aReader);
+        const auto value = Serialization::ReadFloat(aReader);
+        if (ActorValueLimits::IsKnownKey(key))
+            ActorMaxValuesList.insert({static_cast<uint32_t>(key), value});
     }
 }

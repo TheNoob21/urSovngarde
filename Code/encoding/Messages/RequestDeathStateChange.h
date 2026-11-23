@@ -14,9 +14,14 @@ struct RequestDeathStateChange final : ClientMessage
     void SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept override;
     void DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept override;
 
-    bool operator==(const RequestDeathStateChange& acRhs) const noexcept { return Id == acRhs.Id && OwnershipEpoch == acRhs.OwnershipEpoch && IsDead == acRhs.IsDead && GetOpcode() == acRhs.GetOpcode(); }
+    bool operator==(const RequestDeathStateChange& acRhs) const noexcept
+    {
+        return Id == acRhs.Id && OwnershipEpoch == acRhs.OwnershipEpoch && IsDead == acRhs.IsDead && KillerPlayerId == acRhs.KillerPlayerId && GetOpcode() == acRhs.GetOpcode();
+    }
 
     uint32_t Id;
     uint32_t OwnershipEpoch{};
     bool IsDead;
+    // The player whose blow killed it, credited with the kill in their own game; 0 for none.
+    uint32_t KillerPlayerId{};
 };

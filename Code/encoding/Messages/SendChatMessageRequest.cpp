@@ -1,4 +1,5 @@
 #include <Messages/SendChatMessageRequest.h>
+#include <BoundedString.h>
 
 void SendChatMessageRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -11,5 +12,5 @@ void SendChatMessageRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRead
     ClientMessage::DeserializeRaw(aReader);
 
     MessageType = static_cast<ChatMessageType>(Serialization::ReadVarInt(aReader));
-    ChatMessage = Serialization::ReadString(aReader);
+    ChatMessage = BoundedString::Read(aReader, BoundedString::kLongest);
 }

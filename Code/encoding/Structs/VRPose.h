@@ -6,13 +6,13 @@
 
 using TiltedPhoques::Buffer;
 
-//! Pose of a VR player, synced with Movement: the upper body always, the legs when trackers drive them.
+//! Skeletal pose synced with Movement: VR bodies and owner-driven ragdolls.
 //! Bone rotations are relative to the actor's 3D root, so no headset or controller calibration is needed.
-//! HasData is false, and nothing else is written, for non-VR actors.
-//! HasLegs is true only with body trackers (SkyrimVR FBT); otherwise the walk animation drives the legs.
+//! HasData is false, and nothing else is written, when no skeletal pose is available.
+//! HasLegs means valid lower-body rotations, whether inferred by IK or supplied by trackers.
 struct VRPose
 {
-    //! Bone order is parent-before-child; see VRBodySync.cpp for the node names.
+    //! Historical wire order; apply using the resolved skeleton hierarchy, not this enumeration order.
     enum Bone : uint8_t
     {
         kSpine1,
@@ -75,7 +75,7 @@ struct VRPose
     bool HasRootPosition{false};
     float RootPosition[3]{};
 
-    //! Where the hips sit relative to the 3D root, sent while the legs are tracked (HasHips).
+    //! Where the solved hips sit relative to the 3D root, from inferred or tracked motion (HasHips).
     //! Crouching and leaning change no bone rotation, so this moves the whole body; the spine does not hang off the pelvis.
     bool HasHips{false};
     float HipOffset[3]{};

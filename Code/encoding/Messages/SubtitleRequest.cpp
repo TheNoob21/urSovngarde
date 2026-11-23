@@ -1,4 +1,5 @@
 #include <Messages/SubtitleRequest.h>
+#include <BoundedString.h>
 
 void SubtitleRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -14,7 +15,7 @@ void SubtitleRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noe
     ClientMessage::DeserializeRaw(aReader);
 
     ServerId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-    Text = Serialization::ReadString(aReader);
+    Text = BoundedString::Read(aReader, BoundedString::kLongest);
     TopicFormId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
     SceneId.Deserialize(aReader);
     ScenePhase = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;

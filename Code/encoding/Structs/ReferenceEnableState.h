@@ -5,7 +5,7 @@
 
 #include <TiltedCore/Serialization.hpp>
 
-//! A placed reference switched on or off by a script in the party leader's game.
+//! A placed reference switched on or off by a script in a party member's game: the leader's quests, or any member's lever.
 struct ReferenceEnableState
 {
     GameId Id{};

@@ -10,7 +10,9 @@ enum class OwnershipReleaseReason : uint8_t
     Relinquish,
     DeclineGrant,
     // The owner's game deleted a temporary actor, so no other game takes it on.
-    Deleted
+    Deleted,
+    // The grabber's hold of a living NPC ended: it goes back to the game that ran it, or stays by the usual rules (GrabHold).
+    HoldEnded
 };
 
 struct RequestOwnershipTransfer final : ClientMessage

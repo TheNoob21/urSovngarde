@@ -1,4 +1,5 @@
 #include <Messages/PlayerDialogueRequest.h>
+#include <BoundedString.h>
 
 void PlayerDialogueRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -9,5 +10,5 @@ void PlayerDialogueRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReade
 {
     ClientMessage::DeserializeRaw(aReader);
 
-    Text = Serialization::ReadString(aReader);
+    Text = BoundedString::Read(aReader, BoundedString::kLongest);
 }

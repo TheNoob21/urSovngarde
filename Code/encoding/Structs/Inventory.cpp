@@ -1,25 +1,8 @@
 #include <Structs/Inventory.h>
+#include <DecodeGuard.h>
 #include <TiltedCore/Serialization.hpp>
 
 using TiltedPhoques::Serialization;
-
-void Inventory::EffectItem::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
-{
-    Serialization::WriteFloat(aWriter, Magnitude);
-    Serialization::WriteVarInt(aWriter, Area);
-    Serialization::WriteVarInt(aWriter, Duration);
-    Serialization::WriteFloat(aWriter, RawCost);
-    EffectId.Serialize(aWriter);
-}
-
-void Inventory::EffectItem::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
-{
-    Magnitude = Serialization::ReadFloat(aReader);
-    Area = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-    Duration = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-    RawCost = Serialization::ReadFloat(aReader);
-    EffectId.Deserialize(aReader);
-}
 
 void Inventory::Entry::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -48,9 +31,11 @@ void Inventory::Entry::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const n
     Serialization::WriteBool(aWriter, ExtraWorn);
     Serialization::WriteBool(aWriter, ExtraWornLeft);
     Serialization::WriteBool(aWriter, IsQuestItem);
+
+    Data.Serialize(aWriter);
 }
 
-void Inventory::Entry::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
+void Inventory::Entry::Deserialize(TiltedPhoques::Buffer::Reader& aReader, const bool aWithData) noexcept
 {
     BaseId.Deserialize(aReader);
     Count = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
@@ -60,11 +45,13 @@ void Inventory::Entry::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexc
     ExtraEnchantId.Deserialize(aReader);
     ExtraEnchantCharge = Serialization::ReadVarInt(aReader) & 0xFFFF;
     uint64_t effectCount = Serialization::ReadVarInt(aReader);
-    for (uint64_t i = 0; i < effectCount; i++)
+    for (uint64_t i = 0; i < effectCount && !aReader.Eof(); i++)
     {
         EffectItem effect;
         effect.Deserialize(aReader);
-        EnchantData.Effects.push_back(effect);
+        // A message with more effects than any item has keeps only the first ones.
+        if (EnchantData.Effects.size() < ItemEffects::kMaxEffects)
+            EnchantData.Effects.push_back(effect);
     }
 
     ExtraHealth = Serialization::ReadFloat(aReader);
@@ -79,6 +66,9 @@ void Inventory::Entry::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexc
     ExtraWorn = Serialization::ReadBool(aReader);
     ExtraWornLeft = Serialization::ReadBool(aReader);
     IsQuestItem = Serialization::ReadBool(aReader);
+
+    if (aWithData)
+        Data.Deserialize(aReader);
 }
 
 bool Inventory::operator==(const Inventory& acRhs) const noexcept
@@ -93,7 +83,7 @@ bool Inventory::operator!=(const Inventory& acRhs) const noexcept
 
 bool Inventory::Entry::operator==(const Inventory::Entry& acRhs) const noexcept
 {
-    return BaseId == acRhs.BaseId && Count == acRhs.Count && IsExtraDataEquals(acRhs);
+    return BaseId == acRhs.BaseId && Count == acRhs.Count && IsExtraDataEquals(acRhs) && Data.Base == acRhs.Data.Base;
 }
 
 bool Inventory::Entry::operator!=(const Inventory::Entry& acRhs) const noexcept
@@ -114,8 +104,13 @@ void Inventory::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 
 void Inventory::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
 {
-    uint32_t count = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-    for (uint32_t i = 0; i < count; i++)
+    // No real container or player holds more stacks than this.
+    constexpr uint64_t cMaxEntries = 65536;
+    const uint64_t cCount = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
+    if (!DecodeGuard::Within(cCount, cMaxEntries))
+        return;
+
+    for (uint64_t i = 0; i < cCount && !aReader.Eof(); i++)
     {
         Entry entry;
         entry.Deserialize(aReader);
@@ -176,7 +171,14 @@ void Inventory::UpdateEquipment(const Inventory& acNewInventory) noexcept
         if (!newEntry.IsWorn())
             continue;
 
-        auto entry = std::find_if(Entries.begin(), Entries.end(), [&newEntry](auto& aEntry) { return aEntry.BaseId == newEntry.BaseId; });
+        // The very stack first: an enchanted, tempered or named one is not the plain one of the same base.
+        Entry stack = newEntry;
+        stack.ExtraWorn = stack.ExtraWornLeft = false;
+        auto entry = std::find_if(Entries.begin(), Entries.end(), [&stack](auto& aEntry) { return !aEntry.IsWorn() && aEntry.CanBeMerged(stack); });
+        if (entry == Entries.end())
+            entry = std::find_if(Entries.begin(), Entries.end(), [&newEntry](auto& aEntry) { return aEntry.BaseId == newEntry.BaseId && !aEntry.IsWorn(); });
+        if (entry == Entries.end())
+            entry = std::find_if(Entries.begin(), Entries.end(), [&newEntry](auto& aEntry) { return aEntry.BaseId == newEntry.BaseId; });
 
         // This shouldn't happen
         if (entry == Entries.end())

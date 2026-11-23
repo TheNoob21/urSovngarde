@@ -1,14 +1,22 @@
 #pragma once
 
+#include <BoundedString.h>
 #include <DecodeGuard.h>
 
 #include <TiltedCore/Serialization.hpp>
 
+#include <algorithm>
+
 //! A list of plugin file names, as the NPC plugin messages carry it.
 namespace PluginList
 {
+using TiltedPhoques::Serialization;
+using TiltedPhoques::String;
+
 //! Far above any load order.
 constexpr uint64_t kMax = 4096;
+//! The longest a plugin file name can be.
+constexpr uint64_t kLongestName = 260;
 
 inline void Write(TiltedPhoques::Buffer::Writer& aWriter, const TiltedPhoques::Vector<String>& acList) noexcept
 {
@@ -26,7 +34,16 @@ inline void Read(TiltedPhoques::Buffer::Reader& aReader, TiltedPhoques::Vector<S
     if (!DecodeGuard::Within(cCount, kMax))
         return;
     for (uint64_t i = 0; i < cCount; ++i)
-        aList.push_back(Serialization::ReadString(aReader));
+    {
+        // A file name is at most 260 characters, and a name the message cannot hold fails it.
+        String name = BoundedString::Read(aReader, kLongestName);
+        if (DecodeGuard::t_failed)
+        {
+            aList.clear();
+            return;
+        }
+        aList.push_back(std::move(name));
+    }
 }
 
 //! "a, b, c"; past aShown names, the rest is counted ("and 3 more").

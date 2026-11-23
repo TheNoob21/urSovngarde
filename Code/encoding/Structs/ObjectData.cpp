@@ -5,7 +5,9 @@ using TiltedPhoques::Serialization;
 
 bool ObjectData::operator==(const ObjectData& acRhs) const noexcept
 {
-    return ServerId == acRhs.ServerId && Id == acRhs.Id && CellId == acRhs.CellId && WorldSpaceId == acRhs.WorldSpaceId && CurrentCoords == acRhs.CurrentCoords && CurrentLockData == acRhs.CurrentLockData && CurrentInventory == acRhs.CurrentInventory && DoorOpenState == acRhs.DoorOpenState && IsSenderFirst == acRhs.IsSenderFirst;
+    return ServerId == acRhs.ServerId && Id == acRhs.Id && CellId == acRhs.CellId && WorldSpaceId == acRhs.WorldSpaceId && CurrentCoords == acRhs.CurrentCoords &&
+           CurrentLockData == acRhs.CurrentLockData && CurrentInventory == acRhs.CurrentInventory && DoorOpenState == acRhs.DoorOpenState && IsSenderFirst == acRhs.IsSenderFirst &&
+           IsVendor == acRhs.IsVendor;
 }
 
 bool ObjectData::operator!=(const ObjectData& acRhs) const noexcept
@@ -24,6 +26,7 @@ void ObjectData::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcep
     CurrentInventory.Serialize(aWriter);
     aWriter.WriteBits(DoorOpenState, 8);
     Serialization::WriteBool(aWriter, IsSenderFirst);
+    Serialization::WriteBool(aWriter, IsVendor);
 }
 
 void ObjectData::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -39,4 +42,5 @@ void ObjectData::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
     aReader.ReadBits(doorOpenState, 8);
     DoorOpenState = doorOpenState & 0xFF;
     IsSenderFirst = Serialization::ReadBool(aReader);
+    IsVendor = Serialization::ReadBool(aReader);
 }

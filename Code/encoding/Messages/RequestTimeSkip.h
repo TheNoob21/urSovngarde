@@ -18,6 +18,8 @@ struct RequestTimeSkip final : ClientMessage
         kWithdrawCombat, // the player entered combat while confirmed
         kAwake,          // the game's own sleep or wait has finished
         kDropCrossed,    // the game no longer counts a confirmation it sent as a vote ended or a refusal came
+        kAway,           // the game is loading or at the main menu; after a while the vote stops waiting for this player
+        kBack,           // the game is back in the world after kAway
     };
 
     /**

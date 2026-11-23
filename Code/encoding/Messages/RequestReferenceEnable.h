@@ -4,7 +4,7 @@
 
 #include <Structs/ReferenceEnableState.h>
 
-//! References the party leader's scripts switched on or off since the last send, in the order it happened.
+//! References this game's scripts switched on or off since the last send, in the order it happened (SharedHomes::SharesSwitch).
 struct RequestReferenceEnable final : ClientMessage
 {
     static constexpr ClientOpcode Opcode = kRequestReferenceEnable;

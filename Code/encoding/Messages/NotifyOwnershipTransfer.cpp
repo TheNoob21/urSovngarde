@@ -8,6 +8,9 @@ void NotifyOwnershipTransfer::SerializeRaw(TiltedPhoques::Buffer::Writer& aWrite
     CurrentActorData.Serialize(aWriter);
     LeveledNpcPickId.Serialize(aWriter);
     Serialization::WriteVarInt(aWriter, CombatTarget);
+    CellId.Serialize(aWriter);
+    Position.Serialize(aWriter);
+    Serialization::WriteFloat(aWriter, Heading);
 }
 
 void NotifyOwnershipTransfer::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -20,4 +23,7 @@ void NotifyOwnershipTransfer::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRea
     CurrentActorData.Deserialize(aReader);
     LeveledNpcPickId.Deserialize(aReader);
     CombatTarget = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
+    CellId.Deserialize(aReader);
+    Position.Deserialize(aReader);
+    Heading = Serialization::ReadFloat(aReader);
 }

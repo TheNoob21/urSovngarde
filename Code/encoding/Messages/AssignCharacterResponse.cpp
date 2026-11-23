@@ -17,6 +17,7 @@ void AssignCharacterResponse::SerializeRaw(TiltedPhoques::Buffer::Writer& aWrite
     Serialization::WriteBool(aWriter, IsDead);
     Serialization::WriteBool(aWriter, IsWeaponDrawn);
     Serialization::WriteBool(aWriter, RevivedSinceDeath);
+    aWriter.WriteBits(DismemberedLimbs, 16);
     LeveledNpcPickId.Serialize(aWriter);
     Serialization::WriteVarInt(aWriter, FollowerOfPlayerId);
     FactionsContent.Serialize(aWriter);
@@ -39,6 +40,9 @@ void AssignCharacterResponse::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRea
     IsDead = Serialization::ReadBool(aReader);
     IsWeaponDrawn = Serialization::ReadBool(aReader);
     RevivedSinceDeath = Serialization::ReadBool(aReader);
+    uint64_t limbs = 0;
+    aReader.ReadBits(limbs, 16);
+    DismemberedLimbs = static_cast<uint16_t>(limbs);
     LeveledNpcPickId.Deserialize(aReader);
     FollowerOfPlayerId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
     FactionsContent = {};

@@ -43,5 +43,8 @@ UniquePtr<ClientMessage> ClientMessageFactory::Extract(TiltedPhoques::Buffer::Re
         return {nullptr};
 
     const auto opcode = static_cast<ClientOpcode>(data);
+    // An opcode with no message type has no reader.
+    if (!s_clientMessageExtractor[opcode]) [[unlikely]]
+        return {nullptr};
     return s_clientMessageExtractor[opcode](aReader);
 }

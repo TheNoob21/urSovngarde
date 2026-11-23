@@ -1,4 +1,5 @@
 #include <Messages/CharacterSpawnRequest.h>
+#include <BoundedString.h>
 
 void CharacterSpawnRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -25,6 +26,8 @@ void CharacterSpawnRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter)
     Serialization::WriteBool(aWriter, IsDragon);
     Serialization::WriteVarInt(aWriter, FollowerOfPlayerId);
     Serialization::WriteBool(aWriter, RevivedSinceDeath);
+    aWriter.WriteBits(DismemberedLimbs, 16);
+    Serialization::WriteVarInt(aWriter, SpawnGeneration);
 }
 
 void CharacterSpawnRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -42,7 +45,7 @@ void CharacterSpawnRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReade
     aReader.ReadBits(dest, 32);
     ChangeFlags = dest & 0xFFFFFFFF;
 
-    AppearanceBuffer = Serialization::ReadString(aReader);
+    AppearanceBuffer = BoundedString::Read(aReader, BoundedString::kLargest);
     InventoryContent = {};
     InventoryContent.Deserialize(aReader);
 
@@ -65,4 +68,7 @@ void CharacterSpawnRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReade
     IsDragon = Serialization::ReadBool(aReader);
     FollowerOfPlayerId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
     RevivedSinceDeath = Serialization::ReadBool(aReader);
+    aReader.ReadBits(dest, 16);
+    DismemberedLimbs = static_cast<uint16_t>(dest);
+    SpawnGeneration = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
 }

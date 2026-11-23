@@ -3,6 +3,7 @@
 #include <optional>
 
 #include "MagicEquipment.h"
+#include "ItemData.h"
 
 using TiltedPhoques::Buffer;
 using TiltedPhoques::String;
@@ -10,17 +11,7 @@ using TiltedPhoques::Vector;
 
 struct Inventory
 {
-    struct EffectItem
-    {
-        float Magnitude{};
-        int32_t Area{};
-        int32_t Duration{};
-        float RawCost{};
-        GameId EffectId{};
-
-        void Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept;
-        void Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept;
-    };
+    using EffectItem = ItemEffect;
 
     struct EnchantmentData
     {
@@ -51,11 +42,15 @@ struct Inventory
         bool ExtraWornLeft{};
         bool IsQuestItem{};
 
+        //! Name, and a made potion or poison as what it does (ItemData).
+        ItemData Data{};
+
         bool operator==(const Entry& acRhs) const noexcept;
         bool operator!=(const Entry& acRhs) const noexcept;
 
         void Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept;
-        void Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept;
+        //! aWithData false reads an entry written before it carried ItemData (a server's old dropped-item file).
+        void Deserialize(TiltedPhoques::Buffer::Reader& aReader, bool aWithData = true) noexcept;
 
         bool ContainsExtraData() const noexcept { return !IsExtraDataEquals(Entry{}); }
 
@@ -66,8 +61,10 @@ struct Inventory
             // TODO: the whole server side state thing is very flawed
             // since many of these things can and will change, like poison id or charge
             // or the fact that the enchant id can be temp
-            return ExtraCharge == acRhs.ExtraCharge && ExtraEnchantId == acRhs.ExtraEnchantId && ExtraEnchantCharge == acRhs.ExtraEnchantCharge && ExtraEnchantRemoveUnequip == acRhs.ExtraEnchantRemoveUnequip && ExtraHealth == acRhs.ExtraHealth && ExtraPoisonId == acRhs.ExtraPoisonId &&
-                   ExtraPoisonCount == acRhs.ExtraPoisonCount && ExtraSoulLevel == acRhs.ExtraSoulLevel && ExtraWorn == acRhs.ExtraWorn && ExtraWornLeft == acRhs.ExtraWornLeft && IsQuestItem == acRhs.IsQuestItem;
+            return ExtraCharge == acRhs.ExtraCharge && ExtraEnchantId == acRhs.ExtraEnchantId && ExtraEnchantCharge == acRhs.ExtraEnchantCharge &&
+                   ExtraEnchantRemoveUnequip == acRhs.ExtraEnchantRemoveUnequip && ExtraHealth == acRhs.ExtraHealth && ExtraPoisonId == acRhs.ExtraPoisonId &&
+                   ExtraPoisonCount == acRhs.ExtraPoisonCount && ExtraSoulLevel == acRhs.ExtraSoulLevel && ExtraWorn == acRhs.ExtraWorn && ExtraWornLeft == acRhs.ExtraWornLeft &&
+                   IsQuestItem == acRhs.IsQuestItem && Data.IsExtraEqual(acRhs.Data);
         }
 
         bool IsWorn() const noexcept { return ExtraWorn || ExtraWornLeft; }

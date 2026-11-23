@@ -1,4 +1,5 @@
 #include <Messages/RequestRespawn.h>
+#include <BoundedString.h>
 
 void RequestRespawn::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -14,8 +15,8 @@ void RequestRespawn::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noex
     ClientMessage::DeserializeRaw(aReader);
 
     ActorId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-    AppearanceBuffer = Serialization::ReadString(aReader);
+    AppearanceBuffer = BoundedString::Read(aReader, BoundedString::kLargest);
     ChangeFlags = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
     FaceTints.Deserialize(aReader);
-    Username = Serialization::ReadString(aReader);
+    Username = BoundedString::Read(aReader, 256);
 }

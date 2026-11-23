@@ -13,6 +13,33 @@
 #include <Messages/PartyInviteRequest.h>
 #include <Messages/PartyAcceptInviteRequest.h>
 #include <Messages/PartyLeaveRequest.h>
+#include <Messages/RequestPartyFastTravel.h>
+#include <Messages/RequestPartyFollow.h>
+#include <Messages/RequestQuestCatchUp.h>
+#include <Messages/RequestSaveLoaded.h>
+#include <Messages/RequestArrowPickup.h>
+#include <Messages/RequestTrackedQuests.h>
+#include <Messages/RequestDetectionLevels.h>
+#include <Messages/RequestFollowerCommand.h>
+#include <Messages/RequestCrimeReport.h>
+#include <Messages/RequestStuckArrow.h>
+#include <Messages/RequestDismember.h>
+#include <Messages/RequestWordLearned.h>
+#include <Messages/RequestTrapFire.h>
+#include <Messages/RequestActivationState.h>
+#include <Messages/RequestReferenceState.h>
+#include <Messages/RequestCombatTarget.h>
+#include <Messages/RequestDismount.h>
+#include <Messages/RequestNpcFurniture.h>
+#include <Messages/RequestNpcHeadTrack.h>
+#include <Messages/RequestRagdollPose.h>
+#include <Messages/RequestPropBodies.h>
+#include <Messages/RequestItemTake.h>
+#include <Messages/RequestMapDiscovery.h>
+#include <Messages/RequestItemDataChange.h>
+#include <Messages/RequestMagicState.h>
+#include <Messages/RequestPlayerFurniture.h>
+#include <Messages/RequestExtension.h>
 #include <Messages/PartyCreateRequest.h>
 #include <Messages/PartyChangeLeaderRequest.h>
 #include <Messages/PartyKickRequest.h>
@@ -20,6 +47,7 @@
 #include <Messages/RequestActorValueChanges.h>
 #include <Messages/RequestActorMaxValueChanges.h>
 #include <Messages/RequestHealthChangeBroadcast.h>
+#include <Messages/RequestHitReaction.h>
 #include <Messages/ActivateRequest.h>
 #include <Messages/LockChangeRequest.h>
 #include <Messages/AssignObjectsRequest.h>
@@ -43,6 +71,7 @@
 #include <Messages/RequestHourMove.h>
 #include <Messages/RequestReferenceEnable.h>
 #include <Messages/RequestWarState.h>
+#include <Messages/RequestQuestAliases.h>
 #include <Messages/RequestFollowerState.h>
 #include <Messages/RequestPartyPlugin.h>
 #include <Messages/RequestPartyValue.h>
@@ -88,11 +117,20 @@ struct ClientMessageFactory
     template <class T> static auto Visit(T&& func)
     {
         auto s_visitor = CreateMessageVisitor<
-            AuthenticationRequest, AssignCharacterRequest, ClientReferencesMoveRequest, EnterInteriorCellRequest, RequestInventoryChanges, RequestFactionsChanges, RequestQuestUpdate, PartyInviteRequest, PartyAcceptInviteRequest, PartyLeaveRequest, PartyCreateRequest,
-            PartyChangeLeaderRequest, PartyKickRequest, RequestActorValueChanges, RequestActorMaxValueChanges, EnterExteriorCellRequest, RequestHealthChangeBroadcast, ActivateRequest, LockChangeRequest, AssignObjectsRequest, RequestDeathStateChange, ShiftGridCellRequest,
-            RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest, ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, MountRequest, NewPackageRequest, RequestRespawn, SyncExperienceRequest,
-            RequestEquipmentChanges, SendChatMessageRequest, TeleportCommandRequest, PlayerRespawnRequest, DialogueRequest, SubtitleRequest, PlayerDialogueRequest, PlayerLevelRequest, TeleportRequest, RequestPlayerHealthUpdate, RequestWeatherChange, RequestCurrentWeather, RequestSetWaypoint,
-            RequestRemoveWaypoint, RemoveSpellRequest, SetTimeCommandRequest, RequestDroppedItemAdd, RequestDroppedItemRemove, RequestDroppedItemMove, RequestWorldObjectMove, ClashRequest, PlayerPlaceRequest, VoiceDataRequest, VoiceStateRequest, ArrowNockedRequest, PlayerDownedRequest, ReviveRequest, SafePointRequest, RequestActionEvents, RequestHourMove, RequestReferenceEnable, RequestWarState, RequestFollowerState, RequestPartyPlugin, RequestPartyValue, RequestActorPresence, RequestNpcPlugins, RequestTimeSkip, RequestCombatState>;
+            AuthenticationRequest, AssignCharacterRequest, ClientReferencesMoveRequest, EnterInteriorCellRequest, RequestInventoryChanges, RequestFactionsChanges,
+            RequestQuestUpdate, PartyInviteRequest, PartyAcceptInviteRequest, PartyLeaveRequest, PartyCreateRequest, PartyChangeLeaderRequest, PartyKickRequest,
+            RequestActorValueChanges, RequestActorMaxValueChanges, EnterExteriorCellRequest, RequestHealthChangeBroadcast, RequestHitReaction, ActivateRequest, LockChangeRequest,
+            AssignObjectsRequest, RequestDeathStateChange, ShiftGridCellRequest, RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest,
+            ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, MountRequest, NewPackageRequest, RequestRespawn,
+            SyncExperienceRequest, RequestEquipmentChanges, SendChatMessageRequest, TeleportCommandRequest, PlayerRespawnRequest, DialogueRequest, SubtitleRequest,
+            PlayerDialogueRequest, PlayerLevelRequest, TeleportRequest, RequestPlayerHealthUpdate, RequestWeatherChange, RequestCurrentWeather, RequestSetWaypoint,
+            RequestRemoveWaypoint, RemoveSpellRequest, SetTimeCommandRequest, RequestDroppedItemAdd, RequestDroppedItemRemove, RequestDroppedItemMove, RequestWorldObjectMove,
+            ClashRequest, PlayerPlaceRequest, VoiceDataRequest, VoiceStateRequest, ArrowNockedRequest, PlayerDownedRequest, ReviveRequest, SafePointRequest, RequestActionEvents,
+            RequestHourMove, RequestReferenceEnable, RequestWarState, RequestFollowerState, RequestPartyPlugin, RequestPartyValue, RequestActorPresence, RequestNpcPlugins,
+            RequestTimeSkip, RequestCombatState, RequestQuestAliases, RequestPartyFastTravel, RequestPartyFollow, RequestTrackedQuests, RequestDetectionLevels,
+            RequestFollowerCommand, RequestCrimeReport, RequestStuckArrow, RequestDismember, RequestWordLearned, RequestTrapFire, RequestCombatTarget, RequestDismount,
+            RequestNpcFurniture, RequestNpcHeadTrack, RequestRagdollPose, RequestPropBodies, RequestItemTake, RequestMapDiscovery, RequestItemDataChange, RequestMagicState,
+            RequestPlayerFurniture, RequestExtension, RequestActivationState, RequestReferenceState, RequestQuestCatchUp, RequestArrowPickup, RequestSaveLoaded>;
 
         return s_visitor(std::forward<T>(func));
     }

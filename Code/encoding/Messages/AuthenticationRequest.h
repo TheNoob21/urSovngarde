@@ -2,6 +2,7 @@
 
 #include "Message.h"
 #include <Structs/Mods.h>
+#include <Structs/ModContentSizes.h>
 #include <TiltedCore/Buffer.hpp>
 #include <Structs/GameId.h>
 #include <Structs/TimeModel.h>
@@ -22,9 +23,10 @@ struct AuthenticationRequest final : ClientMessage
 
     bool operator==(const AuthenticationRequest& achRhs) const noexcept
     {
-        return GetOpcode() == achRhs.GetOpcode() && DiscordId == achRhs.DiscordId && SKSEActive == achRhs.SKSEActive && MO2Active == achRhs.MO2Active && Token == achRhs.Token && Version == achRhs.Version && Protocol == achRhs.Protocol && UserMods == achRhs.UserMods && Username == achRhs.Username &&
-               WorldSpaceId == achRhs.WorldSpaceId && CellId == achRhs.CellId && Level == achRhs.Level
-            && PlayerTime == achRhs.PlayerTime && HideFromPublicPage == achRhs.HideFromPublicPage && IsFlat == achRhs.IsFlat;
+        return GetOpcode() == achRhs.GetOpcode() && DiscordId == achRhs.DiscordId && SKSEActive == achRhs.SKSEActive && MO2Active == achRhs.MO2Active && Token == achRhs.Token &&
+               Version == achRhs.Version && Protocol == achRhs.Protocol && UserMods == achRhs.UserMods && Username == achRhs.Username && WorldSpaceId == achRhs.WorldSpaceId &&
+               CellId == achRhs.CellId && Level == achRhs.Level && PlayerTime == achRhs.PlayerTime && HideFromPublicPage == achRhs.HideFromPublicPage &&
+               ContentSizes == achRhs.ContentSizes;
     }
 
     uint64_t DiscordId{};
@@ -42,6 +44,5 @@ struct AuthenticationRequest final : ClientMessage
     TimeModel PlayerTime{};
     //! Hide this player from the public server page; sent here so that even the first update leaves them out.
     bool HideFromPublicPage{};
-    //! The player plays flat Skyrim, not Skyrim VR.
-    bool IsFlat{};
+    ModContentSizes ContentSizes{};
 };

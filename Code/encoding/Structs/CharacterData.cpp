@@ -1,5 +1,6 @@
 #include <Structs/CharacterData.h>
 #include <TiltedCore/Serialization.hpp>
+#include <BoundedString.h>
 
 using TiltedPhoques::Serialization;
 
@@ -36,7 +37,7 @@ void CharacterData::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
     aReader.ReadBits(dest, 32);
     ChangeFlags = dest & 0xFFFFFFFF;
 
-    AppearanceBuffer = Serialization::ReadString(aReader);
+    AppearanceBuffer = BoundedString::Read(aReader, BoundedString::kLargest);
     InventoryContent = {};
     InventoryContent.Deserialize(aReader);
 

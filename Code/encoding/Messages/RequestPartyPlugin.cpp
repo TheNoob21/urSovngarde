@@ -1,4 +1,5 @@
 #include <Messages/RequestPartyPlugin.h>
+#include <BoundedString.h>
 
 void RequestPartyPlugin::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -9,5 +10,5 @@ void RequestPartyPlugin::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) 
 {
     ClientMessage::DeserializeRaw(aReader);
 
-    PluginFile = Serialization::ReadString(aReader);
+    PluginFile = BoundedString::Read(aReader, 260);
 }

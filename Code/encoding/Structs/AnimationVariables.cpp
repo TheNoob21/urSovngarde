@@ -29,7 +29,8 @@ void AnimationVariables::VectorBool_to_String(const Vector<bool>& bools, TiltedP
             *citer |= *biter++ ? mask : 0;
 }
 
-// The Vector<bool> must be the correct size when called.
+// The Vector<bool> must be the correct size when called. A string shorter than the flags need leaves the rest false:
+// the string comes from the network and must not be read past its end.
 //
 void AnimationVariables::String_to_VectorBool(const TiltedPhoques::String& chars, Vector<bool>& bools)
 {
@@ -37,7 +38,7 @@ void AnimationVariables::String_to_VectorBool(const TiltedPhoques::String& chars
 
     auto citer = chars.begin();
     auto biter = bools.begin();
-    for (uint32_t mask = 1; biter < bools.end(); mask = 1, citer++)
+    for (uint32_t mask = 1; biter < bools.end() && citer != chars.end(); mask = 1, citer++)
         for (; mask < 0x100 && biter < bools.end(); mask <<= 1)
             *biter++ = (*citer & mask) ? true : false;
 }
@@ -130,6 +131,14 @@ void AnimationVariables::ApplyDiff(TiltedPhoques::Buffer::Reader& aReader)
     
     TiltedPhoques::Vector<bool> changedVector(booleansSize + integersSize + floatsSize);
     auto chars = TiltedPhoques::Serialization::ReadString(aReader);
+    // The flags need a bit each; a shorter string is a damaged message.
+    if (!DecodeGuard::Within((changedVector.size() + 7) >> 3, chars.size()))
+    {
+        Booleans.clear();
+        Integers.clear();
+        Floats.clear();
+        return;
+    }
     String_to_VectorBool(chars, changedVector);
 
     Booleans.assign(changedVector.begin(), changedVector.begin() + booleansSize);

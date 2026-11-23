@@ -21,6 +21,7 @@
 #include <Messages/NotifyActorValueChanges.h>
 #include <Messages/NotifyActorMaxValueChanges.h>
 #include <Messages/NotifyHealthChangeBroadcast.h>
+#include <Messages/NotifyHitReaction.h>
 #include <Messages/NotifyActivate.h>
 #include <Messages/NotifyLockChange.h>
 #include <Messages/AssignObjectsResponse.h>
@@ -70,12 +71,41 @@
 #include <Messages/NotifyActionEvents.h>
 #include <Messages/NotifyHourMove.h>
 #include <Messages/NotifyReferenceEnable.h>
+#include <Messages/NotifyQuestCatchUp.h>
+#include <Messages/NotifyPartyFastTravel.h>
+#include <Messages/NotifyTrackedQuests.h>
+#include <Messages/NotifyDetectionLevels.h>
+#include <Messages/NotifyFollowerCommand.h>
+#include <Messages/NotifyCrimeReport.h>
+#include <Messages/NotifyStuckArrow.h>
+#include <Messages/NotifyDismember.h>
+#include <Messages/NotifyWordLearned.h>
+#include <Messages/NotifyTrapFire.h>
+#include <Messages/NotifyDragonSoul.h>
+#include <Messages/NotifyCombatTarget.h>
+#include <Messages/NotifyDismount.h>
+#include <Messages/NotifyModListsDiffer.h>
+#include <Messages/NotifyNpcFurniture.h>
+#include <Messages/NotifyNpcHeadTrack.h>
+#include <Messages/NotifyRagdollPose.h>
+#include <Messages/NotifyPropBodies.h>
+#include <Messages/NotifyItemTakeLost.h>
+#include <Messages/NotifyMapDiscovery.h>
+#include <Messages/NotifyActivationCatchUp.h>
+#include <Messages/NotifyReferenceStates.h>
+#include <Messages/NotifyArrowPickup.h>
+#include <Messages/NotifyItemDataChange.h>
+#include <Messages/NotifyMagicState.h>
+#include <Messages/NotifyPlayerFurniture.h>
+#include <Messages/NotifyServerIdentity.h>
+#include <Messages/NotifyExtension.h>
 #include <Messages/NotifyPartyPlugin.h>
 #include <Messages/NotifyNpcPluginsDiffer.h>
 #include <Messages/NotifyPlayerName.h>
 #include <Messages/NotifyTimeSkip.h>
 #include <Messages/NotifyPartyValue.h>
 #include <Messages/NotifyWarState.h>
+#include <Messages/NotifyQuestAliases.h>
 
 using TiltedPhoques::UniquePtr;
 
@@ -86,11 +116,20 @@ struct ServerMessageFactory
     template <class T> static auto Visit(T&& func)
     {
         auto s_visitor = CreateMessageVisitor<
-            AuthenticationResponse, AssignCharacterResponse, ServerReferencesMoveRequest, ServerTimeSettings, CharacterSpawnRequest, NotifyInventoryChanges, StringCacheUpdate, NotifyFactionsChanges, NotifyRemoveCharacter, NotifyQuestUpdate, NotifyPlayerList, NotifyPartyInfo, NotifyPartyInvite,
-            NotifyActorValueChanges, NotifyPartyJoined, NotifyPartyLeft, NotifyActorMaxValueChanges, NotifyHealthChangeBroadcast, NotifyActivate, NotifyLockChange, AssignObjectsResponse, NotifyDeathStateChange, NotifyOwnershipTransfer, NotifyObjectInventoryChanges, NotifySpellCast,
-            NotifyProjectileLaunch, NotifyInterruptCast, NotifyAddTarget, NotifyScriptAnimation, NotifyDrawWeapon, NotifyMount, NotifyNewPackage, NotifyRespawn, NotifySyncExperience, NotifyEquipmentChanges, NotifyChatMessageBroadcast, TeleportCommandResponse, NotifyPlayerRespawn, NotifyDialogue,
-            NotifySubtitle, NotifyPlayerDialogue, NotifyActorTeleport, NotifyPlayerLeft, NotifyPlayerJoined, NotifyDialogue, NotifySubtitle, NotifyPlayerDialogue, NotifyPlayerLevel, NotifyPlayerCellChanged, NotifyTeleport, NotifyPlayerHealthUpdate, NotifySettingsChange,
-            NotifyWeatherChange, NotifySetWaypoint, NotifyRemoveWaypoint, NotifySetTimeResult, NotifyRemoveSpell, NotifyDroppedItem, NotifyDroppedItemRemoved, NotifyDroppedItemMove, NotifyWorldObjectMove, NotifyClash, NotifyVoiceData, NotifyPlayerWhereabouts, NotifyArrowNocked, NotifyDownedState, NotifyActionEvents, NotifyHourMove, NotifyReferenceEnable, NotifyWarState, NotifyPartyPlugin, NotifyPartyValue, NotifyNpcPluginsDiffer, NotifyPlayerName, NotifyTimeSkip>;
+            AuthenticationResponse, AssignCharacterResponse, ServerReferencesMoveRequest, ServerTimeSettings, CharacterSpawnRequest, NotifyInventoryChanges, StringCacheUpdate,
+            NotifyFactionsChanges, NotifyRemoveCharacter, NotifyQuestUpdate, NotifyPlayerList, NotifyPartyInfo, NotifyPartyInvite, NotifyActorValueChanges, NotifyPartyJoined,
+            NotifyPartyLeft, NotifyActorMaxValueChanges, NotifyHealthChangeBroadcast, NotifyHitReaction, NotifyActivate, NotifyLockChange, AssignObjectsResponse,
+            NotifyDeathStateChange, NotifyOwnershipTransfer, NotifyObjectInventoryChanges, NotifySpellCast, NotifyProjectileLaunch, NotifyInterruptCast, NotifyAddTarget,
+            NotifyScriptAnimation, NotifyDrawWeapon, NotifyMount, NotifyNewPackage, NotifyRespawn, NotifySyncExperience, NotifyEquipmentChanges, NotifyChatMessageBroadcast,
+            TeleportCommandResponse, NotifyPlayerRespawn, NotifyDialogue, NotifySubtitle, NotifyPlayerDialogue, NotifyActorTeleport, NotifyPlayerLeft, NotifyPlayerJoined,
+            NotifyPlayerLevel, NotifyPlayerCellChanged, NotifyTeleport, NotifyPlayerHealthUpdate, NotifySettingsChange, NotifyWeatherChange, NotifySetWaypoint,
+            NotifyRemoveWaypoint, NotifySetTimeResult, NotifyRemoveSpell, NotifyDroppedItem, NotifyDroppedItemRemoved, NotifyDroppedItemMove, NotifyWorldObjectMove, NotifyClash,
+            NotifyVoiceData, NotifyPlayerWhereabouts, NotifyArrowNocked, NotifyDownedState, NotifyActionEvents, NotifyHourMove, NotifyReferenceEnable, NotifyWarState,
+            NotifyPartyPlugin, NotifyPartyValue, NotifyNpcPluginsDiffer, NotifyPlayerName, NotifyTimeSkip, NotifyQuestAliases, NotifyQuestCatchUp, NotifyPartyFastTravel,
+            NotifyTrackedQuests, NotifyDetectionLevels, NotifyFollowerCommand, NotifyCrimeReport, NotifyStuckArrow, NotifyDismember, NotifyWordLearned, NotifyTrapFire,
+            NotifyDragonSoul, NotifyCombatTarget, NotifyDismount, NotifyModListsDiffer, NotifyNpcFurniture, NotifyNpcHeadTrack, NotifyRagdollPose, NotifyPropBodies,
+            NotifyItemTakeLost, NotifyMapDiscovery, NotifyActivationCatchUp, NotifyItemDataChange, NotifyMagicState, NotifyPlayerFurniture, NotifyServerIdentity, NotifyExtension,
+            NotifyReferenceStates, NotifyArrowPickup>;
 
         return s_visitor(std::forward<T>(func));
     }

@@ -1,4 +1,5 @@
 #include <Messages/AssignCharacterRequest.h>
+#include <BoundedString.h>
 
 void AssignCharacterRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -39,7 +40,7 @@ void AssignCharacterRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRead
     aReader.ReadBits(dest, 32);
     ChangeFlags = dest & 0xFFFFFFFF;
 
-    AppearanceBuffer = Serialization::ReadString(aReader);
+    AppearanceBuffer = BoundedString::Read(aReader, BoundedString::kLargest);
 
     FactionsContent = {};
     FactionsContent.Deserialize(aReader);

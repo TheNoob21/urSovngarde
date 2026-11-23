@@ -1,4 +1,5 @@
 #include <Messages/TeleportCommandRequest.h>
+#include <BoundedString.h>
 
 void TeleportCommandRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -9,5 +10,5 @@ void TeleportCommandRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRead
 {
     ClientMessage::DeserializeRaw(aReader);
 
-    TargetPlayer = Serialization::ReadString(aReader);
+    TargetPlayer = BoundedString::Read(aReader, 256);
 }

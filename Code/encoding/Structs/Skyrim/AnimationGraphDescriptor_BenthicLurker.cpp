@@ -1,0 +1,97 @@
+#include <Structs/AnimationGraphDescriptorManager.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_BenthicLurker.h>
+
+AnimationGraphDescriptor_BenthicLurker::AnimationGraphDescriptor_BenthicLurker(AnimationGraphDescriptorManager& aManager)
+{
+    enum Variables
+    {
+        kiSyncIdleLocomotion = 0,
+        kSpeed = 1,
+        kDirection = 2,
+        kbAnimationDriven = 3,
+        kBlendDefault = 4,
+        kIsAttacking = 5,
+        kBlendFast = 6,
+        kTurnDelta = 7,
+        kiSyncTurnState = 8,
+        kIsAttackReady = 9,
+        kIsRecoiling = 10,
+        kIsStaggering = 11,
+        kstaggerMagnitude = 12,
+        kTargetLocation = 13,
+        kIsBleedingOut = 14,
+        kBlendSlow = 15,
+        kFootIKEnable = 16,
+        km_onOffGain = 17,
+        km_groundAscendingGain = 18,
+        km_groundDescendingGain = 19,
+        km_footPlantedGain = 20,
+        km_footRaisedGain = 21,
+        km_footUnlockGain = 22,
+        km_worldFromModelFeedbackGain = 23,
+        km_errorUpDownBias = 24,
+        km_alignWorldFromModelGain = 25,
+        km_hipOrientationGain = 26,
+        km_footPlantedAnkleHeightMS = 27,
+        km_footRaisedAnkleHeightMS = 28,
+        km_maxAnkleHeightMS = 29,
+        km_minAnkleHeightMS = 30,
+        kbEquipOK = 31,
+        kiSyncDefaultState = 32,
+        kbHeadTrackingOn = 33,
+        kbCanHeadTrack = 34,
+        kfMinSpeed = 35,
+        kfMinTurnSpeed = 36,
+        kiState = 37,
+        km_footEndLS = 38,
+        kSpeedSampled = 39,
+        kIsBashing = 40,
+        kiState_BenthicLurkerCombatRun = 41,
+        kcamerafromx = 42,
+        kcamerafromy = 43,
+        kcamerafromz = 44,
+        kDirectionDamped = 45,
+        kDirectionGain = 46,
+        kIsRooting = 47,
+        km_raycastDistanceUp = 48,
+        km_raycastDistanceDown = 49,
+        kstaggerDirection = 50,
+        km_errorOutTranslation = 51,
+        kbAllowRotation = 52,
+        kiGetUpType = 53,
+        kbHeadtracking = 54,
+        kbIsSynced = 55,
+        kiStateRunWalk = 56,
+        kiState_BenthicLurkerDefault = 57,
+        kiStateCurrent = 58,
+        kIsBleedingOutTransition = 59,
+        kbWantCastLeft = 60,
+        kbMLh_Ready = 61,
+        kAttackSpeed = 62,
+    };
+
+    uint64_t key = 6930025242429736649;
+
+    AnimationGraphDescriptorManager::Builder s_builder(
+        aManager, key,
+        AnimationGraphDescriptor(
+            {
+                kbAnimationDriven,
+                kbAllowRotation,
+                kIsRecoiling,
+                kIsStaggering,
+                kIsAttacking,
+                kIsAttackReady,
+            },
+            {
+                kSpeed,
+                kTurnDelta,
+                kDirection,
+                kSpeedSampled,
+            },
+            {
+                kiSyncIdleLocomotion,
+                kiSyncTurnState,
+                kiSyncDefaultState,
+            }));
+}

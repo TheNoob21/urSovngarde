@@ -43,5 +43,8 @@ UniquePtr<ServerMessage> ServerMessageFactory::Extract(TiltedPhoques::Buffer::Re
         return {nullptr};
 
     const auto opcode = static_cast<ServerOpcode>(data);
+    // An opcode with no message type has no reader.
+    if (!s_serverMessageExtractor[opcode]) [[unlikely]]
+        return {nullptr};
     return s_serverMessageExtractor[opcode](aReader);
 }

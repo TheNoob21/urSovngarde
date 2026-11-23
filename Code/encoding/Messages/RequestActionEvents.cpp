@@ -33,13 +33,14 @@ void RequestActionEvents::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader)
     {
         const uint32_t cServerId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
         const auto cActions = Serialization::ReadVarInt(aReader);
-        total += cActions;
-        if (Actions.find(cServerId) != Actions.end() || !DecodeGuard::Within(total, cMaxActions))
+        // Each count is checked on its own first, so the running total cannot wrap.
+        if (Actions.find(cServerId) != Actions.end() || !DecodeGuard::Within(cActions, cMaxActions) || !DecodeGuard::Within(total + cActions, cMaxActions))
         {
             DecodeGuard::Fail();
             Actions.clear();
             return;
         }
+        total += cActions;
 
         auto& actions = Actions[cServerId];
         actions.resize(cActions);

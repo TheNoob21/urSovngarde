@@ -10,6 +10,7 @@ void RequestDroppedItemAdd::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter)
     Serialization::WriteFloat(aWriter, Rotation.y);
     Serialization::WriteFloat(aWriter, Rotation.z);
     Serialization::WriteBool(aWriter, Announcement);
+    Serialization::WriteVarInt(aWriter, RequestId);
 }
 
 void RequestDroppedItemAdd::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -24,4 +25,5 @@ void RequestDroppedItemAdd::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReade
     Rotation.y = Serialization::ReadFloat(aReader);
     Rotation.z = Serialization::ReadFloat(aReader);
     Announcement = Serialization::ReadBool(aReader);
+    RequestId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
 }

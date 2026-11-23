@@ -311,16 +311,21 @@ AnimationGraphDescriptor_Master_Behavior::AnimationGraphDescriptor_Master_Behavi
     AnimationGraphDescriptorManager::Builder s_builder(
         aManager, m_key,
         AnimationGraphDescriptor(
-            {kbEquipOk, kbMotionDriven, kIsBeastRace, kIsSneaking, kIsBleedingOut, kIsCastingDual, kIs1HM, kIsCastingRight, kIsCastingLeft, kIsBlockHit, kIsPlayer, kIsNPC, kbIsSynced, kbVoiceReady, kbWantCastLeft, kbWantCastRight, kbWantCastVoice, kb1HM_MLh_attack, kb1HMCombat, kbAnimationDriven,
-             kbCastReady, kIsAttacking, kbAllowRotation, kbMagicDraw, kbMLh_Ready, kbMRh_Ready, kbInMoveState, kbSprintOK, kbIdlePlaying, kbIsDialogueExpressive, kbAnimObjectLoaded, kbEquipUnequip, kbAttached, kbIsH2HSolo, kbHeadTracking, kbIsRiding, kbTalkable, kbRitualSpellActive, kbInJumpState,
-             kbHeadTrackSpine, kbLeftHandAttack, kbIsInMT, kbHumanoidFootIKEnable, kbHumanoidFootIKDisable, kbStaggerPlayerOverride, kbNoStagger, kbIsStaffLeftCasting, kbPerkShieldCharge, kbPerkQuickShot, kIsBlocking, kIsBashing, kIsStaggering, kIsRecoiling, kIsEquipping, kIsUnequipping,
-             kisInFurniture, kbNeutralState, kbBowDrawn,
+            {kbEquipOk, kbMotionDriven, kIsBeastRace, kIsSneaking, kIsBleedingOut, kIsCastingDual, kIs1HM, kIsCastingRight, kIsCastingLeft, kIsBlockHit, kIsPlayer, kIsNPC,
+             kbIsSynced, kbVoiceReady, kbWantCastLeft, kbWantCastRight, kbWantCastVoice, kb1HM_MLh_attack, kb1HMCombat, kbAnimationDriven, kbCastReady, kIsAttacking,
+             kbAllowRotation, kbMagicDraw, kbMLh_Ready, kbMRh_Ready, kbInMoveState, kbSprintOK, kbIdlePlaying, kbIsDialogueExpressive, kbAnimObjectLoaded, kbEquipUnequip,
+             kbAttached, kbIsH2HSolo, kbHeadTracking, kbIsRiding, kbTalkable, kbRitualSpellActive, kbInJumpState, kbHeadTrackSpine, kbLeftHandAttack, kbIsInMT,
+             kbHumanoidFootIKEnable, kbHumanoidFootIKDisable, kbStaggerPlayerOverride, kbNoStagger, kbIsStaffLeftCasting, kbPerkShieldCharge, kbPerkQuickShot, kIsBlocking,
+             kIsBashing, kIsStaggering, kIsRecoiling, kIsEquipping, kIsUnequipping, kisInFurniture, kbNeutralState, kbBowDrawn,
              // TODO: this was added extra for spell cast sync
-             kPitchOverride, kNotCasting},
+             kPitchOverride, kNotCasting,
+             // Swimming and diving: the copy's graph enters its swim state with the player's.
+             kbInSwimState},
             {kTurnDelta, kDirection, kSpeedSampled, kweapAdj, kSpeed,
              // TODO: this was added extra for spell cast sync
              kCastBlend, kPitchOffset, kSpeedDamped, kPitch, kVelocityZ, k1stPRot, k1stPRotDamped, kCastBlendDamped},
-            {kiRightHandEquipped, kiLeftHandEquipped, ki1HMState, kiState, kiLeftHandType, kiRightHandType, kiSyncIdleLocomotion, kiSyncForwardState, kiSyncTurnState, kiIsInSneak, kiWantBlock, kiRegularAttack,
+            {kiRightHandEquipped, kiLeftHandEquipped, ki1HMState, kiState, kiLeftHandType, kiRightHandType, kiSyncIdleLocomotion, kiSyncForwardState, kiSyncTurnState, kiIsInSneak,
+             kiWantBlock, kiRegularAttack,
              // TODO: this was added extra for spell cast sync
              ktestint, kcurrentDefaultState}));
 }

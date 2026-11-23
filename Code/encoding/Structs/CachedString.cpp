@@ -1,5 +1,6 @@
 #include <Structs/CachedString.h>
 #include <TiltedCore/Serialization.hpp>
+#include <BoundedString.h>
 #include "StringCache.h"
 
 using TiltedPhoques::Serialization;
@@ -46,7 +47,7 @@ void CachedString::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
     }
     else
     {
-        *this = Serialization::ReadString(aReader);
+        *this = BoundedString::Read(aReader, 256);
 
         StringCache::Get().AddWanted(*this);
     }

@@ -1,6 +1,6 @@
 #include <Structs/Factions.h>
 #include <TiltedCore/Serialization.hpp>
-#include <stdexcept>
+#include <DecodeGuard.h>
 
 using TiltedPhoques::Serialization;
 
@@ -34,9 +34,12 @@ void Factions::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 
 void Factions::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
 {
-    auto npcCount = Serialization::ReadVarInt(aReader);
-    if (npcCount > 0x1FF)
-        throw std::runtime_error("Too many NPC factions received !");
+    // A count past what a message holds is a damaged message: fail it and read nothing more. The readers are noexcept, so this must not throw.
+    constexpr uint64_t cMaxFactions = 0x1FF;
+
+    const auto npcCount = Serialization::ReadVarInt(aReader);
+    if (!DecodeGuard::Within(npcCount, cMaxFactions))
+        return;
 
     NpcFactions.resize(npcCount);
     for (auto& entry : NpcFactions)
@@ -44,9 +47,9 @@ void Factions::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
         entry.Deserialize(aReader);
     }
 
-    auto extraCount = Serialization::ReadVarInt(aReader) & 0x1FF;
-    if (extraCount > 0x1FF)
-        throw std::runtime_error("Too many extra factions received !");
+    const auto extraCount = Serialization::ReadVarInt(aReader);
+    if (!DecodeGuard::Within(extraCount, cMaxFactions))
+        return;
 
     ExtraFactions.resize(extraCount);
     for (auto& entry : ExtraFactions)

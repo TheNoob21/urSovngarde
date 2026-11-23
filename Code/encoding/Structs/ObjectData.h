@@ -26,4 +26,6 @@ struct ObjectData
     //! A door's state (the game's open state) after the last activation the server passed on; 0 when none came.
     uint8_t DoorOpenState{};
     bool IsSenderFirst{};
+    //! A merchant's chest in the sender's game: the game restocks it, so the server's ContainerLedger does not keep it.
+    bool IsVendor{};
 };

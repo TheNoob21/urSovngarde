@@ -1,4 +1,6 @@
 #include <Messages/RequestActorMaxValueChanges.h>
+#include <DecodeGuard.h>
+#include <Structs/ActorValueLimits.h>
 
 void RequestActorMaxValueChanges::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -20,11 +22,14 @@ void RequestActorMaxValueChanges::DeserializeRaw(TiltedPhoques::Buffer::Reader& 
     Id = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
     OwnershipEpoch = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
 
-    auto count = Serialization::ReadVarInt(aReader);
-    for (decltype(count) i = 0; i < count; i++)
+    const auto count = Serialization::ReadVarInt(aReader);
+    if (!DecodeGuard::Within(count, ActorValueLimits::kMaxEntries))
+        return;
+    for (uint64_t i = 0; i < count; i++)
     {
-        uint32_t key = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-        auto value = Serialization::ReadFloat(aReader);
-        Values.insert({key, value});
+        const auto key = Serialization::ReadVarInt(aReader);
+        const auto value = Serialization::ReadFloat(aReader);
+        if (ActorValueLimits::IsKnownKey(key))
+            Values.insert({static_cast<uint32_t>(key), value});
     }
 }

@@ -1,4 +1,5 @@
 #include <StringCache.h>
+#include <StringCacheLimits.h>
 #include <iostream>
 
 bool StringCache::Contains(const TiltedPhoques::String& acValue) const noexcept
@@ -36,6 +37,9 @@ uint32_t StringCache::Add(const TiltedPhoques::String& acValue) noexcept
 
 void StringCache::AddWanted(const TiltedPhoques::String& acValue) noexcept
 {
+    // A game that sends endless new names would fill the cache for every game; such a name is sent whole in each message instead.
+    if (!StringCacheLimits::MayWant(m_idToString.size(), m_wantedStrings.size(), acValue.size(), m_stringToId.contains(acValue)))
+        return;
     m_wantedStrings.insert(acValue);
 }
 

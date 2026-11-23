@@ -23,9 +23,11 @@ struct AssignCharacterResponse final : ServerMessage
 
     bool operator==(const AssignCharacterResponse& achRhs) const noexcept
     {
-        return GetOpcode() == achRhs.GetOpcode() && Cookie == achRhs.Cookie && ServerId == achRhs.ServerId && PlayerId == achRhs.PlayerId && Position == achRhs.Position && CellId == achRhs.CellId && WorldSpaceId == achRhs.WorldSpaceId && BaseId == achRhs.BaseId && AllActorValues == achRhs.AllActorValues &&
-               CurrentInventory == achRhs.CurrentInventory && ActionsToReplay == achRhs.ActionsToReplay && OwnershipEpoch == achRhs.OwnershipEpoch && Owner == achRhs.Owner && IsDead == achRhs.IsDead && IsWeaponDrawn == achRhs.IsWeaponDrawn && LeveledNpcPickId == achRhs.LeveledNpcPickId && FollowerOfPlayerId == achRhs.FollowerOfPlayerId && FactionsContent == achRhs.FactionsContent &&
-               RevivedSinceDeath == achRhs.RevivedSinceDeath;
+        return GetOpcode() == achRhs.GetOpcode() && Cookie == achRhs.Cookie && ServerId == achRhs.ServerId && PlayerId == achRhs.PlayerId && Position == achRhs.Position &&
+               CellId == achRhs.CellId && WorldSpaceId == achRhs.WorldSpaceId && BaseId == achRhs.BaseId && AllActorValues == achRhs.AllActorValues &&
+               CurrentInventory == achRhs.CurrentInventory && ActionsToReplay == achRhs.ActionsToReplay && OwnershipEpoch == achRhs.OwnershipEpoch && Owner == achRhs.Owner &&
+               IsDead == achRhs.IsDead && IsWeaponDrawn == achRhs.IsWeaponDrawn && LeveledNpcPickId == achRhs.LeveledNpcPickId && FollowerOfPlayerId == achRhs.FollowerOfPlayerId &&
+               FactionsContent == achRhs.FactionsContent && RevivedSinceDeath == achRhs.RevivedSinceDeath && DismemberedLimbs == achRhs.DismemberedLimbs;
     }
 
     uint32_t Cookie{};
@@ -50,4 +52,6 @@ struct AssignCharacterResponse final : ServerMessage
     bool IsWeaponDrawn{};
     //! Its owner's game revived it since its last death (ActorData::RevivedSinceDeath).
     bool RevivedSinceDeath{};
+    //! The limbs cut off it in any game, as RequestDismember told the server (0: none).
+    uint16_t DismemberedLimbs{};
 };

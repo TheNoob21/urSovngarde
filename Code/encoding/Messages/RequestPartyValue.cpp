@@ -1,4 +1,5 @@
 #include <Messages/RequestPartyValue.h>
+#include <BoundedString.h>
 
 void RequestPartyValue::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -10,6 +11,6 @@ void RequestPartyValue::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) n
 {
     ClientMessage::DeserializeRaw(aReader);
 
-    Key = Serialization::ReadString(aReader);
+    Key = BoundedString::Read(aReader, RequestPartyValue::kLongestKey);
     Value = Serialization::ReadFloat(aReader);
 }
