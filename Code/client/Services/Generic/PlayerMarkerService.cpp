@@ -14,6 +14,7 @@
 #include <Messages/NotifyPlayerWhereabouts.h>
 
 #include <Services/PapyrusService.h>
+#include <Services/PlayerMapRules.h>
 #include <Services/TransportService.h>
 #include <Services/CellLookup.h>
 
@@ -21,9 +22,17 @@
 #include <PlayerCharacter.h>
 #include <ExtraData/ExtraData.h>
 #include <Forms/TESObjectCELL.h>
+#include <Forms/TESWorldSpace.h>
 #include <Forms/TESQuest.h>
 #include <Games/Overrides.h>
 #include <Games/TES.h>
+#include <Interface/UI.h>
+#include <WhereaboutsRules.h>
+#include <SaveLoad.h>
+#include <SaveScope.h>
+#include <ScopeExit.h>
+
+#include <mutex>
 
 namespace
 {
@@ -34,12 +43,11 @@ constexpr uint32_t kMapMarkerFirst = 0x005040;
 
 // While not connected, the world map's list is checked this often for markers a save left on it.
 
-// A marker moves only once its player has moved this far (about 3.5 m).
-constexpr float kFollowDistance = 256.f;
+// A put-back on the map's list is no more often than this per marker (the server tells more often while players move).
+constexpr auto kShowOnMapEvery = std::chrono::seconds(2);
 
-// Closer than this (about 30 m), the player is in sight and the marker is put away.
-// A loaded body is not enough, since bodies load hundreds of metres away.
-constexpr float kHideDistance = 2100.f;
+// How often the markers near this game's player are checked (KeepMarkersAway): a rider covers about 100 units in that time.
+constexpr auto kKeepAwayEvery = std::chrono::milliseconds(100);
 
 // The world map icon for other players (game marker type 11: a standing stone).
 constexpr uint16_t kMapMarkerType = 11;
@@ -60,7 +68,24 @@ struct MapMarkerExtra : BSExtraData
 };
 
 constexpr auto kExtraMapMarker = static_cast<ExtraDataType>(0x2C);
-constexpr uint8_t kMapMarkerVisible = 1;
+constexpr uint8_t kMapMarkerVisible = PlayerMapRules::kMarkerVisible;
+
+// How often the service looks whether the world map is open.
+constexpr auto kMapLookEvery = std::chrono::milliseconds(250);
+
+// What a save writes of our markers, until it is done (SaveHoldScope).
+PlayerMapRules::SaveHold<TESObjectCELL, NiPoint3, PlayerMarkerService::kMapMarkers> s_saveHold;
+using SaveMarker = PlayerMapRules::SavedMarker<TESObjectCELL, NiPoint3>;
+
+// Where marker aIndex waits in the holding cell, as Park puts it.
+NiPoint3 HomeOf(const size_t aIndex) noexcept
+{
+    NiPoint3 point;
+    point.x = static_cast<float>(aIndex) * 64.f;
+    point.y = 0.f;
+    point.z = 0.f;
+    return point;
+}
 
 Actor* FindPlayerActor(World& aWorld, uint32_t aPlayerId) noexcept
 {
@@ -71,6 +96,33 @@ Actor* FindPlayerActor(World& aWorld, uint32_t aPlayerId) noexcept
             return Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(cEntity).Id));
     }
     return nullptr;
+}
+
+// A position the server gave is where this game's player is: the same room, or the same worldspace outdoors.
+// Only then are the two positions comparable.
+bool InLocalPlayerSpace(World& aWorld, const GameId& acWorldSpaceId, const GameId& acCellId) noexcept
+{
+    const PlayerCharacter* pPlayer = PlayerCharacter::Get();
+    if (!pPlayer)
+        return false;
+    auto& modSystem = aWorld.GetModSystem();
+    const TESWorldSpace* pWorldSpace = pPlayer->GetWorldSpace();
+    return pWorldSpace ? acWorldSpaceId && modSystem.GetGameId(acWorldSpaceId) == pWorldSpace->formID
+                       : pPlayer->parentCell && acCellId && modSystem.GetGameId(acCellId) == pPlayer->parentCell->formID;
+}
+
+glm::vec3 LocalPlayerPosition() noexcept
+{
+    const PlayerCharacter* pPlayer = PlayerCharacter::Get();
+    return pPlayer ? glm::vec3(pPlayer->position.x, pPlayer->position.y, pPlayer->position.z) : glm::vec3{};
+}
+
+// The game's own pass over the map's list (AE 40750) can make a marker within its reveal distance (iMapMarkerRevealDistance, 1000 by default;
+// the running value is not read here) "discovered" and a fast travel destination, so a marker near the player stands off toward its player.
+// That keeps a margin for ordinary movement; a hitch, a teleport or a changed reveal distance can still cross it before the next update.
+glm::vec3 MarkerSpotFor(const glm::vec3& acPlayerAt, const bool aNearSpace) noexcept
+{
+    return aNearSpace ? PlayerMapRules::MarkerSpot(LocalPlayerPosition(), acPlayerAt) : acPlayerAt;
 }
 
 NiPoint3 ToNiPoint(const glm::vec3& acPosition) noexcept
@@ -139,6 +191,16 @@ bool PlayerMarkerService::FindForms() noexcept
         return false;
     }
 
+    // What a save masks, by the references themselves: a save does not take the lock the markers are moved under.
+    std::array<SaveMarker, kMapMarkers> saveMarkers{};
+    for (size_t i = 0; i < kMapMarkers; ++i)
+    {
+        TESObjectREFR* pMarker = m_mapSlots[i].pMarker;
+        auto* pExtra = static_cast<MapMarkerExtra*>(pMarker->extraData.GetByType(kExtraMapMarker));
+        saveMarkers[i] = {&pMarker->parentCell, &pMarker->position, pExtra && pExtra->pData ? &pExtra->pData->Flags : nullptr, HomeOf(i)};
+    }
+    s_saveHold.Publish(saveMarkers, m_pHoldingCell);
+
     spdlog::info("Player markers: forms found in SkyrimTogether.esp (quest {:X})", m_pQuest->formID);
     m_formsFound = true;
     return true;
@@ -151,12 +213,17 @@ void PlayerMarkerService::OnConnected(const ConnectedEvent&) noexcept
 
 void PlayerMarkerService::OnDisconnected(const DisconnectedEvent&) noexcept
 {
+    std::scoped_lock lock(m_markersLock);
     m_connected = false;
     m_sweepDue = true;
     m_names.clear();
     if (m_formsFound)
     {
-        FreeAll();
+        // Not while a save writes them as at home: the next update frees them.
+        if (InSave())
+            m_freeDue = true;
+        else if (!FreeAll())
+            m_freeDue = true;
         StopQuest();
     }
 }
@@ -173,8 +240,10 @@ void PlayerMarkerService::OnPlayerName(const NotifyPlayerName& acMessage) noexce
 
 void PlayerMarkerService::OnPlayerLeft(const NotifyPlayerLeft& acMessage) noexcept
 {
+    std::scoped_lock lock(m_markersLock);
     m_names.erase(acMessage.PlayerId);
-    if (!m_formsFound)
+    // During a save: the next whereabouts, which no longer lists them, frees their marker.
+    if (!m_formsFound || InSave())
         return;
 
     for (size_t i = 0; i < kMapMarkers; ++i)
@@ -184,7 +253,9 @@ void PlayerMarkerService::OnPlayerLeft(const NotifyPlayerLeft& acMessage) noexce
 
 void PlayerMarkerService::OnWhereabouts(const NotifyPlayerWhereabouts& acMessage) noexcept
 {
-    if (!m_connected || !FindForms())
+    std::scoped_lock lock(m_markersLock);
+    // During a save the markers stay as they are: the next whereabouts comes within two seconds.
+    if (!m_connected || InSave() || !FindForms())
         return;
 
     PerfScope perfScope("PlayerMarkerService::OnWhereabouts");
@@ -213,6 +284,9 @@ void PlayerMarkerService::OnWhereabouts(const NotifyPlayerWhereabouts& acMessage
 
     for (const auto& entry : acMessage.Players)
     {
+        // A save that started meanwhile, on another thread: the rest wait for the next whereabouts.
+        if (InSave())
+            return;
         if (entry.PlayerId == cLocalId)
             continue;
 
@@ -237,7 +311,8 @@ void PlayerMarkerService::OnWhereabouts(const NotifyPlayerWhereabouts& acMessage
             SetMapMarkerName(slot.pMarker, cText);
         }
 
-        // In sight: no marker. Body loaded but further away: follow the body. Otherwise: follow the server's position.
+        // Body loaded: follow the body. Otherwise: follow the server's position. Near this game's player the marker stands off
+        // toward them.
         if (Actor* pActor = FindPlayerActor(m_world, entry.PlayerId))
         {
             const PlayerCharacter* pPlayer = PlayerCharacter::Get();
@@ -245,17 +320,21 @@ void PlayerMarkerService::OnWhereabouts(const NotifyPlayerWhereabouts& acMessage
             // The same room, or the same worldspace outdoors: only then are the two positions comparable.
             const bool cSameSpace = pPlayer && (pPlayer->parentCell == pActor->parentCell ||
                                                 (pPlayer->GetWorldSpace() && pPlayer->GetWorldSpace() == pActor->GetWorldSpace()));
-            if (cSameSpace && glm::distance(cBody, glm::vec3(pPlayer->position.x, pPlayer->position.y, pPlayer->position.z)) < kHideDistance)
-                Park(slot, index);
-            else
-                FollowBody(slot, pActor);
+            FollowBody(slot, index, pActor, cSameSpace);
         }
         else
-            FollowServerPosition(slot, index, entry.WorldSpaceId, entry.CellId, glm::vec3(entry.Position.x, entry.Position.y, entry.Position.z));
+        {
+            const glm::vec3 cServer(entry.Position.x, entry.Position.y, entry.Position.z);
+            const bool cSameSpace = InLocalPlayerSpace(m_world, entry.WorldSpaceId, entry.CellId);
+            FollowServerPosition(slot, index, entry.WorldSpaceId, entry.CellId, cServer, cSameSpace);
+        }
 
-        // The game empties the map's list at every load, so a shown marker is put back on it here, every two seconds.
-        if (!slot.Parked)
+        // The game empties the map's list at a load, so a shown marker is put back on it here, every two seconds
+        if (!slot.Parked && std::chrono::steady_clock::now() >= slot.NextShowOnMap)
+        {
+            slot.NextShowOnMap = std::chrono::steady_clock::now() + kShowOnMapEvery;
             ShowOnMap(slot);
+        }
     }
 }
 
@@ -267,6 +346,16 @@ BSTEventResult PlayerMarkerService::OnEvent(const TESLoadGameEvent*, const Event
 
 void PlayerMarkerService::OnUpdate(const UpdateEvent&) noexcept
 {
+    RefreshMapIfDue();
+
+    std::scoped_lock lock(m_markersLock);
+    if (InSave())
+        return;
+    if (m_freeDue)
+        m_freeDue = !FreeAll();
+    KeepMarkersAway();
+    TakeTravelBack();
+
     // A save made while connected may hold our markers on the map's list, and where they stood then.
     // So after each load or disconnect they all come off the list; while connected, the next whereabouts puts them back.
     if (!m_sweepDue)
@@ -300,16 +389,23 @@ void PlayerMarkerService::StopQuest() noexcept
     spdlog::info("Player markers: quest Fellow travellers stopped");
 }
 
-void PlayerMarkerService::FollowServerPosition(Slot& aSlot, size_t aIndex, const GameId& acWorldSpaceId, const GameId& acCellId, const glm::vec3& acPosition) noexcept
+void PlayerMarkerService::FollowServerPosition(
+    Slot& aSlot, size_t aIndex, const GameId& acWorldSpaceId, const GameId& acCellId, const glm::vec3& acPosition, const bool aNearSpace) noexcept
 {
-    if (!aSlot.Parked && aSlot.BodyCellId == 0 && aSlot.CellId == acCellId && glm::distance(aSlot.Position, acPosition) < kFollowDistance)
+    // One stood off is aimed again at each report: this game's player may have moved around it.
+    if (!aSlot.Parked && !aSlot.KeptAway && aSlot.BodyCellId == 0 && aSlot.CellId == acCellId &&
+        glm::distance(aSlot.Position, acPosition) < WhereaboutsRules::FollowDistance(m_mapWasOpen))
         return;
 
-    TESObjectCELL* pCell = CellLookup::FindOrLoad(m_world, acCellId, acWorldSpaceId, acPosition);
+    const glm::vec3 cSpot = MarkerSpotFor(acPosition, aNearSpace);
+    TESObjectCELL* pCell = CellLookup::FindOrLoad(m_world, acCellId, acWorldSpaceId, cSpot);
     if (!pCell)
         return;
 
-    aSlot.pMarker->MoveTo(pCell, ToNiPoint(acPosition));
+    if (!MoveMarker(aIndex, pCell, cSpot))
+        return;
+    aSlot.KeptAway = cSpot != acPosition;
+    m_mapChanged = m_mapChanged || aSlot.OnMap;
     if (aSlot.Parked)
         spdlog::info("Player markers: {:X} follows player {} ({}) to ({:.0f}) in cell {:X}", aSlot.pMarker->formID, aSlot.PlayerId, aSlot.Text.c_str(), acPosition, pCell->formID);
     aSlot.Parked = false;
@@ -318,17 +414,22 @@ void PlayerMarkerService::FollowServerPosition(Slot& aSlot, size_t aIndex, const
     aSlot.Position = acPosition;
 }
 
-void PlayerMarkerService::FollowBody(Slot& aSlot, Actor* apActor) noexcept
+void PlayerMarkerService::FollowBody(Slot& aSlot, const size_t aIndex, Actor* apActor, const bool aNearSpace) noexcept
 {
     TESObjectCELL* pCell = apActor->parentCell;
     if (!pCell)
         return;
 
     const glm::vec3 cBody(apActor->position.x, apActor->position.y, apActor->position.z);
-    if (!aSlot.Parked && aSlot.BodyCellId == pCell->formID && glm::distance(aSlot.Position, cBody) < kFollowDistance)
+    if (!aSlot.Parked && !aSlot.KeptAway && aSlot.BodyCellId == pCell->formID && glm::distance(aSlot.Position, cBody) < WhereaboutsRules::FollowDistance(m_mapWasOpen))
         return;
 
-    aSlot.pMarker->MoveTo(pCell, ToNiPoint(cBody));
+    // Stood off toward the body, it stays in the body's cell: the map and the compass read only its position.
+    const glm::vec3 cSpot = MarkerSpotFor(cBody, aNearSpace);
+    if (!MoveMarker(aIndex, pCell, cSpot))
+        return;
+    aSlot.KeptAway = cSpot != cBody;
+    m_mapChanged = m_mapChanged || aSlot.OnMap;
     if (aSlot.Parked)
         spdlog::info("Player markers: {:X} follows player {} ({}), whose body is here, to ({:.0f})", aSlot.pMarker->formID, aSlot.PlayerId, aSlot.Text.c_str(), cBody);
     aSlot.Parked = false;
@@ -337,37 +438,161 @@ void PlayerMarkerService::FollowBody(Slot& aSlot, Actor* apActor) noexcept
     aSlot.Position = cBody;
 }
 
-void PlayerMarkerService::Park(Slot& aSlot, size_t aIndex) noexcept
+// The game's pass made one of ours a fast travel destination: shown only again (PlayerMapRules::TakeTravelBack).
+static bool TakeTravelBackFrom(TESObjectREFR* apMarker) noexcept
+{
+    auto* pExtra = apMarker ? static_cast<MapMarkerExtra*>(apMarker->extraData.GetByType(kExtraMapMarker)) : nullptr;
+    if (!pExtra || !pExtra->pData || !PlayerMapRules::TakeTravelBack(pExtra->pData->Flags))
+        return false;
+    spdlog::debug("Player markers: {:X} was made a fast travel destination; shown only again", apMarker->formID);
+    return true;
+}
+
+void PlayerMarkerService::TakeTravelBack() noexcept
+{
+    if (!m_formsFound)
+        return;
+    for (const Slot& slot : m_mapSlots)
+        TakeTravelBackFrom(slot.pMarker);
+}
+
+void PlayerMarkerService::KeepMarkersAway() noexcept
+{
+    if (!m_formsFound || !m_connected)
+        return;
+    const auto cNow = std::chrono::steady_clock::now();
+    if (cNow < m_nextKeepAway)
+        return;
+    m_nextKeepAway = cNow + kKeepAwayEvery;
+
+    const PlayerCharacter* pPlayer = PlayerCharacter::Get();
+    if (!pPlayer || !pPlayer->parentCell)
+        return;
+    const glm::vec3 cPlayerAt = LocalPlayerPosition();
+    for (size_t i = 0; i < kMapMarkers; ++i)
+    {
+        Slot& slot = m_mapSlots[i];
+        TESObjectREFR* pMarker = slot.pMarker;
+        if (!pMarker || slot.Parked || !slot.PlayerId || !pMarker->parentCell)
+            continue;
+        const bool cSameSpace = pMarker->parentCell == pPlayer->parentCell || (pPlayer->GetWorldSpace() && pPlayer->GetWorldSpace() == pMarker->GetWorldSpace());
+        const glm::vec3 cMarkerAt(pMarker->position.x, pMarker->position.y, pMarker->position.z);
+        if (!cSameSpace || glm::distance(cMarkerAt, cPlayerAt) >= PlayerMapRules::kPlaceAgainDistance)
+            continue;
+
+        // Toward where its player was last seen; the next whereabouts or body move places it from where they are then.
+        const glm::vec3 cSpot = PlayerMapRules::MarkerSpot(cPlayerAt, slot.Position);
+        if (!MoveMarker(i, pMarker->parentCell, cSpot))
+            return;
+        m_mapChanged = m_mapChanged || slot.OnMap;
+        if (!slot.KeptAway)
+            spdlog::debug("Player markers: {:X} stands off toward player {}, who is near", pMarker->formID, slot.PlayerId);
+        slot.KeptAway = true;
+    }
+}
+
+bool PlayerMarkerService::InSave() const noexcept
+{
+    return s_saveHold.InSave();
+}
+
+bool PlayerMarkerService::MoveMarker(const size_t aIndex, TESObjectCELL* apCell, const glm::vec3& acSpot) noexcept
+{
+    if (!s_saveHold.BeginMove(aIndex))
+        return false;
+    const ScopeExit cMoved([]() { s_saveHold.EndMove(); });
+    m_mapSlots[aIndex].pMarker->MoveTo(apCell, ToNiPoint(acSpot));
+    return true;
+}
+
+// Save_Impl(device, output stats, file name), the one call behind every save (CommonLibSSE-NG BGSSaveLoadManager::Save).
+TP_THIS_FUNCTION(TSaveLoadManagerSave, bool, BGSSaveLoadManager, int32_t aDeviceId, uint32_t aOutputStats, const char* apFileName);
+static TSaveLoadManagerSave* RealSaveLoadManagerSave = nullptr;
+
+namespace
+{
+// A move under way when a save starts is waited for this long; a move held up in the game behind the save never lands before it.
+constexpr auto kSaveWaitsForMove = std::chrono::milliseconds(100);
+
+// The save hook's side of the markers (PlayerMapRules::SaveHold). It needs neither the service nor its lock.
+struct SaveHoldScope
+{
+    void EnterSave() noexcept
+    {
+        s_saveHold.Enter(kSaveWaitsForMove);
+        spdlog::debug("Player markers: {} written to the save as at home in the holding cell", s_saveHold.GetCount());
+    }
+
+    void LeaveSave() noexcept
+    {
+        if (s_saveHold.Leave())
+            spdlog::debug("Player markers: back where they stood after the save");
+    }
+};
+} // namespace
+
+static bool TP_MAKE_THISCALL(HookSaveLoadManagerSave, BGSSaveLoadManager, int32_t aDeviceId, uint32_t aOutputStats, const char* apFileName)
+{
+    SaveHoldScope holdScope;
+    const SaveScope::Scoped cScope(&holdScope);
+    return TiltedPhoques::ThisCall(RealSaveLoadManagerSave, apThis, aDeviceId, aOutputStats, apFileName);
+}
+
+static TiltedPhoques::Initializer s_saveHook(
+    []()
+    {
+        POINTER_SKYRIMSE(TSaveLoadManagerSave, s_save, 35727, 34818);
+        if (s_save.Get())
+        {
+            RealSaveLoadManagerSave = s_save.Get();
+            TP_HOOK(&RealSaveLoadManagerSave, HookSaveLoadManagerSave);
+        }
+        else
+            spdlog::warn("Player markers: the save call was not found; a save made while connected keeps other players' markers where they stood");
+    });
+
+bool PlayerMarkerService::Park(Slot& aSlot, size_t aIndex) noexcept
 {
     if (aSlot.Parked)
-        return;
+        return true;
+    // Neither off the map's list nor moved while a save writes them.
+    if (s_saveHold.InSave())
+        return false;
 
     HideFromMap(aSlot);
-    aSlot.pMarker->MoveTo(m_pHoldingCell, ToNiPoint(glm::vec3(static_cast<float>(aIndex) * 64.f, 0.f, 0.f)));
+    if (!MoveMarker(aIndex, m_pHoldingCell, glm::vec3(static_cast<float>(aIndex) * 64.f, 0.f, 0.f)))
+        return false;
     aSlot.Parked = true;
+    aSlot.KeptAway = false;
     spdlog::info("Player markers: {:X} put away (player {})", aSlot.pMarker->formID, aSlot.PlayerId);
+    return true;
 }
 
 void PlayerMarkerService::Free(Slot& aSlot, size_t aIndex) noexcept
 {
-    Park(aSlot, aIndex);
+    if (!Park(aSlot, aIndex))
+        return;
     aSlot.PlayerId = 0;
     aSlot.Text.clear();
     aSlot.CellId = GameId{};
     aSlot.BodyCellId = 0;
 }
 
-void PlayerMarkerService::FreeAll() noexcept
+bool PlayerMarkerService::FreeAll() noexcept
 {
+    bool allFreed = true;
     for (size_t i = 0; i < kMapMarkers; ++i)
+    {
         if (m_mapSlots[i].PlayerId)
             Free(m_mapSlots[i], i);
+        allFreed = allFreed && m_mapSlots[i].PlayerId == 0;
+    }
+    return allFreed;
 }
 
 // The world map draws only the markers on the player's list (PlayerCharacter::currentMapMarkers); moving a marker does not put it there.
 void PlayerMarkerService::ShowOnMap(Slot& aSlot) noexcept
 {
-#ifdef SKYRIMVR
     PlayerCharacter* pPlayer = PlayerCharacter::Get();
     if (!pPlayer)
         return;
@@ -382,7 +607,7 @@ void PlayerMarkerService::ShowOnMap(Slot& aSlot) noexcept
         return;
     }
 
-    // Shown only: the game's own pass over the list must never make it a fast travel destination.
+    // Shown only: the flags ask the game's own pass over the list not to make it a fast travel destination.
     if (auto* pExtra = static_cast<MapMarkerExtra*>(aSlot.pMarker->extraData.GetByType(kExtraMapMarker)); pExtra && pExtra->pData)
         pExtra->pData->Flags = kMapMarkerVisible;
 
@@ -392,19 +617,49 @@ void PlayerMarkerService::ShowOnMap(Slot& aSlot) noexcept
     spdlog::info("Player markers: {:X} {} the world map's list for player {} ({} markers on it)", aSlot.pMarker->formID, aSlot.OnMap ? "back on" : "put on", aSlot.PlayerId,
                  pPlayer->currentMapMarkers.length);
     aSlot.OnMap = true;
-#endif
+    m_mapChanged = true;
 }
 
 void PlayerMarkerService::HideFromMap(Slot& aSlot) noexcept
 {
-#ifdef SKYRIMVR
     PlayerCharacter* pPlayer = PlayerCharacter::Get();
     if (!pPlayer || !aSlot.pMarker || !PlayerCharacter::CanEditMapMarkers())
         return;
     if (pPlayer->RemoveMapMarker(aSlot.pMarker->GetHandle().handle.iBits))
+    {
         spdlog::info("Player markers: {:X} taken off the world map's list{}", aSlot.pMarker->formID, m_connected ? "" : " (left there by a save; not connected)");
+        m_mapChanged = true;
+    }
     aSlot.OnMap = false;
-#endif
+}
+
+// The map gathers the list into its icons only at some moments: as it opens on SE, as its camera rises through height 10000
+// on VR, and on an update that carries no data (MapMenu::ProcessMessage on both). So a marker put on the list after the
+// gathering is not drawn, and VR keeps the map's icons from one opening to the next. The map is told to gather again
+// as it opens and whenever ours changed while it is open.
+void PlayerMarkerService::RefreshMapIfDue() noexcept
+{
+    if (!m_formsFound)
+        return;
+    const auto cNow = std::chrono::steady_clock::now();
+    if (cNow < m_nextMapLook)
+        return;
+    m_nextMapLook = cNow + kMapLookEvery;
+
+    static const BSFixedString s_mapMenu("MapMenu");
+    UI* pUI = UI::Get();
+    const bool cOpen = pUI && pUI->GetMenuOpen(s_mapMenu);
+    const bool cDue = PlayerMapRules::RefreshDue(cOpen, m_mapWasOpen, m_mapChanged);
+    bool queued = false;
+    if (cDue)
+    {
+        queued = UI::RefreshMapMarkers();
+        if (queued)
+            spdlog::debug("Player markers: the world map was told to gather its markers again ({})", m_mapWasOpen ? "ours changed" : "it opened");
+    }
+    // Not queued (the queue not there yet as it opens): owed, and tried again at the next look.
+    m_mapChanged = PlayerMapRules::StillOwed(cDue, queued, m_mapChanged);
+    m_mapWasOpen = cOpen;
 }
 
 void PlayerMarkerService::SetMapMarkerName(TESObjectREFR* apMarker, const String& acText) noexcept
@@ -416,6 +671,6 @@ void PlayerMarkerService::SetMapMarkerName(TESObjectREFR* apMarker, const String
         return;
     }
     pExtra->pData->Name.Set(acText.c_str());
-    pExtra->pData->Flags = kMapMarkerVisible; // on the map, never a fast travel destination
+    pExtra->pData->Flags = kMapMarkerVisible; // on the map, not a fast travel destination
     pExtra->pData->Type = kMapMarkerType;
 }

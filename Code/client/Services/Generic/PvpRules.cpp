@@ -54,7 +54,7 @@ void SayNoHitWithCopy(const Actor* apCopy) noexcept
     int64_t nextSayMs = s_nextSayMs.load();
     // Two threads may both be due: only the one that moves the next time on writes the line.
     if (cNowMs >= nextSayMs && s_nextSayMs.compare_exchange_strong(nextSayMs, cNowMs + 5000))
-        spdlog::info("PvP: no hit between this player and copy {:X}: its player plays {}", apCopy->formID, GameName(!kThisGameIsFlat));
+        spdlog::debug("PvP: no hit between this player and copy {:X}: its player plays {}", apCopy->formID, GameName(!kThisGameIsFlat));
 }
 } // namespace
 
@@ -120,8 +120,9 @@ void MarkOtherGameCopies(World& aWorld) noexcept
 
         pExtension->SetOtherGame(cOtherGame);
         if (cOtherGame)
-            spdlog::info("PvP: player {} plays {} and this player {}; no hit between the two is sent or taken (copy {:X})", cPlayerId, GameName(!kThisGameIsFlat),
-                         GameName(kThisGameIsFlat), pCopy->formID);
+            spdlog::debug(
+                "PvP: player {} plays {} and this player {}; no hit between the two is sent or taken (copy {:X})", cPlayerId, GameName(!kThisGameIsFlat), GameName(kThisGameIsFlat),
+                pCopy->formID);
     }
 }
 } // namespace PvpRules

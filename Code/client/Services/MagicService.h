@@ -10,6 +10,7 @@
 #include <chrono>
 
 struct World;
+struct Actor;
 struct TransportService;
 
 struct UpdateEvent;
@@ -44,7 +45,17 @@ struct MagicService
      */
     void StartRevealingOtherPlayers() noexcept;
 
-  protected:
+    /**
+     * @brief Whether a spell or effect is a VR control plugin's, which acts in its own game only (always false on flat).
+     */
+    static bool IsLocalControlForm(uint32_t aFormId) noexcept;
+
+    /**
+     * @brief Plays the portal of another player's summon cast just before, on the copy of its creature that appeared here (SummonPortal).
+     */
+    static void PlaySummonPortal(Actor* apSummonCopy) noexcept;
+
+protected:
     /**
      * @brief Checks to apply queued effects on each frame.
      */

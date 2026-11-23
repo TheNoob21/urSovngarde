@@ -41,7 +41,7 @@ Tints FaceTints() noexcept
  */
 bool SendRenamed(World& aWorld, TransportService& aTransport) noexcept
 {
-    const auto cServerId = Utils::FindServerIdByFormId(aWorld.view<FormIdComponent>(), 0x14);
+    const auto cServerId = Utils::FindServerIdByFormId(aWorld.view<FormIdComponent>(entt::exclude<ObjectComponent>), 0x14);
     PlayerCharacter* pPlayer = PlayerCharacter::Get();
     TESNPC* pNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
     if (!cServerId || !pNpc)

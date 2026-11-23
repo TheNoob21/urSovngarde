@@ -2,6 +2,8 @@
 #include <Helpers/PerfScope.h>
 
 #include <Services/DiscoveryService.h>
+#include <Services/DiscoveryThrottle.h>
+#include <Services/TransportService.h>
 #include <Games/TES.h>
 
 #include <Games/References.h>
@@ -21,30 +23,27 @@
 #include <Events/ConnectionErrorEvent.h>
 
 #include <World.h>
+#include <ModContent.h>
 
 namespace
 {
 bool IsDefaultModlist(GameList<Mod>& aCurrentModlist) noexcept
 {
-    static const auto s_defaultModlist = std::to_array<TiltedPhoques::String>(
-        {"Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", 
-        "Dragonborn.esm", "_ResourcePack.esl", "SkyrimTogether.esp", "SkyrimTogetherQuestPatches.esp"}
-    );
-
-    if (aCurrentModlist.Size() != s_defaultModlist.size())
-        return false;
-
-    auto expectedMod = s_defaultModlist.begin();
+    TiltedPhoques::Vector<TiltedPhoques::String> loadOrder;
     for (const auto* pCurrentMod : aCurrentModlist)
-    {
-        if (pCurrentMod->filename != *expectedMod)
-            return false;
-
-        ++expectedMod;
-    }
-
-    return true;
+        if (pCurrentMod)
+            loadOrder.emplace_back(pCurrentMod->filename);
+    return ModContent::IsDefaultInstall(loadOrder);
 }
+
+// A key for a cell that has no form id to tell it by, so its failure is told once like the others.
+uint32_t CoordinatesKey(const int32_t aGridX, const int32_t aGridY, const uint32_t aWorldSpaceId) noexcept
+{
+    return static_cast<uint32_t>(aGridX) * 73856093u ^ static_cast<uint32_t>(aGridY) * 19349663u ^ aWorldSpaceId;
+}
+
+// Which frames OnUpdate scans on.
+DiscoveryThrottle s_throttle;
 
 // A copy this client threw away on its own. See RequestCellReannounce.
 std::chrono::steady_clock::time_point s_reannounceAt{};
@@ -88,10 +87,35 @@ void DiscoveryService::VisitCell(bool aForceTrigger) noexcept
     if (!pPlayer)
         return;
 
-    if (pPlayer->GetWorldSpace())
-        VisitExteriorCell(aForceTrigger);
-    else if (pPlayer->GetParentCellEx())
-        VisitInteriorCell(aForceTrigger);
+    m_visitPlace = {};
+    if (const auto* pWorldSpace = pPlayer->GetWorldSpace())
+    {
+        m_visitPlace.WorldSpaceId = pWorldSpace->formID;
+        if (const TES* pTES = TES::Get())
+        {
+            m_visitPlace.GridX = pTES->currentGridX;
+            m_visitPlace.GridY = pTES->currentGridY;
+        }
+    }
+    else if (const auto* pCell = pPlayer->GetParentCellEx())
+        m_visitPlace.CellId = pCell->formID;
+
+    // A visit that failed is tried again after a wait, not on every frame, but only in the place that failed: a new place goes at once.
+    // A forced visit always goes.
+    if (aForceTrigger || m_visitRetry.MayVisit(DiscoveryRetryBackoff::Clock::now(), m_visitPlace))
+    {
+        const uint32_t cFailuresBefore = m_visitRetry.TotalFailures();
+        m_failureLog.BeginVisit(m_visitRetry.IsFailingIn(m_visitPlace));
+
+        if (pPlayer->GetWorldSpace())
+            VisitExteriorCell(aForceTrigger);
+        else if (pPlayer->GetParentCellEx())
+            VisitInteriorCell(aForceTrigger);
+
+        // Only a visit in which nothing failed ends the wait: one step can fail and the next still succeed.
+        if (m_visitRetry.TotalFailures() == cFailuresBefore)
+            m_visitRetry.NoteSuccess();
+    }
 
     // exactly how the game does it too
     if (m_pLocation != pPlayer->locationForm)
@@ -99,6 +123,11 @@ void DiscoveryService::VisitCell(bool aForceTrigger) noexcept
         m_dispatcher.trigger(LocationChangeEvent());
         m_pLocation = pPlayer->locationForm;
     }
+}
+
+bool DiscoveryService::ShouldLogError(uint32_t aFormId) noexcept
+{
+    return m_failureLog.ShouldLogError(aFormId);
 }
 
 void DiscoveryService::VisitExteriorCell(bool aForceTrigger) noexcept
@@ -115,13 +144,17 @@ void DiscoveryService::VisitExteriorCell(bool aForceTrigger) noexcept
 
     if (m_worldSpaceId != worldSpaceId || aForceTrigger)
     {
-        DetectGridCellChange(pWorldSpace, true);
+        // It has already counted the failure and logged why: a second try below would only repeat both.
+        if (!DetectGridCellChange(pWorldSpace, true))
+            return;
+
         // If the world space changes, then we want to send out a CellChangeEvent out too.
         aForceTrigger = true;
     }
     else if (gameCenterGrid != m_centerGrid)
     {
-        DetectGridCellChange(pWorldSpace, false);
+        if (!DetectGridCellChange(pWorldSpace, false))
+            return;
     }
 
     if (gameCurrentGrid != m_currentGrid || aForceTrigger)
@@ -130,7 +163,8 @@ void DiscoveryService::VisitExteriorCell(bool aForceTrigger) noexcept
 
         if (!m_world.GetModSystem().GetServerModId(pWorldSpace->formID, cellChangeEvent.WorldSpaceId))
         {
-            spdlog::error("Failed to find world space id for form id {:X}", pWorldSpace->formID);
+            spdlog::log(ShouldLogError(pWorldSpace->formID) ? spdlog::level::err : spdlog::level::debug, "Failed to find world space id for form id {:X}", pWorldSpace->formID);
+            m_visitRetry.NoteFailure(DiscoveryRetryBackoff::Clock::now(), m_visitPlace);
             return;
         }
 
@@ -138,9 +172,19 @@ void DiscoveryService::VisitExteriorCell(bool aForceTrigger) noexcept
         if (!pCell)
             pCell = ModManager::Get()->GetCellFromCoordinates(gameCurrentGrid.X, gameCurrentGrid.Y, pWorldSpace, false);
 
+        if (!pCell)
+        {
+            spdlog::log(
+                ShouldLogError(CoordinatesKey(gameCurrentGrid.X, gameCurrentGrid.Y, pWorldSpace->formID)) ? spdlog::level::err : spdlog::level::debug,
+                "Failed to find the cell at coordinates ({}, {}) in worldspace {:X}", gameCurrentGrid.X, gameCurrentGrid.Y, pWorldSpace->formID);
+            m_visitRetry.NoteFailure(DiscoveryRetryBackoff::Clock::now(), m_visitPlace);
+            return;
+        }
+
         if (!m_world.GetModSystem().GetServerModId(pCell->formID, cellChangeEvent.CellId))
         {
-            spdlog::error("Failed to find cell id for form id {:X}", pCell->formID);
+            spdlog::log(ShouldLogError(pCell->formID) ? spdlog::level::err : spdlog::level::debug, "Failed to find cell id for form id {:X}", pCell->formID);
+            m_visitRetry.NoteFailure(DiscoveryRetryBackoff::Clock::now(), m_visitPlace);
             return;
         }
 
@@ -163,7 +207,8 @@ void DiscoveryService::VisitInteriorCell(bool aForceTrigger) noexcept
 
         if (!m_world.GetModSystem().GetServerModId(cellId, cellChangeEvent.CellId))
         {
-            spdlog::error("Failed to find cell id {:X}", cellId);
+            spdlog::log(ShouldLogError(cellId) ? spdlog::level::err : spdlog::level::debug, "Failed to find cell id {:X}", cellId);
+            m_visitRetry.NoteFailure(DiscoveryRetryBackoff::Clock::now(), m_visitPlace);
             return;
         }
 
@@ -172,11 +217,11 @@ void DiscoveryService::VisitInteriorCell(bool aForceTrigger) noexcept
     }
 }
 
-void DiscoveryService::DetectGridCellChange(TESWorldSpace* aWorldSpace, bool aNewCellGrid) noexcept
+bool DiscoveryService::DetectGridCellChange(TESWorldSpace* apWorldSpace, bool aNewCellGrid) noexcept
 {
     GridCellChangeEvent changeEvent{};
 
-    const uint32_t worldSpaceId = aWorldSpace->formID;
+    const uint32_t worldSpaceId = apWorldSpace->formID;
     changeEvent.WorldSpaceId = worldSpaceId;
 
     const TES* pTES = TES::Get();
@@ -194,18 +239,20 @@ void DiscoveryService::DetectGridCellChange(TESWorldSpace* aWorldSpace, bool aNe
                     continue;
             }
 
-            const TESObjectCELL* pCell = ModManager::Get()->GetCellFromCoordinates(startGridX + i, startGridY + j, aWorldSpace, 0);
+            const TESObjectCELL* pCell = ModManager::Get()->GetCellFromCoordinates(startGridX + i, startGridY + j, apWorldSpace, 0);
 
             if (!pCell)
             {
-                spdlog::warn("Cell not found at coordinates ({}, {}) in worldspace {:X}", startGridX + i, startGridY + j, aWorldSpace->formID);
+                spdlog::log(
+                    ShouldLogError(CoordinatesKey(startGridX + i, startGridY + j, apWorldSpace->formID)) ? spdlog::level::warn : spdlog::level::debug,
+                    "Cell not found at coordinates ({}, {}) in worldspace {:X}", startGridX + i, startGridY + j, apWorldSpace->formID);
                 continue;
             }
 
             GameId cellId{};
             if (!m_world.GetModSystem().GetServerModId(pCell->formID, cellId))
             {
-                spdlog::error("Failed to find cell id for form id {:X}", pCell->formID);
+                spdlog::log(ShouldLogError(pCell->formID) ? spdlog::level::err : spdlog::level::debug, "Failed to find cell id for form id {:X}", pCell->formID);
                 continue;
             }
 
@@ -215,12 +262,23 @@ void DiscoveryService::DetectGridCellChange(TESWorldSpace* aWorldSpace, bool aNe
 
     TESObjectCELL* pCell = PlayerCharacter::Get()->GetParentCellEx();
     if (!pCell)
-        pCell = ModManager::Get()->GetCellFromCoordinates(pTES->currentGridX, pTES->currentGridY, aWorldSpace, false);
+        pCell = ModManager::Get()->GetCellFromCoordinates(pTES->currentGridX, pTES->currentGridY, apWorldSpace, false);
+
+    // Returning on either of the next two failures leaves the centre and the worldspace unrecorded, so the next visit scans the grid again: wait before that one.
+    if (!pCell)
+    {
+        spdlog::log(
+            ShouldLogError(CoordinatesKey(pTES->currentGridX, pTES->currentGridY, apWorldSpace->formID)) ? spdlog::level::err : spdlog::level::debug,
+            "Failed to find the player's cell at coordinates ({}, {}) in worldspace {:X}", pTES->currentGridX, pTES->currentGridY, apWorldSpace->formID);
+        m_visitRetry.NoteFailure(DiscoveryRetryBackoff::Clock::now(), m_visitPlace);
+        return false;
+    }
 
     if (!m_world.GetModSystem().GetServerModId(pCell->formID, changeEvent.PlayerCell))
     {
-        spdlog::error("Failed to find cell id for form id {:X}", pCell->formID);
-        return;
+        spdlog::log(ShouldLogError(pCell->formID) ? spdlog::level::err : spdlog::level::debug, "Failed to find cell id for form id {:X}", pCell->formID);
+        m_visitRetry.NoteFailure(DiscoveryRetryBackoff::Clock::now(), m_visitPlace);
+        return false;
     }
 
     changeEvent.CenterCoords = m_centerGrid = {pTES->centerGridX, pTES->centerGridY};
@@ -237,14 +295,17 @@ void DiscoveryService::DetectGridCellChange(TESWorldSpace* aWorldSpace, bool aNe
     m_dispatcher.trigger(changeEvent);
 
     m_worldSpaceId = worldSpaceId;
+    return true;
 }
 
 /**
  * Find the actors that came into the loaded area and those that left it, and dispatch an added or removed event for each.
  * An actor that left waits out a grace period, except another player's copy whose 3D is gone, which counts as gone at once.
  * A copy this game moved in the last two seconds is not taken for gone at once either, as a move can take its 3D for a moment.
+ *
+ * @param aCellLoaded False when no cell is loaded: only the player is discovered, so every other actor held is removed.
  */
-void DiscoveryService::VisitForms() noexcept
+void DiscoveryService::VisitForms(bool aCellLoaded) noexcept
 {
     // Actors briefly lose their 3D when crossing the edge of the loaded cells (a circling dragon does it every few seconds).
     // Removing them right away makes the server destroy and recreate them, so a still existing actor waits out a grace period.
@@ -293,7 +354,7 @@ void DiscoveryService::VisitForms() noexcept
         }
     };
 
-    for (uint32_t i = 0; i < pProcessLists->highActorHandleArray.length; ++i)
+    for (uint32_t i = 0; aCellLoaded && i < pProcessLists->highActorHandleArray.length; ++i)
     {
         const uint32_t cHandle = pProcessLists->highActorHandleArray[i];
         TESObjectREFR* const pRefr = TESObjectREFR::GetByHandle(cHandle);
@@ -383,6 +444,22 @@ void DiscoveryService::OnUpdate(const PreUpdateEvent& acUpdateEvent) noexcept
         spdlog::info("Announcing this cell again: a remote copy was torn down here by a cell unloading, and the server does not know");
         VisitCell(true);
         VisitForms();
+        return;
+    }
+
+    // Not connected, nobody hears about cells or actors: scan a few times a second, and not at all without a cell.
+    const PlayerCharacter* pPlayer = PlayerCharacter::Get();
+    const bool cCellLoaded = pPlayer && (pPlayer->GetWorldSpace() || pPlayer->GetParentCellEx());
+    // After Quit to Main Menu the actors held from the last game must still be removed, or a later connect finds them stale.
+    // The player is always held, as before.
+    const bool cOnline = m_world.GetTransport().IsOnline();
+    const bool cHasTracked = m_forms.size() > m_forms.count(0x14);
+    if (!s_throttle.ShouldRun(cOnline, cCellLoaded, cHasTracked, DiscoveryThrottle::Clock::now()))
+        return;
+
+    if (!cOnline && !cCellLoaded)
+    {
+        VisitForms(false);
         return;
     }
 

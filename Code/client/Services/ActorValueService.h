@@ -3,6 +3,7 @@
 #include <Events/EventDispatcher.h>
 #include <Games/Events.h>
 #include <Messages/NotifyHealthChangeBroadcast.h>
+#include <Services/HealthEase.h>
 
 struct World;
 
@@ -13,6 +14,7 @@ struct UpdateEvent;
 struct HealthChangeEvent;
 
 struct TransportService;
+struct LocalComponent;
 struct NotifyActorValueChanges;
 struct NotifyActorMaxValueChanges;
 struct NotifyHealthChangeBroadcast;
@@ -74,7 +76,7 @@ private:
     /**
      * @brief Receives remote actor values changes and applies them locally.
      */
-    void OnActorValueChanges(const NotifyActorValueChanges& acMessage) const noexcept;
+    void OnActorValueChanges(const NotifyActorValueChanges& acMessage) noexcept;
     /**
      * @brief Receives remote max actor values changes and applies them locally.
      */
@@ -93,6 +95,8 @@ private:
     //! The defender's rule: this player's clashes, and the other players' hits held until they are seen here.
     void OnClash(const ClashEvent& acEvent) noexcept;
     void RunHeldHits() noexcept;
+    //! Walks the other players' copies to the health their owners last reported (HealthEase), so their bar moves between reports.
+    void RunHealthEases() noexcept;
     /**
      * @brief Receives death state changes and applies them locally.
      */
@@ -116,6 +120,10 @@ private:
      * @brief Checks and broadcasts death state changes.
      */
     void RunDeathStateUpdates() noexcept;
+    //! Tells the server that an actor this game runs died or lives, with the player whose blow killed it, if any.
+    void SendDeathState(LocalComponent& aLocal, Actor* apActor, bool aIsDead, uint32_t aKillerPlayerId) noexcept;
+    //! Another player's blow on an actor this game runs: its death again, if it is dead here, for a copy that missed it.
+    void RepeatDeath(Actor* apActor, uint32_t aServerId) noexcept;
 
     /**
      * @brief Checks and broadcasts actor values.
@@ -141,4 +149,8 @@ private:
     Vector<std::pair<uint32_t, uint64_t>> m_clashes;
     //! Actors this game runs that a blow sent or taken as a change reached since the last broadcast.
     Set<uint32_t> m_healthResends;
+    //! Other players' copies being walked to the health their owner reported, by form id (HealthEase).
+    Map<uint32_t, HealthEase::Ramp> m_healthEases;
+    //! Actors this game runs whose death a blow made it say again, and when (RepeatDeath).
+    Map<uint32_t, std::chrono::steady_clock::time_point> m_deathRepeats;
 };

@@ -4,6 +4,7 @@
 #include <Events/UpdateEvent.h>
 #include <Interface/Menus/SleepWaitOk.h>
 #include <Interface/Menus/SleepWaitVoteLine.h>
+#include <Interface/UI.h>
 #include <Messages/NotifyTimeSkip.h>
 #include <Messages/ServerTimeSettings.h>
 #include <Services/CalendarService.h>
@@ -123,6 +124,7 @@ void SleepVoteService::OnUpdate(const UpdateEvent& acEvent) noexcept
 
     // Withdrawn first, so a press made in combat or as the menu closed is never sent only to be taken back.
     WithdrawWhenMenuGoneOrFighting();
+    ReportAwayOrBack();
     SendPress();
     NoteRestOver();
     EndSkipOnceRested();
@@ -141,6 +143,8 @@ void SleepVoteService::OnDisconnected(const DisconnectedEvent& acEvent) noexcept
     m_waitLine.clear();
     RefreshMenuLine();
     m_awaitingResync = false;
+    // A new connection starts in the world: the server has not heard this game is away.
+    m_away = false;
 }
 
 /**
@@ -212,6 +216,24 @@ void SleepVoteService::WithdrawWhenMenuGoneOrFighting() noexcept
             SendStep(RequestTimeSkip::Step::kWithdrawCombat, 0.f);
         spdlog::info("SleepVote: withdrew, in combat");
     }
+}
+
+/**
+ * Tell the server when this game goes to a loading screen or the main menu, and when it is back in the world.
+ * A player away for a while then no longer holds the shared vote there.
+ */
+void SleepVoteService::ReportAwayOrBack() noexcept
+{
+    static const BSFixedString s_loadingMenu("Loading Menu");
+    static const BSFixedString s_mainMenu("Main Menu");
+    const UI* pUI = UI::Get();
+    const bool cAway = !PlayerCharacter::Get() || (pUI && (pUI->GetMenuOpen(s_loadingMenu) || pUI->GetMenuOpen(s_mainMenu)));
+    if (cAway == m_away)
+        return;
+
+    m_away = cAway;
+    SendStep(cAway ? RequestTimeSkip::Step::kAway : RequestTimeSkip::Step::kBack, 0.f);
+    spdlog::debug("SleepVote: {}", cAway ? "loading or at the main menu, told the server" : "back in the world, told the server");
 }
 
 /**

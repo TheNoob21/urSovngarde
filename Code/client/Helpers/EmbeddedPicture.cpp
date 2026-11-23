@@ -131,12 +131,12 @@ std::optional<Picture> Load(const wchar_t* acpName) noexcept
     const auto cFound = s_builtInPictures.find(std::wstring(cWideName));
     if (cFound == s_builtInPictures.end())
     {
-        spdlog::warn("EmbeddedPicture: urSovngarde.exe holds no picture named {}", cName);
+        spdlog::debug("EmbeddedPicture: urSovngarde.exe holds no picture named {}", cName);
         return std::nullopt;
     }
     auto picture = DecodePng(cFound->second);
     if (!picture)
-        spdlog::warn("EmbeddedPicture: Windows could not read the picture {} ({} bytes)", cName, cFound->second.size());
+        spdlog::debug("EmbeddedPicture: Windows could not read the picture {} ({} bytes)", cName, cFound->second.size());
     return picture;
 }
 } // namespace EmbeddedPicture

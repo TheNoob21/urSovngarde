@@ -11,20 +11,9 @@
 #include <DbgHelp.h>
 
 #include <algorithm>
-#include <filesystem>
-#include <string>
-#include <vector>
 
 namespace SmallDump
 {
-// Older small dumps beyond this many are deleted: a report takes the newest two.
-constexpr size_t cKeep = 3;
-
-inline bool IsSmallDumpName(const std::wstring& acName) noexcept
-{
-    return acName.rfind(L"crash_UTC_", 0) == 0 && acName.size() > 10 && acName.ends_with(L".small.dmp");
-}
-
 // Crash reports only carry small dumps under 4 MB; above this a dump is written again with fewer stacks.
 constexpr uint64_t cTarget = 3500ull * 1024;
 
@@ -76,11 +65,10 @@ inline BOOL CALLBACK Callback(PVOID apParam, const PMINIDUMP_CALLBACK_INPUT apIn
     return TRUE;
 }
 
-inline uint64_t WriteOnce(const std::filesystem::path& acPath, PEXCEPTION_POINTERS apInfo, Pass& aPass, DWORD& aError) noexcept
+inline uint64_t WriteOnce(HANDLE ahFile, PEXCEPTION_POINTERS apInfo, Pass& aPass, DWORD& aError, const DWORD aExtraType) noexcept
 {
     aError = 0;
-    HANDLE file = CreateFileW(acPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE)
+    if (!SetFilePointerEx(ahFile, {}, nullptr, FILE_BEGIN) || !SetEndOfFile(ahFile))
     {
         aError = GetLastError();
         return 0;
@@ -95,58 +83,37 @@ inline uint64_t WriteOnce(const std::filesystem::path& acPath, PEXCEPTION_POINTE
     callback.CallbackRoutine = &Callback;
     callback.CallbackParam = &aPass;
 
-    const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules);
-    const BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type, apInfo ? &exception : nullptr,
-                                           nullptr, &callback);
+    const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules | aExtraType);
+    const BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), ahFile, type, apInfo ? &exception : nullptr, nullptr, &callback);
     if (!written)
         aError = GetLastError();
 
     LARGE_INTEGER size{};
-    GetFileSizeEx(file, &size);
-    CloseHandle(file);
+    GetFileSizeEx(ahFile, &size);
     if (!written)
-    {
-        DeleteFileW(acPath.c_str());
         return 0;
-    }
     return static_cast<uint64_t>(size.QuadPart);
 }
 } // namespace detail
 
-// Writes `acPath` and returns its size in bytes, or 0 with `aError` set.
+// Writes to the caller's exclusively created file and returns its size in bytes, or 0 with `aError` set.
 // When the whole dump comes out above `aTarget`, it is written again with only the crashing thread's stack.
 // `apCallback` adds memory (its MemoryCallback); `apRestart` runs before each pass, so that it can hand out its memory again.
-inline uint64_t Write(const std::filesystem::path& acPath, PEXCEPTION_POINTERS apInfo, PMINIDUMP_CALLBACK_INFORMATION apCallback,
-                      DWORD& aError, void (*apRestart)() noexcept = nullptr, uint64_t aTarget = cTarget) noexcept
+// `aExtraType` adds MINIDUMP_TYPE flags: the freeze dump asks for the handle table, which names what a waiting thread waits on.
+inline uint64_t Write(
+    HANDLE ahFile, PEXCEPTION_POINTERS apInfo, PMINIDUMP_CALLBACK_INFORMATION apCallback, DWORD& aError, void (*apRestart)() noexcept = nullptr, uint64_t aTarget = cTarget,
+    const DWORD aExtraType = 0) noexcept
 {
     detail::Pass pass{apCallback, GetCurrentThreadId(), false};
     if (apRestart)
         apRestart();
-    const uint64_t size = detail::WriteOnce(acPath, apInfo, pass, aError);
+    const uint64_t size = detail::WriteOnce(ahFile, apInfo, pass, aError, aExtraType);
     if (size == 0 || size <= aTarget)
         return size;
     pass.OneStack = true;
     if (apRestart)
         apRestart();
-    return detail::WriteOnce(acPath, apInfo, pass, aError);
+    return detail::WriteOnce(ahFile, apInfo, pass, aError, aExtraType);
 }
 
-// Keeps the newest `cKeep` small dumps in `acFolder` and deletes the others (never any other file).
-inline void Prune(const std::filesystem::path& acFolder) noexcept
-{
-    std::error_code ec;
-    std::vector<std::filesystem::path> dumps;
-    for (const auto& entry : std::filesystem::directory_iterator(acFolder, ec))
-    {
-        if (entry.is_regular_file(ec) && IsSmallDumpName(entry.path().filename().wstring()))
-            dumps.push_back(entry.path());
-    }
-    // The UTC stamp in the name sorts by time.
-    std::sort(dumps.begin(), dumps.end());
-    while (dumps.size() > cKeep)
-    {
-        std::filesystem::remove(dumps.front(), ec);
-        dumps.erase(dumps.begin());
-    }
-}
 } // namespace SmallDump

@@ -1,4 +1,5 @@
 #include <TiltedOnlinePCH.h>
+#include <Helpers/PerfScope.h>
 
 #include <Services/LauncherLinkService.h>
 #include <Services/ConnectFile.h>
@@ -79,6 +80,8 @@ void LauncherLinkService::CancelRequest() noexcept
 
 void LauncherLinkService::OnUpdate(const UpdateEvent&) noexcept
 {
+    PerfScope perfScope("LauncherLinkService::OnUpdate");
+
     const auto cNow = std::chrono::steady_clock::now();
     if (cNow < m_nextLook)
         return;

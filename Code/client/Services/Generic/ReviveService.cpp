@@ -1,4 +1,5 @@
 #include <Services/ReviveService.h>
+#include <Helpers/PerfScope.h>
 
 #include <World.h>
 #include <Components.h>
@@ -16,6 +17,7 @@
 
 #include <Actor.h>
 #include <PlayerCharacter.h>
+#include <ReviveHold.h>
 
 #ifdef SKYRIMVR
 #include <Games/Skyrim/VR/VRBodySync.h>
@@ -64,6 +66,8 @@ ReviveService::ReviveService(World& aWorld, entt::dispatcher& aDispatcher, Trans
 
 void ReviveService::OnUpdate(const UpdateEvent&) noexcept
 {
+    PerfScope perfScope("ReviveService::OnUpdate");
+
     const auto cNow = std::chrono::steady_clock::now();
     if (!m_revivedChecks.empty())
         LogRevivedCopies(cNow);
@@ -83,21 +87,35 @@ void ReviveService::OnUpdate(const UpdateEvent&) noexcept
         return;
     }
 
-    uint32_t touched = 0;
-    int hand = -1;
-    float touchedDistance = 0.f;
+    uint32_t firstTouched = 0;
+    int firstHand = -1;
+    float firstDistance = 0.f;
+    int heldHand = -1;
     for (const uint32_t cPlayerId : m_downed)
     {
         float distance = -1.f;
         const int cHand = TouchingHand(FindCopy(cPlayerId), cPlayerId == m_holdTarget, distance);
         if (cPlayerId == m_holdTarget)
-            m_holdDistance = distance;
-        if (cHand >= 0 && !touched)
         {
-            touched = cPlayerId;
-            hand = cHand;
-            touchedDistance = distance;
+            m_holdDistance = distance;
+            heldHand = cHand;
         }
+        if (cHand >= 0 && !firstTouched)
+        {
+            firstTouched = cPlayerId;
+            firstHand = cHand;
+            firstDistance = distance;
+        }
+    }
+
+    // A hold stays on its downed player while the hand is still on them, though another one is in reach too.
+    const uint32_t touched = ReviveHold::Target(m_holdTarget, heldHand >= 0, firstTouched);
+    int hand = firstHand;
+    float touchedDistance = firstDistance;
+    if (touched && touched == m_holdTarget)
+    {
+        hand = heldHand;
+        touchedDistance = m_holdDistance;
     }
 
     if (touched != m_holdTarget)

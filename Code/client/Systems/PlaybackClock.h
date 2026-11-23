@@ -19,7 +19,8 @@
  *   renderTick = now - minTransit - targetDelay
  * - Transit is a snapshot's arrival time minus its capture tick: the network delay plus the unknown offset between both
  *   clocks, so the clocks needn't be in sync. now - minTransit is the newest owner tick that could have arrived by now.
- * - targetDelay = snapshot interval + jitter + safety margin, long enough for the next snapshot to arrive in most cases.
+ * - targetDelay = the longer of the snapshot interval and the longest recent gap, + jitter + safety margin, long enough
+ *   for the next snapshot to arrive in most cases.
  *
  * Ticks are on the owner's clock, times on ours, both in ms. Arrival times should be network receive times, so our own
  * long frames don't look like jitter.
@@ -36,8 +37,14 @@ struct PlaybackClock
     [[nodiscard]] double GetRenderTick() const noexcept { return m_renderTick; }
     [[nodiscard]] double GetTargetDelay() const noexcept { return m_targetDelay; }
     [[nodiscard]] double GetJitter() const noexcept { return m_jitter; }
+    // The least transit of the recent snapshots: a tick plus this is when it could have arrived at the soonest
+    [[nodiscard]] double GetMinTransit() const noexcept { return m_minTransit; }
     [[nodiscard]] double GetSnapshotInterval() const noexcept { return m_snapshotInterval; }
+    [[nodiscard]] double GetLongestRecentGap() const noexcept { return m_longestRecentGap; }
     [[nodiscard]] double GetPlaybackRate() const noexcept { return m_playbackRate; }
+    // Shows the actor at least this far behind, within cMinTargetDelay and cMaxTargetDelay. A VR player's body is sent
+    // as often as the headset game draws, so a longer floor keeps a pose on both sides of the shown tick.
+    void SetMinTargetDelay(double aDelay) noexcept;
 
     // Estimates only use snapshots that arrived within this window, so they follow changing network conditions
     static constexpr double cSampleWindow = 3000.0;
@@ -47,6 +54,13 @@ struct PlaybackClock
     static constexpr double cDefaultSnapshotInterval = 100.0;
     // How many of the newest gaps between snapshots are checked for the owner sending less often
     static constexpr size_t cRecentGaps = 4;
+    // Playback waits out the longest of this many newest gaps. An owner faster than its send rate has to skip a frame now
+    // and then (SendGrid.h), leaving one gap of two frames among shorter ones that the average hides.
+    static constexpr size_t cLongestGapWindow = 16;
+    // A longer gap is a hitch, a pause or a new owner, not the owner's pace, and is left out of the longest gap.
+    // Two of the grid's 33 ms slots and its 8 ms slack: one skipped frame is under it, a single 100 ms hitch is not,
+    // so the hitch does not hold the delay up for the next 16 snapshots. Owners sending slower than this keep the average.
+    static constexpr double cMaxPaceGap = 75.0;
     // Playback waits for all but the latest 5% of snapshots, the actor briefly extrapolates over those instead
     static constexpr double cJitterPercentile = 0.95;
     // Extra delay for small variations the estimates miss, like uneven frame times
@@ -79,7 +93,9 @@ private:
     double m_minTransit{0.0};
     double m_jitter{0.0};
     double m_snapshotInterval{cDefaultSnapshotInterval};
+    double m_longestRecentGap{0.0};
     double m_targetDelay{cDefaultSnapshotInterval + cSafetyMargin};
+    double m_minTargetDelay{cMinTargetDelay};
 
     double m_renderTick{0.0};
     double m_lastAdvanceTime{0.0};

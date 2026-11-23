@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 #include <Helpers/Throttle.h>
 #include <Helpers/PerfScope.h>
+#include <cmath>
 
 #include <Services/ActorValueService.h>
 #include <Services/CombatService.h>
@@ -20,7 +21,9 @@
 #include <Events/ClashEvent.h>
 #include <PlayerCharacter.h>
 #include <UI/Banner/DeathCause.h>
+#include <Games/Skyrim/VR/VRBodySync.h>
 #include <Services/PvpProjectiles.h>
+#include <Services/BlockService.h>
 #include <Services/PvpRules.h>
 
 #include <Messages/NotifyActorValueChanges.h>
@@ -31,6 +34,8 @@
 #include <Messages/RequestHealthChangeBroadcast.h>
 #include <Messages/NotifyDeathStateChange.h>
 #include <Messages/RequestDeathStateChange.h>
+#include <KillCredit.h>
+#include <StuckArrows.h>
 
 #include <misc/ActorValueOwner.h>
 
@@ -145,14 +150,18 @@ void ActorValueService::OnDisconnected(const DisconnectedEvent& acEvent) noexcep
     m_heldHits.clear();
     m_clashes.clear();
     m_healthResends.clear();
+    m_healthEases.clear();
+    m_deathRepeats.clear();
 }
 
 void ActorValueService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 {
+    m_deathRepeats.erase(acEvent.FormId);
+    m_healthEases.erase(acEvent.FormId);
     if (!m_transport.IsConnected())
         return;
 
-    auto view = m_world.view<FormIdComponent>();
+    auto view = m_world.view<FormIdComponent>(entt::exclude<ObjectComponent>);
     const auto it = Utils::FindById<FormIdComponent>(view, acEvent.FormId);
     if (it)
         m_world.remove<ActorValuesComponent>(*it);
@@ -222,6 +231,7 @@ void ActorValueService::OnUpdate(const UpdateEvent& acEvent) noexcept
 
     RunSmallHealthUpdates();
     RunHeldHits();
+    RunHealthEases();
     RunDeathStateUpdates();
     RunActorValuesUpdates();
     RunCopyRevivals();
@@ -332,7 +342,7 @@ void ActorValueService::OnHealthChange(const HealthChangeEvent& acEvent) noexcep
     if (!m_transport.IsConnected())
         return;
 
-    auto view = m_world.view<FormIdComponent>();
+    auto view = m_world.view<FormIdComponent>(entt::exclude<ObjectComponent>);
 
     const auto hitteeIt = Utils::FindByFormId(view, acEvent.HitteeId);
 
@@ -449,21 +459,59 @@ void ActorValueService::RunDeathStateUpdates() noexcept
 
         bool isDead = pActor->IsDead();
         if (isDead != localComponent.IsDead)
-        {
-            localComponent.IsDead = isDead;
-            // A life after a death here is this game's revive: the server marks it from this report, and an announcement from here carries it (BuildActorData).
-            if (ActorExtension* pExtension = pActor->GetExtension())
-                pExtension->RevivedSinceDeath = !isDead;
-            spdlog::info("Death sync: local actor {:X} is now {}, telling the server", pActor->formID, isDead ? "dead" : "alive");
-
-            RequestDeathStateChange requestChange;
-            requestChange.Id = localComponent.Id;
-            requestChange.OwnershipEpoch = localComponent.OwnershipEpoch;
-            requestChange.IsDead = isDead;
-
-            m_transport.Send(requestChange);
-        }
+            SendDeathState(localComponent, pActor, isDead, 0);
     }
+}
+
+void ActorValueService::SendDeathState(LocalComponent& aLocal, Actor* apActor, bool aIsDead, uint32_t aKillerPlayerId) noexcept
+{
+    // A new death of an NPC: its body's resting pose goes out at least once, for the others to lay their copy out in.
+    if (aIsDead && !aLocal.IsDead && apActor != PlayerCharacter::Get())
+        VRBodySync::NoteDeathHere(apActor->formID);
+    if (!aIsDead)
+        StuckArrows::OnRevived(aLocal.Id);
+    aLocal.IsDead = aIsDead;
+    // A life after a death here is this game's revive: the server marks it from this report, and an announcement from here carries it (BuildActorData).
+    if (ActorExtension* pExtension = apActor->GetExtension())
+        pExtension->RevivedSinceDeath = !aIsDead;
+    if (aKillerPlayerId)
+        spdlog::debug("Death sync: local actor {:X} is now dead by player {}'s blow, telling the server", apActor->formID, aKillerPlayerId);
+    else
+        spdlog::info("Death sync: local actor {:X} is now {}, telling the server", apActor->formID, aIsDead ? "dead" : "alive");
+
+    RequestDeathStateChange requestChange;
+    requestChange.Id = aLocal.Id;
+    requestChange.OwnershipEpoch = aLocal.OwnershipEpoch;
+    requestChange.IsDead = aIsDead;
+    requestChange.KillerPlayerId = aIsDead ? aKillerPlayerId : 0;
+
+    m_transport.Send(requestChange);
+    // A blow right after on the body needs no repeat of it (RepeatDeath).
+    if (aIsDead)
+        m_deathRepeats[apActor->formID] = std::chrono::steady_clock::now();
+}
+
+void ActorValueService::RepeatDeath(Actor* apActor, uint32_t aServerId) noexcept
+{
+    const auto cEntity = Utils::FindEntityByServerId(aServerId);
+    auto* pLocal = cEntity ? m_world.try_get<LocalComponent>(*cEntity) : nullptr;
+    if (!pLocal)
+        return;
+
+    const auto cNow = std::chrono::steady_clock::now();
+    if (m_deathRepeats.size() > 64)
+    {
+        for (auto repeat = m_deathRepeats.begin(); repeat != m_deathRepeats.end();)
+            repeat = cNow - repeat->second >= std::chrono::minutes(1) ? m_deathRepeats.erase(repeat) : std::next(repeat);
+    }
+    auto& last = m_deathRepeats[apActor->formID];
+    if (!KillCredit::RepeatDue(last, cNow))
+        return;
+    last = cNow;
+
+    // Its copy there still stands, waiting for a death word that went missing; a blow on a body credits nobody.
+    spdlog::debug("Death sync: another player struck {:X}, already dead here; its death is sent again", apActor->formID);
+    SendDeathState(*pLocal, apActor, true, 0);
 }
 
 void ActorValueService::RunActorValuesUpdates() noexcept
@@ -474,6 +522,14 @@ void ActorValueService::RunActorValuesUpdates() noexcept
 
     BroadcastActorValues();
 }
+
+namespace
+{
+double SteadyMilliseconds() noexcept
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+} // namespace
 
 namespace
 {
@@ -493,6 +549,38 @@ constexpr uint64_t kBlockAfter = 100;
 void ActorValueService::OnClash(const ClashEvent& acEvent) noexcept
 {
     m_clashes.push_back({acEvent.FormId, acEvent.Tick});
+}
+
+void ActorValueService::RunHealthEases() noexcept
+{
+    if (m_healthEases.empty())
+        return;
+
+    const double cNow = SteadyMilliseconds();
+    auto view = m_world.view<FormIdComponent, RemoteComponent>();
+    for (auto it = m_healthEases.begin(); it != m_healthEases.end();)
+    {
+        // Only the copy the walk was made for: the same character, epoch and actor, still another player's.
+        const uint32_t cServerId = it->second.For.ServerId;
+        const auto cEntity =
+            std::find_if(std::begin(view), std::end(view), [&view, cServerId](entt::entity aEntity) { return view.get<RemoteComponent>(aEntity).Id == cServerId; });
+        HealthEase::Binding now{};
+        if (cEntity != std::end(view))
+            now = {cServerId, view.get<RemoteComponent>(*cEntity).OwnershipEpoch, view.get<FormIdComponent>(*cEntity).Id};
+        Actor* pActor = now.FormId == it->first ? Cast<Actor>(TESForm::GetById(it->first)) : nullptr;
+        const bool cRemotePlayer = pActor && pActor->GetExtension() && pActor->GetExtension()->IsRemotePlayer();
+        if (!pActor || pActor->IsDead() || !HealthEase::StillFor(it->second, now, cRemotePlayer))
+        {
+            it = m_healthEases.erase(it);
+            continue;
+        }
+        if (HealthEase::StepDue(it->second, cNow))
+        {
+            it.value().Last = cNow;
+            pActor->ForceActorValue(ActorValueOwner::ForceMode::DAMAGE, ActorValueInfo::kHealth, HealthEase::ValueAt(it->second, cNow));
+        }
+        it = HealthEase::IsDone(it->second, cNow) ? m_healthEases.erase(it) : std::next(it);
+    }
 }
 
 void ActorValueService::RunHeldHits() noexcept
@@ -556,16 +644,22 @@ void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcas
         if (const auto cNow = std::chrono::steady_clock::now(); cNow >= s_nextSaid)
         {
             s_nextSaid = cNow + std::chrono::seconds(5);
-            spdlog::info("PvP: a hit of {:.0f} from player {} not taken: the two may not fight here (PvP off, or one plays flat Skyrim and the other VR)", -acMessage.DeltaHealth,
-                         acMessage.AttackerPlayerId);
+            spdlog::debug(
+                "PvP: a hit of {:.0f} from player {} not taken: the two may not fight here (PvP off, or one plays flat Skyrim and the other VR)", -acMessage.DeltaHealth,
+                acMessage.AttackerPlayerId);
         }
         return;
     }
 
-#ifdef SKYRIMVR
-    // Another player's hit on this player waits for the defender's rule (RunHeldHits).
+    // Another player's hit on this player waits for the defender's rule (RunHeldHits): in VR a blade contact can stop it,
+    // on flat the player's block (BlockService), and with no flat block it is not held.
     // A spell's hit has no tick and goes straight on: no weapon can block it, and it is not an arrow's.
-    if (acMessage.DeltaHealth < 0.f && acMessage.AttackerPlayerId && acMessage.Tick)
+#ifdef SKYRIMVR
+    constexpr bool cHeld = true;
+#else
+    const bool cHeld = BlockService::Active();
+#endif
+    if (cHeld && acMessage.DeltaHealth < 0.f && acMessage.AttackerPlayerId && acMessage.Tick)
     {
         Actor* pActor = Utils::GetByServerId<Actor>(acMessage.Id);
         if (pActor && pActor == PlayerCharacter::Get())
@@ -598,7 +692,6 @@ void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcas
             return;
         }
     }
-#endif
     ApplyHealthChange(acMessage);
 }
 
@@ -611,7 +704,11 @@ void ActorValueService::ApplyHealthChange(const NotifyHealthChangeBroadcast& acM
         return;
     }
 
+    // A blow lands at once, from where the health is now; the walk to the last report is over.
+    m_healthEases.erase(pActor->formID);
+
     const float cHealthBefore = pActor->GetActorValue(ActorValueInfo::kHealth);
+    const bool cDeadBefore = pActor->IsDead();
     float newHealth = cHealthBefore + acMessage.DeltaHealth;
 
     // A player's copy is essential and goes down at zero, but only its owner's game decides when that player is down.
@@ -657,6 +754,9 @@ void ActorValueService::ApplyHealthChange(const NotifyHealthChangeBroadcast& acM
                      health, pActor->IsDead() ? ", already dead" : "", pActor->parentCell ? "" : ", in no cell here", pActor->GetNiNode() ? "" : ", no 3D here");
     }
 
+    if (cBlowHere && cDeadBefore && acMessage.AttackerPlayerId && !pHitExtension->IsPlayer())
+        RepeatDeath(pActor, acMessage.Id);
+
     if (!pActor->IsDead() && health <= 0.f)
     {
         ActorExtension* pExtension = pActor->GetExtension();
@@ -675,6 +775,13 @@ void ActorValueService::ApplyHealthChange(const NotifyHealthChangeBroadcast& acM
                 {
                     s_refused.erase(pActor->formID);
                     spdlog::info("Death sync: health broadcast killed actor {:X}", pActor->formID);
+                    // The death goes out now, with the player whose blow it was, so that their game credits them with the kill.
+                    if (cBlowHere && KillCredit::CreditsAttacker(acMessage.DeltaHealth, acMessage.AttackerPlayerId))
+                    {
+                        const auto cEntity = Utils::FindEntityByServerId(acMessage.Id);
+                        if (auto* pLocal = cEntity ? m_world.try_get<LocalComponent>(*cEntity) : nullptr)
+                            SendDeathState(*pLocal, pActor, true, acMessage.AttackerPlayerId);
+                    }
                 }
                 else if (++refusals == 3)
                     spdlog::warn("Death sync: actor {:X} refuses to die (essential, or protected); leaving it to its owner", pActor->formID);
@@ -691,7 +798,7 @@ void ActorValueService::ApplyHealthChange(const NotifyHealthChangeBroadcast& acM
     */
 }
 
-void ActorValueService::OnActorValueChanges(const NotifyActorValueChanges& acMessage) const noexcept
+void ActorValueService::OnActorValueChanges(const NotifyActorValueChanges& acMessage) noexcept
 {
     auto view = m_world.view<FormIdComponent, RemoteComponent>();
 
@@ -744,6 +851,10 @@ void ActorValueService::OnActorValueChanges(const NotifyActorValueChanges& acMes
 
             if (!isRemotePlayer)
             {
+                // A same-life alive word followed by a genuine healthy owner value can recover an observed graph-only fall.
+                // Record even when the value needs no correction here; this is packet evidence, not a local health guess.
+                InterpolationSystem::NoteOwnerHealth(m_world, pActor, value, std::isfinite(value) && value > kNpcCopyHealthFloor);
+                view.get<RemoteComponent>(*itor).OwnerHealth = value;
                 // An NPC's health here is only the sum of the damage deltas that arrived, so it drifts when one is lost.
                 // Only a gap that matters is corrected: the delta path carries deaths, and the two would fight every frame.
                 // Corrections are logged, to show whether deltas are being dropped.
@@ -783,6 +894,20 @@ void ActorValueService::OnActorValueChanges(const NotifyActorValueChanges& acMes
                 spdlog::info("Remote player {:X} copy kept at {:.0f} health instead of the owner's {:.0f}; a copy never goes down", pActor->formID, kRemotePlayerHealthFloor, value);
                 value = kRemotePlayerHealthFloor;
             }
+        }
+
+        // A small change in another player's health is walked to over the second until the next report, not stepped to.
+        if (isRemotePlayer && key == ActorValueInfo::kHealth)
+        {
+            const float cCurrent = pActor->GetActorValue(ActorValueInfo::kHealth);
+            if (HealthEase::Eases(cCurrent, value))
+            {
+                const double cNow = SteadyMilliseconds();
+                const HealthEase::Binding cFor{acMessage.Id, acMessage.OwnershipEpoch, pActor->formID};
+                m_healthEases[pActor->formID] = HealthEase::Ramp{cCurrent, value, cNow, cNow, cFor};
+                continue;
+            }
+            m_healthEases.erase(pActor->formID);
         }
 
         spdlog::debug("Actor value update, server ID: {:X}, key: {}, value: {}", acMessage.Id, key, value);
@@ -871,7 +996,16 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
 
     // Kept even when the copy is already in that state here: the corpse placement waits for this word.
     auto& remote = view.get<RemoteComponent>(*it);
+    // A death or new life ends every observation of this copy's previous fall, even between render frames.
+    const bool cOwnerLifeChanged = remote.DeadAtOwner != acMessage.IsDead;
+    if (acMessage.IsDead || cOwnerLifeChanged)
+        InterpolationSystem::Forget(remote.CachedRefId);
     remote.DeadAtOwner = acMessage.IsDead;
+    // Its owner's word on its life has come, so a death seen here before the hand-off no longer counts.
+    remote.DeadHere = false;
+    // Brought back, it keeps its head: what was told for its death is not cut off it now, nor after a later death.
+    if (!acMessage.IsDead)
+        StuckArrows::OnRevived(acMessage.Id);
 
     // A life sent here is its owner's revive, which the server now marks (RevivedSinceDeath); a death clears that.
     // The copy is killed or brought back once it has its 3D, from its spawn request (CharacterService::RunRemoteUpdates).
@@ -909,8 +1043,16 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
 
     if (pActor->IsDead() != acMessage.IsDead)
     {
-        acMessage.IsDead ? pActor->Kill() : pActor->Respawn();
-        spdlog::info("Death sync: remote actor {:X} set {} by its owner (now dead: {})", pActor->formID, acMessage.IsDead ? "dead" : "alive", pActor->IsDead());
+        // This player's blow killed it in its owner's game: it dies here with this player as its killer, so the kill is theirs here
+        // (kill stats, any bounty, and scripts asking who killed it). Its owner's game killed it with no killer.
+        const bool cCredited = acMessage.IsDead && KillCredit::CreditedHere(acMessage.KillerPlayerId, m_transport.GetLocalPlayerId());
+        if (cCredited)
+            pActor->Kill(PlayerCharacter::Get());
+        else
+            acMessage.IsDead ? pActor->Kill() : pActor->Respawn();
+        spdlog::debug(
+            "Death sync: remote actor {:X} set {} by its owner{} (now dead: {})", pActor->formID, acMessage.IsDead ? "dead" : "alive",
+            cCredited ? ", killed here by this player, whose blow it was" : "", pActor->IsDead());
     }
     else
     {
@@ -918,4 +1060,6 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
         // Its body then falls under this side's ragdoll and lies elsewhere than the owner's.
         spdlog::info("Death sync: remote actor {:X} was already {} here when its owner's word arrived", pActor->formID, acMessage.IsDead ? "dead" : "alive");
     }
+    if (!acMessage.IsDead && !cOwnerLifeChanged && !pActor->IsDead())
+        InterpolationSystem::NoteOwnerAlive(m_world, pActor);
 }

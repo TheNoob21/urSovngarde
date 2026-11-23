@@ -1,10 +1,16 @@
+#include <Services/GameExtension.h>
 #include <Services/InventoryService.h>
 #include <Helpers/Throttle.h>
 #include <Services/Generic/NpcEquipmentCheck.h>
+#include <Services/Generic/CopyLootCheck.h>
 #include <Services/Generic/PlayerCopyWeapon.h>
+#include <Services/Generic/AlchemyMadeRules.h>
+#include <Structs/ItemDataChange.h>
 #include <Copies/EpochMiss.h>
 #include <Helpers/PerfScope.h>
 #include <Copies/RecentModelChanges.h>
+#include <FollowerCommand.h>
+#include <FollowerInventory.h>
 
 #include <Messages/RequestObjectInventoryChanges.h>
 #include <Messages/NotifyObjectInventoryChanges.h>
@@ -18,6 +24,7 @@
 
 #include <Events/UpdateEvent.h>
 #include <Events/InventoryChangeEvent.h>
+#include <Events/ItemTakeEvent.h>
 #include <Events/EquipmentChangeEvent.h>
 
 #include <World.h>
@@ -36,7 +43,10 @@
 #include <DefaultObjectManager.h>
 #include <PlayerCharacter.h>
 #include <Forms/MagicItem.h>
+#include <Forms/AlchemyItem.h>
+#include <Games/Skyrim/GameSound.h>
 #include <Forms/TESObjectARMO.h>
+#include <ItemExtraData.h>
 
 namespace
 {
@@ -66,12 +76,17 @@ void InventoryService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
     RunNakedNPCBugChecks();
     RunEquipmentSnapshotUpdates();
     NpcEquipmentCheck::Run(m_world, m_transport);
+    CopyLootCheck::Run();
     PlayerCopyWeapon::Run(m_world, m_transport.IsConnected());
 }
 
 void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEvent) noexcept
 {
     if (!m_transport.IsConnected())
+        return;
+
+    // An unsupported local plugin has no network item identity.
+    if (!acEvent.Item.BaseId)
         return;
 
     auto view = m_world.view<FormIdComponent>();
@@ -122,6 +137,14 @@ void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEven
 
     m_transport.Send(request);
 
+    // Another player may take the same item from it at once: the server's answer could take it back off the player (ItemTakeService).
+    if (acEvent.IntoPlayer && acEvent.Item.Count < 0)
+    {
+        ItemTakeEvent take{ItemTakeSource::kInventory, serverId, {}, {}, acEvent.Item};
+        take.Item.Count = -acEvent.Item.Count;
+        m_dispatcher.trigger(take);
+    }
+
     spdlog::info("Sending item request, item: {:X}, count: {}, target object: {:X}, drop: {}", acEvent.Item.BaseId.BaseId, acEvent.Item.Count, acEvent.FormId, acEvent.Drop);
 }
 
@@ -130,7 +153,7 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
     if (!m_transport.IsConnected())
         return;
 
-    auto view = m_world.view<FormIdComponent>();
+    auto view = m_world.view<FormIdComponent>(entt::exclude<ObjectComponent>);
 
     const auto iter = Utils::FindById<FormIdComponent>(view, acEvent.ActorId);
 
@@ -156,7 +179,9 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
 
     if (!modSystem.GetServerModId(acEvent.EquipSlotId, request.EquipSlotId))
         return;
-    if (!modSystem.GetServerModId(acEvent.ItemId, request.ItemId))
+    if (acEvent.IsSpell && GameExtension::ChecksMagic())
+        modSystem.GetSharedSpellId(acEvent.ItemId, request.ItemId);
+    else if (!modSystem.GetServerModId(acEvent.ItemId, request.ItemId))
         return;
 
     request.Count = acEvent.Count;
@@ -171,7 +196,9 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
     spdlog::info("Sending equipment request, item: {:X}, count: {}, target object: {:X}{}", acEvent.ItemId, acEvent.Count, acEvent.ActorId, acEvent.Unequip ? " (unequip)" : "");
     // The hook queues the change before the game makes it, and the equipment above is read a frame later.
     // An item taken off but worn by then, or put on but not worn, was undone through a path no hook sees: the first check sends what it wears.
-    if (pActor->formID != 0x14)
+    // An item eaten or drunk is never worn: nothing to check afterwards.
+    const TESForm* pEventItem = TESForm::GetById(acEvent.ItemId);
+    if (pActor->formID != 0x14 && !(pEventItem && pEventItem->IsConsumable()))
     {
         const bool cUndone = !acEvent.IsSpell && !acEvent.IsShout && NpcEquipmentCheck::IsWorn(request.CurrentInventory, request.ItemId) == acEvent.Unequip;
         NpcEquipmentCheck::Note(pActor->formID, request.ServerId, request.OwnershipEpoch, request.CurrentInventory, cUndone);
@@ -180,6 +207,68 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
 
 namespace
 {
+// Skyrim.esm sound descriptors. An ingredient has no eating sound of its own (no field, no default object): the food one
+// is the game's only eating sound. The making ones are what the alchemy menu plays for its own player.
+constexpr uint32_t kFoodEatSound = 0xCAF94;    // ITMFoodEat
+constexpr uint32_t kPotionMadeSound = 0xC8C74; // UIAlchemyCreatePotion
+constexpr uint32_t kPoisonMadeSound = 0xC8C6F; // UIAlchemyCreatePoison
+
+// Other players' makings at an alchemy table, from what their inventories do (AlchemyMadeRules).
+AlchemyMadeRules::Tracker s_alchemyMade;
+
+/**
+ * Play the sound of a potion, poison, food item or ingredient being used, at a copy whose owner ate or drank it.
+ * An item whose sound is not set plays none.
+ *
+ * @param apActor The copy.
+ * @param apItem The item its owner used.
+ */
+void PlayConsumeSound(Actor* apActor, TESForm* apItem) noexcept
+{
+    const auto* pAlchemy = apItem->formType == FormType::Alchemy ? Cast<AlchemyItem>(apItem) : nullptr;
+    const auto* pSoundForm = pAlchemy ? static_cast<const TESForm*>(pAlchemy->data.pConsumptionSound) : nullptr;
+    uint32_t sound = pSoundForm ? pSoundForm->formID : 0;
+    if (apItem->formType == FormType::Ingredient)
+    {
+        sound = kFoodEatSound;
+        s_alchemyMade.NoteEaten(apActor->formID, apItem->formID, std::chrono::steady_clock::now());
+    }
+    const bool cPlayed = sound && GameSound::Play(sound, &apActor->position);
+    spdlog::debug("Equipment sync: remote actor {:X} used {:X}; its sound {:X} {}", apActor->formID, apItem->formID, sound, cPlayed ? "played" : "not played");
+}
+
+/**
+ * Another player's inventory change, as it reaches their copy: an ingredient used up and a made potion or poison gained
+ * close together is a making at an alchemy table, whose sound plays at the copy (one per making).
+ *
+ * @param apActor The other player's copy.
+ * @param acItem The change (count below zero: removed).
+ */
+void NoteAlchemyMade(Actor* apActor, const Inventory::Entry& acItem) noexcept
+{
+    using AlchemyMadeRules::Made;
+    const auto cNow = std::chrono::steady_clock::now();
+    Made made = Made::None;
+    if (acItem.Count > 0 && acItem.BaseId.ModId == ItemDataChanges::kRunTimeMod && acItem.Data.Base.IsSet())
+        made = s_alchemyMade.NoteMade(apActor->formID, acItem.Data.Base.IsPoison, cNow);
+    else if (acItem.Count < 0 && acItem.BaseId.ModId != ItemDataChanges::kRunTimeMod)
+    {
+        const TESForm* pItem = TESForm::GetById(World::Get().GetModSystem().GetGameId(acItem.BaseId));
+        if (pItem && pItem->formType == FormType::Ingredient)
+            made = s_alchemyMade.NoteIngredientUsed(apActor->formID, pItem->formID, cNow);
+    }
+    if (made == Made::None)
+        return;
+
+    const PlayerCharacter* pPlayer = PlayerCharacter::Get();
+    const bool cHeard = pPlayer && AlchemyMadeRules::Heard(glm::distance(glm::vec3(apActor->position), glm::vec3(pPlayer->position)));
+    const uint32_t cSound = made == Made::Poison ? kPoisonMadeSound : kPotionMadeSound;
+    const bool cPlayed = cHeard && GameSound::Play(cSound, &apActor->position);
+    spdlog::debug(
+        "Equipment sync: remote player {:X} made a {} at an alchemy table; its sound {}", apActor->formID, made == Made::Poison ? "poison" : "potion",
+        cPlayed ? "played" : (cHeard ? "not played" : "too far away to be heard"));
+}
+
 // True for this player's own follower, whose gear is what this game has.
 // Another player's game dresses her in its own save's outfit and sends that as a re-equip; it is ignored here.
 bool IsMyFollower(const Actor* apActor, const uint32_t aServerId, const char* apWhat) noexcept
@@ -202,6 +291,7 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
     if (acMessage.OwnershipEpoch != 0)
     {
         Actor* pActor = nullptr;
+        bool currentLocalOwner = false;
 
         auto remoteView = m_world.view<RemoteComponent, FormIdComponent>(entt::exclude<LocalComponent>);
         const auto remoteIt = std::find_if(remoteView.begin(), remoteView.end(), [remoteView, &acMessage](const entt::entity aEntity)
@@ -222,7 +312,10 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
             });
 
             if (localIt != localView.end())
+            {
                 pActor = Cast<Actor>(TESForm::GetById(localView.get<FormIdComponent>(*localIt).Id));
+                currentLocalOwner = true;
+            }
         }
 
         // A character here under another epoch is a missed update, not an unknown character: report it.
@@ -238,15 +331,28 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
             spdlog::debug("Discarded an inventory update for actor {:X} because epoch {} is no longer current", acMessage.ServerId, acMessage.OwnershipEpoch);
             return;
         }
-        if (IsMyFollower(pActor, acMessage.ServerId, "an inventory change"))
+        const auto* pExtension = pActor->GetExtension();
+        const bool cOwnerFollower = FollowerCommand::MayApplyOwnerInventory(
+            {currentLocalOwner, pExtension && pExtension->IsLocal(), !pExtension || pExtension->IsPlayer(), pExtension && pExtension->IsOthersFollower(),
+             pActor->IsPlayerFollower()});
+        if (!cOwnerFollower && IsMyFollower(pActor, acMessage.ServerId, "an inventory change"))
             return;
 
         ScopedInventoryOverride _;
+        const Inventory::Entry item = cOwnerFollower ? FollowerOwnerItem(acMessage.Item) : acMessage.Item;
 
         if (acMessage.Drop)
-            pActor->DropOrPickUpObject(acMessage.Item, nullptr, nullptr);
+            pActor->DropOrPickUpObject(item, nullptr, nullptr);
         else
-            pActor->AddOrRemoveItem(acMessage.Item, false, acMessage.PickedUp);
+            pActor->AddOrRemoveItem(item, false, acMessage.PickedUp);
+        CopyLootCheck::OnOwnerChange(pActor->formID, item, acMessage.Drop);
+        if (!currentLocalOwner && pExtension && pExtension->IsPlayer() && !acMessage.Drop && !acMessage.PickedUp)
+            NoteAlchemyMade(pActor, item);
+
+        if (cOwnerFollower)
+            spdlog::debug(
+                "FollowerInventory: {:X}:{:X} x{} applied to follower {:X} (server id {:X}, epoch {}); worn flags from other games cleared", item.BaseId.ModId, item.BaseId.BaseId,
+                item.Count, pActor->formID, acMessage.ServerId, acMessage.OwnershipEpoch);
 
         return;
     }
@@ -279,6 +385,9 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
     if (IsMyFollower(pActor, acMessage.ServerId, "an equipment change"))
         return;
 
+    // What the owner wears now is what a later loot check sets the copy back to, applied here or not.
+    CopyLootCheck::OnOwnerEquipment(pActor->formID, acMessage.CurrentInventory);
+
     // The game's equip code reads the actor's AI process, and an actor not loaded here has none.
     // What it wears comes with its next assignment.
     if (!pActor->HasLoadedProcess())
@@ -293,21 +402,33 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
         if (pActor->GetExtension()->IsRemote())
         {
             ApplyHandEquipment(pActor, acMessage.CurrentInventory);
-            NpcEquipmentCheck::ApplyShield(pActor, acMessage.CurrentInventory);
+            NpcEquipmentCheck::ApplyWornItems(pActor, acMessage.CurrentInventory);
         }
         return;
     }
+
+    // The owner's worn list comes with every change: a piece on it now that a later snapshot lacks was taken off (NpcEquipmentCheck::ApplyWornItems).
+    if (!acMessage.IsSpell && !acMessage.IsShout)
+        NpcEquipmentCheck::NoteOwnerEquipment(pActor, acMessage.CurrentInventory, true);
 
     auto& modSystem = World::Get().GetModSystem();
 
     spdlog::info("Equipment sync: remote actor {:X} {} {:X}:{:X} (spell: {}, shout: {}, slot {:X}:{:X})", pActor->formID, acMessage.Unequip ? "unequips" : "equips", acMessage.ItemId.ModId, acMessage.ItemId.BaseId, acMessage.IsSpell, acMessage.IsShout, acMessage.EquipSlotId.ModId, acMessage.EquipSlotId.BaseId);
 
-    uint32_t itemId = modSystem.GetGameId(acMessage.ItemId);
+    uint32_t itemId = acMessage.IsSpell ? modSystem.GetLocalSpellId(acMessage.ItemId) : modSystem.GetGameId(acMessage.ItemId);
     TESForm* pItem = TESForm::GetById(itemId);
 
     if (!pItem)
     {
         spdlog::error("Could not find inventory item {:X}:{:X}", acMessage.ItemId.ModId, acMessage.ItemId.BaseId);
+        return;
+    }
+
+    // Eaten or drunk by its owner: only its sound is played here. Equipping it would use up the copy's own and apply its effect again.
+    if (pItem->IsConsumable())
+    {
+        if (!acMessage.Unequip)
+            PlayConsumeSound(pActor, pItem);
         return;
     }
 
@@ -376,8 +497,15 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
             }
         }
 
-        pEquipManager->Equip(pActor, pItem, nullptr, acMessage.Count, pEquipSlot, false, true, false, false);
-        NoteHandItem(pActor, pItem, pEquipSlot == DefaultObjectManager::Get().leftEquipSlot, true);
+        // The stack its owner wears: an enchanted, tempered, poisoned or named one is not a plain one of the same item.
+        const bool cLeft = pEquipSlot == DefaultObjectManager::Get().leftEquipSlot;
+        const auto cWorn = std::find_if(
+            acMessage.CurrentInventory.Entries.begin(), acMessage.CurrentInventory.Entries.end(),
+            [&acMessage, cLeft](const Inventory::Entry& acEntry) { return acEntry.BaseId == acMessage.ItemId && (cLeft ? acEntry.ExtraWornLeft : acEntry.ExtraWorn); });
+        ExtraDataList* pStack = cWorn != acMessage.CurrentInventory.Entries.end() ? ItemExtraData::FindStack(pActor, pItem, *cWorn) : nullptr;
+
+        pEquipManager->Equip(pActor, pItem, pStack, acMessage.Count, pEquipSlot, false, true, false, false);
+        NoteHandItem(pActor, pItem, cLeft, true);
 
         // The owner's game took off what the new armor replaces without a change of its own, so that piece stays off here.
         // Put back on, it would take its slot back: a shield or helmet changed for another would show the old one.
@@ -401,15 +529,19 @@ void InventoryService::RunWeaponStateUpdates() noexcept
     if (!m_transport.IsConnected())
         return;
 
+    // This player's own draw state is read every frame and sent the frame it changes: a VR draw from a holster or a grip
+    // reaches the other games' copies only this way, and the half-second poll made it up to about 2 s late there.
+    // NPCs stay on the poll; their draw travels with their animations.
     static Throttle s_sendThrottle(500ms);
-    if (!s_sendThrottle.TakeTurn())
-        return;
+    const bool cNpcTurn = s_sendThrottle.TakeTurn();
 
     auto view = m_world.view<FormIdComponent, LocalComponent>();
 
     for (auto entity : view)
     {
         const auto& formIdComponent = view.get<FormIdComponent>(entity);
+        if (!cNpcTurn && formIdComponent.Id != 0x14)
+            continue;
         Actor* const pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
         // Gone from the game, for instance in a load, before discovery has noticed.
         if (!pActor)
@@ -442,7 +574,7 @@ void InventoryService::RunNakedNPCBugChecks() noexcept
     if (!s_sendThrottle.TakeTurn())
         return;
 
-    auto view = m_world.view<FormIdComponent>();
+    auto view = m_world.view<FormIdComponent>(entt::exclude<ObjectComponent>);
 
     for (auto entity : view)
     {
@@ -668,7 +800,7 @@ void InventoryService::ApplyHandEquipment(Actor* apActor, const Inventory& acEqu
 
     const auto syncSpell = [&](const GameId& acDesiredSpell, uint32_t aHand)
     {
-        TESForm* pDesired = acDesiredSpell ? TESForm::GetById(modSystem.GetGameId(acDesiredSpell)) : nullptr;
+        TESForm* pDesired = acDesiredSpell ? TESForm::GetById(modSystem.GetLocalSpellId(acDesiredSpell)) : nullptr;
         TESForm* pCurrent = apActor->magicItems[aHand];
         if (pDesired == pCurrent)
             return;

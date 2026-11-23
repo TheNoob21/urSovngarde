@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Services/CoopMenu.h>
 #include <optional>
 
 #include <Events/EventDispatcher.h>
@@ -16,10 +17,12 @@ struct ConnectionErrorEvent;
  *
  * The server comes from connect.txt in the player's folder (ConnectFile::PlayerFolder): "address:port", then an optional password line.
  * When that file names no server, it comes from the same file in a mod: Data\SKSE\Plugins\urSovngarde\connect.txt.
- * A few seconds after a save is loaded the client connects on its own if the file says "autoconnect=on", and otherwise waits for F6.
+ * A few seconds after a save is loaded the client connects if the file says "autoconnect=on".
+ * Without a dashboard it also connects when that setting is absent; explicit "autoconnect=off" keeps it waiting for F6.
  * A dropped connection is retried with a growing delay.
  * F6 toggles the connection by hand, and disconnecting with it stops the retries.
  * A refused connection (wrong version, wrong password, ...) stops them too, because trying again would give the same answer.
+ * Either way the next save loaded connects again when the file says "autoconnect=on" (CoopMenu::RearmAutoConnect).
  */
 struct VRConnectService final : BSTEventSink<TESLoadGameEvent>
 {
@@ -29,6 +32,9 @@ struct VRConnectService final : BSTEventSink<TESLoadGameEvent>
         TiltedPhoques::String Password;
         // The launcher's "connect automatically" setting: an "autoconnect=on" line after the address.
         bool AutoConnect = false;
+        // True when the file has an "autoconnect=" line at all, on or off.
+        // Without one, runs with no in-headset dashboard and no keyboard (standalone headsets) connect by themselves.
+        bool AutoConnectSet = false;
     };
 
     // False when neither the player's file nor a mod's names a server.
@@ -62,6 +68,14 @@ struct VRConnectService final : BSTEventSink<TESLoadGameEvent>
 
     BSTEventResult OnEvent(const TESLoadGameEvent*, const EventDispatcher<TESLoadGameEvent>*) override;
 
+    // The co-op menu's calls (Papyrus urSovngardeCoop.*), made on the game's thread.
+    // Connect() reads the server from the files like F6 does; the result says why nothing started.
+    CoopMenu::JoinResult Connect() noexcept;
+    CoopMenu::JoinResult ConnectSaved(const std::string& acAddress, const std::string& acPassword) noexcept;
+    // True when there was a connection or a retry to stop. Disconnecting here stops the retries too.
+    bool Disconnect() noexcept;
+    CoopMenu::Status GetStatus() const noexcept;
+
 private:
     enum class State
     {
@@ -76,7 +90,7 @@ private:
     void OnDisconnected(const DisconnectedEvent& acEvent) noexcept;
     void OnConnectionError(const ConnectionErrorEvent& acEvent) noexcept;
 
-    void StartAttempt() noexcept;
+    void StartAttempt(bool aAllowLoopback = false) noexcept;
     // Leaves any server or attempt; the next update connects.
     void ReconnectNow() noexcept;
     // Reports install problems on the HUD. False when the server would refuse the connection (uGridsToLoad).
@@ -93,6 +107,8 @@ private:
     std::vector<std::string> m_chosenNext;
     bool m_chosenIsFriend{false};
     bool m_autoConnectDone{false};
+    // m_saveLoads when the connect-after-load last ran or was overtaken: a later save runs it again.
+    uint32_t m_saveLoadsAtAutoConnect{0};
     uint32_t m_failedAttempts{0};
     std::chrono::steady_clock::time_point m_inGameSince{};
     std::chrono::steady_clock::time_point m_nextAttempt{};

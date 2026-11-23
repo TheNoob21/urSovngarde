@@ -11,6 +11,8 @@
 
 #include <Services/ImguiService.h>
 #include <Services/DebugService.h>
+#include <Services/KeyFocus.h>
+#include <Services/KeyPollGate.h>
 #include <Services/TransportService.h>
 #include <Services/PapyrusService.h>
 #include <Services/QuestService.h>
@@ -168,10 +170,23 @@ void DebugService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
     PerfScope perfScope("DebugService::OnUpdate");
 
+#ifdef SKYRIMVR
+    // Each key read is a round trip to the Wine server, so a VR frame reads them once per interval (see KeyPollGate).
+    KeyPollGate::Shared().Advance(KeyPollGate::Clock::now());
+    const bool cReadKeys = KeyPollGate::Shared().IsOpen();
+#endif
+
     // There is no main window on VR (Hook_Renderer_Init is off), and the keys below must still work.
     auto* pMainWindow = BSGraphics::GetMainWindow();
     if (pMainWindow && !pMainWindow->IsForeground())
         return;
+
+    static std::atomic<bool> s_f8Pressed = false;
+    static std::atomic<bool> s_f7Pressed = false;
+    static std::atomic<bool> s_f6Pressed = false;
+#ifdef SKYRIMVR
+    static bool s_keysOutOfFocus = false;
+#endif
 
     if (moveData.pActor)
     {
@@ -179,9 +194,33 @@ void DebugService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
         moveData.pActor = nullptr;
     }
 
-    static std::atomic<bool> s_f8Pressed = false;
-    static std::atomic<bool> s_f7Pressed = false;
-    static std::atomic<bool> s_f6Pressed = false;
+#ifdef SKYRIMVR
+    // The keys keep their state between reads, so the frames in between change nothing.
+    if (!cReadKeys)
+        return;
+
+    // The keyboard is the whole desktop's: with two games on one PC, only the one in front takes a press (KeyFocus.h).
+    DWORD foregroundProcess = 0;
+    if (HWND foreground = GetForegroundWindow())
+        GetWindowThreadProcessId(foreground, &foregroundProcess);
+    if (!KeyFocus::KeysReachGame(false, false, foregroundProcess, GetCurrentProcessId()))
+    {
+        s_keysOutOfFocus = true;
+        return;
+    }
+    // A key held as the window came to the front was pressed for another window.
+    if (s_keysOutOfFocus)
+    {
+        s_keysOutOfFocus = false;
+        GetAsyncKeyState(VK_F3);
+        GetAsyncKeyState(VK_F8);
+        if (GetAsyncKeyState(VK_F6))
+            s_f6Pressed = true;
+        if (GetAsyncKeyState(VK_F7))
+            s_f7Pressed = true;
+        return;
+    }
+#endif
 
     if (GetAsyncKeyState(VK_F3) & 0x01)
     {
@@ -261,14 +300,13 @@ void DebugService::DrawServerView() noexcept
     if (m_transport.IsOnline())
     {
         if (ImGui::Button("Disconnect"))
-            m_transport.Close();
+            m_world.ctx().at<VRConnectService>().Stop();
     }
     else
     {
         if (ImGui::Button("Connect"))
         {
-            m_transport.SetServerPassword(s_password);
-            m_transport.Connect(s_address);
+            m_world.ctx().at<VRConnectService>().ConnectToServer(s_address, s_password);
         }
     }
 

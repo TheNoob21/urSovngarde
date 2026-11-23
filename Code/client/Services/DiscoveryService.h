@@ -4,6 +4,8 @@
 #include <Games/Events.h>
 
 #include <Structs/GridCellCoords.h>
+#include <Services/DiscoveryFailureLog.h>
+#include <Services/DiscoveryRetryBackoff.h>
 
 struct World;
 
@@ -57,14 +59,23 @@ protected:
      * notify the client about the newly loaded cells.
      * @param aWorldSpace The world space that the grid cell is in.
      * @param aNewCellGrid True if the player just walked into the new world space.
+     * @return False if the cell could not be found or has no server id, so nothing was reported or recorded.
      */
-    void DetectGridCellChange(TESWorldSpace* aWorldSpace, bool aNewCellGrid) noexcept;
+    bool DetectGridCellChange(TESWorldSpace* apWorldSpace, bool aNewCellGrid) noexcept;
+    /**
+     * @brief Whether a failure of the visit that is running is logged as an error, or only at the debug level.
+     * @param aFormId The form the visit could not find a server id for.
+     * @see DiscoveryFailureLog
+     */
+    bool ShouldLogError(uint32_t aFormId) noexcept;
     /**
      * Find the actors that came into the loaded area and those that left it, and dispatch an added or removed event for each.
      * An actor that left waits out a grace period, except another player's copy whose 3D is gone, which counts as gone at once.
      * A copy this game moved in the last two seconds is not taken for gone at once either, as a move can take its 3D for a moment.
+     *
+     * @param aCellLoaded False when no cell is loaded: only the player is discovered, so every other actor held is removed.
      */
-    void VisitForms() noexcept;
+    void VisitForms(bool aCellLoaded = true) noexcept;
 
     /**
      * On each update, check whether the actor list or locational data has changed.
@@ -131,6 +142,12 @@ private:
     GridCellCoords m_currentGrid{};
     uint32_t m_worldSpaceId = 0;
     uint32_t m_interiorCellId = 0;
+    //! Spaces out the retries of a cell visit that failed, so one failure is not logged and rescanned on every frame.
+    DiscoveryRetryBackoff m_visitRetry{};
+    //! Where the player is during the visit that is running, for the wait to tell a failing place from another.
+    DiscoveryPlace m_visitPlace{};
+    //! Which failures of the visit that is running are errors: the first of each form in a place that fails, not its retries.
+    DiscoveryFailureLog m_failureLog{};
     struct TESForm* m_pLocation = nullptr;
 
     entt::scoped_connection m_preUpdateConnection;

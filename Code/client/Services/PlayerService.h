@@ -51,6 +51,10 @@ protected:
     BSTEventResult OnEvent(const TESLoadGameEvent*, const EventDispatcher<TESLoadGameEvent>*) override;
 
 private:
+    //! Sets the game's KillMove global for this connection (KillMoves.h): off while connected unless the server allows killmoves.
+    void ApplyKillMoves(bool aConnected, bool aServerAllows) noexcept;
+    void ApplyProjectileKillCam(bool aDisable) noexcept;
+
     //! Where the game would have saved last; the server keeps the last one each player sends (SafePointRequest).
     struct SafePoint
     {
@@ -169,6 +173,7 @@ private:
     std::optional<DeathSentence::Cause> m_downingCause;
     int32_t m_serverDifficulty = 6;
     int32_t m_previousDifficulty = 6;
+    std::optional<unsigned char> m_previousVatsDisable;
 
     bool m_isDeathSystemEnabled = true;
 

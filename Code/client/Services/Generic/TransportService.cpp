@@ -20,11 +20,18 @@
 #include <TiltedOnlinePCH.h>
 #include <World.h>
 
+#include <Services/JsonText.h>
+#include <Services/OverlayService.h>
 #include <Services/SendBuffer.h>
+#include <ModContent.h>
+#include <Utils.h>
 #include <Messages/AuthenticationRequest.h>
 #include <Messages/ServerMessageFactory.h>
 #include <Messages/NotifySettingsChange.h>
+#include <Messages/NotifyServerIdentity.h>
 #include <Packet.hpp>
+
+#include <filesystem>
 
 #include <ScriptExtender.h>
 #include <steam/isteamnetworkingutils.h>
@@ -66,6 +73,7 @@ TransportService::TransportService(World& aWorld, entt::dispatcher& aDispatcher)
 
     m_updateConnection = m_dispatcher.sink<UpdateEvent>().connect<&TransportService::HandleUpdate>(this);
     m_settingsChangeConnection = m_dispatcher.sink<NotifySettingsChange>().connect<&TransportService::HandleNotifySettingsChange>(this);
+    m_serverIdentityConnection = m_dispatcher.sink<NotifyServerIdentity>().connect<&TransportService::HandleServerIdentity>(this);
     m_connectedConnection = m_dispatcher.sink<ConnectedEvent>().connect<&TransportService::HandleConnected>(this);
     m_disconnectedConnection = m_dispatcher.sink<DisconnectedEvent>().connect<&TransportService::HandleDisconnected>(this);
 
@@ -188,6 +196,14 @@ void TransportService::OnConnected()
 
     auto* const cpModManager = ModManager::Get();
 
+#ifdef SKYRIMVR
+    request.ContentSizes.GameEdition = ModContentSizes::Edition::kVR;
+#else
+    request.ContentSizes.GameEdition = ModContentSizes::Edition::kSE;
+#endif
+
+    // Path rerouting gives the client the game's Data directory, including the Mod Organizer view.
+    const std::filesystem::path cData = L"Data";
     for (auto* pMod : cpModManager->mods)
     {
         if (!pMod->IsLoaded())
@@ -197,6 +213,10 @@ void TransportService::OnConnected()
         entry.Id = pMod->GetId();
         entry.IsLite = pMod->IsLite();
         entry.Filename = pMod->filename;
+
+        std::error_code error;
+        const auto cSize = std::filesystem::file_size(cData / pMod->filename, error);
+        request.ContentSizes.Sizes.push_back(error ? 0 : cSize);
     }
 
     auto& modSystem = m_world.GetModSystem();
@@ -208,12 +228,6 @@ void TransportService::OnConnected()
         modSystem.GetServerModId(pPlayer->parentCell->formID, request.CellId);
 
     request.Level = pPlayer->GetLevel();
-
-#ifdef SKYRIMVR
-    request.IsFlat = false;
-#else
-    request.IsFlat = true;
-#endif
 
     request.HideFromPublicPage = IsHiddenFromPublicPage();
     if (request.HideFromPublicPage)
@@ -242,10 +256,23 @@ bool TransportService::Connect(const std::string& acEndpoint) noexcept
 void TransportService::OnDisconnected(EDisconnectReason aReason)
 {
     m_connected = false;
+    m_serverName.clear();
+    m_serverPlayerCount = 0;
+    // What the last server said is not what the next one will: settings are known only from this connection's own reply.
+    m_world.SetServerSettings({});
 
     spdlog::warn("Disconnected from server {}", aReason);
 
     m_dispatcher.trigger(DisconnectedEvent());
+}
+
+void TransportService::HandleServerIdentity(const NotifyServerIdentity& acMessage) noexcept
+{
+    if (m_connected)
+    {
+        m_serverName = acMessage.Name;
+        m_serverPlayerCount = acMessage.Players;
+    }
 }
 
 void TransportService::OnUpdate()
@@ -302,7 +329,28 @@ void TransportService::HandleAuthenticationResponse(const AuthenticationResponse
         m_dispatcher.trigger(acMessage.UserMods);
         m_dispatcher.trigger(acMessage.Settings);
         m_dispatcher.trigger(ConnectedEvent(acMessage.PlayerId));
+        if (!acMessage.ContentDifference.Empty())
+        {
+            const String cMessage = "Joined with different shared content. " + ModContent::Describe(acMessage.ContentDifference);
+            spdlog::debug("{}", cMessage.c_str());
+            m_world.GetOverlayService().SendSystemMessage(cMessage.c_str());
+#ifdef SKYRIMVR
+            Utils::ShowHudMessage("Joined with different shared content. " + ModContent::Describe(acMessage.ContentDifference, 3));
+#endif
+        }
         return; // quit the function here.
+    }
+
+    if (acMessage.Type == AR::kModsMismatch)
+    {
+        const String cMessage = "Connection refused because shared content differs. " + ModContent::Describe(acMessage.ContentDifference);
+        spdlog::debug("{}", cMessage.c_str());
+        ConnectionErrorEvent errorEvent;
+        const auto cJson = JsonQuoted({cMessage.data(), cMessage.size()});
+        errorEvent.ErrorDetail.assign(cJson.data(), cJson.size());
+        errorEvent.HudMessage = "Connection refused. " + ModContent::Describe(acMessage.ContentDifference, 3);
+        m_dispatcher.trigger(errorEvent);
+        return;
     }
 
     // error finding
@@ -318,20 +366,6 @@ void TransportService::HandleAuthenticationResponse(const AuthenticationResponse
         ErrorInfo += fmt::format("\"expectedVersion\": \"{}\", \"version\": \"{}\"", acMessage.Version, fmt::format("{} (protocol " BUILD_PROTOCOL ")", BuildVersion::Commit()));
         ErrorInfo += "}";
         break;
-    case AR::kModsMismatch:
-    {
-        ErrorInfo += "\"error\": \"mods_mismatch\", \"data\": {\"mods\": [";
-        bool first = true;
-        for (const auto& m : acMessage.UserMods.ModList)
-        {
-            if (!first)
-                ErrorInfo += ",";
-            ErrorInfo += fmt::format("[\"{}\",\"{}\"]", m.Filename.c_str(), m.Id);
-            first = false;
-        }
-        ErrorInfo += "]}";
-        break;
-    }
     case AR::kClientModsDisallowed:
     {
         ErrorInfo += "\"error\": \"client_mods_disallowed\", \"data\": { \"mods\": [";

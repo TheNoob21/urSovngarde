@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include <include/internal/cef_ptr.h>
 #include <OverlayApp.hpp>
 
@@ -53,7 +55,7 @@ struct OverlayService
 #endif
 
     void Render() noexcept;
-    void Reset() const noexcept;
+    void Reset() noexcept;
     void Reload() noexcept;
 
     void Initialize() noexcept;
@@ -112,6 +114,9 @@ private:
     TiltedPhoques::UniquePtr<VRPanel> m_pVRPanel;
     bool m_vrOverlayAttempted = false;
 #endif
+    // Set when the overlay is dropped after a failure (it may be on the render thread); the HUD says so once (OverlayNotice).
+    std::atomic<bool> m_overlayDropped{false};
+    bool m_overlayDroppedShown = false;
 
     World& m_world;
     TransportService& m_transport;

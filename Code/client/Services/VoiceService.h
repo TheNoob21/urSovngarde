@@ -2,6 +2,7 @@
 
 #include <deque>
 
+struct Actor;
 struct World;
 struct UpdateEvent;
 struct ConnectedEvent;
@@ -16,11 +17,12 @@ struct IXAudio2SourceVoice;
  * Off until turned on in the urSovngarde menu; players within about 30 m hear you, your party at any distance.
  * A menu option makes this game hear its party only nearby, like everyone else.
  * The menu's microphone test records five seconds and plays them back.
+ * A player's copy moves its mouth with the loudness of their voice as it plays here (VoiceLips).
  */
 struct VoiceService
 {
     VoiceService(World& aWorld, entt::dispatcher& aDispatcher);
-    ~VoiceService() noexcept = default;
+    ~VoiceService() noexcept;
 
     TP_NOCOPYMOVE(VoiceService);
 
@@ -30,6 +32,9 @@ struct VoiceService
     void SetVolume(float aVolume) noexcept;
     void SetPartyNearbyOnly(bool aNearbyOnly) noexcept;
     void SetPlayerMuted(uint32_t aPlayerId, bool aMuted) noexcept;
+
+    void PlayNpcSpeech(uint32_t aActorId, uint32_t aSampleRate, std::vector<int16_t> aSamples) noexcept;
+    void StopNpcSpeech(uint32_t aActorId) noexcept;
 
 protected:
     void OnUpdate(const UpdateEvent& acEvent) noexcept;
@@ -65,6 +70,10 @@ private:
         std::chrono::steady_clock::time_point LastHeard{};
         uint32_t LastSequence{0};
         bool HasSequence{false};
+        // Samples of the buffers XAudio2 has finished, so the play position inside the oldest queued one is known.
+        uint64_t ReleasedSamples{0};
+        // How far the copy's mouth is open.
+        float Mouth{0.f};
     };
 
     // Microphone test
@@ -78,10 +87,15 @@ private:
     void UpdateCapture() noexcept;
     void StopCapture() noexcept;
     void SendVoiceState() const noexcept;
+    bool OpenSpeaker(Speaker& aSpeaker, uint32_t aSampleRate) noexcept;
+    void PlaceVoice(Speaker& aSpeaker, Actor* apActor, bool aRadio, float aGain, float aVolume) noexcept;
+    void UpdateNpcSpeakers() noexcept;
     void UpdateSpeakers(std::chrono::steady_clock::time_point aNow) noexcept;
     void ReleasePlayed(Speaker& aSpeaker) noexcept;
     void QueueSamples(Speaker& aSpeaker, std::vector<int16_t>&& aSamples) noexcept;
     void PlaceSpeaker(uint32_t aPlayerId, Speaker& aSpeaker) noexcept;
+    void MoveLips(uint32_t aPlayerId, Speaker& aSpeaker, float aSeconds) noexcept;
+    void CloseLips(uint32_t aPlayerId, Speaker& aSpeaker) noexcept;
     void RemoveSpeakers() noexcept;
 
     World& m_world;
@@ -120,7 +134,9 @@ private:
     uint32_t m_sentThisMinute{0};
     uint32_t m_heardThisMinute{0};
     std::chrono::steady_clock::time_point m_lastMinuteReport{};
+    std::chrono::steady_clock::time_point m_lipsAt{};
     std::unordered_map<uint32_t, Speaker> m_speakers;
+    std::unordered_map<uint32_t, Speaker> m_npcSpeakers;
     std::unordered_set<uint32_t> m_muted;
     std::vector<uint8_t> m_decodeBuffer;
 };

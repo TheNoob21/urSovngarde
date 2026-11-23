@@ -1,8 +1,14 @@
 #pragma once
 #include "Structs/Inventory.h"
 #include "Structs/ActorData.h"
+#include <GrabHold.h>
+#include <DialogueClaim.h>
+
+#include <Magic/MagicTarget.h>
+#include <Systems/RaiseClaim.h>
 
 struct NotifyClash;
+struct RaiseCast;
 struct NotifyArrowNocked;
 struct ActorAddedEvent;
 struct ActorRemovedEvent;
@@ -28,8 +34,6 @@ struct AddTargetEvent;
 struct NotifyAddTarget;
 struct ProjectileLaunchedEvent;
 struct NotifyProjectileLaunch;
-struct MountEvent;
-struct NotifyMount;
 struct InitPackageEvent;
 struct NotifyNewPackage;
 struct NotifyRespawn;
@@ -59,11 +63,20 @@ struct CharacterService
 
     static void DeleteTempActor(const uint32_t aFormId) noexcept;
 
-    bool RequestOwnership(uint32_t aFormId, uint32_t aServerId, entt::entity aEntity, bool aKillingBlow = false) const noexcept;
+    // aForHolding: this player grabbed a living NPC in its ragdoll, which this game then runs for the hold (GrabHold).
+    // aForCrime: a guard that saw this player's crime, which this game then runs for the arrest (CrimeReports::ServerGivesWitness).
+    bool RequestOwnership(uint32_t aFormId, uint32_t aServerId, entt::entity aEntity, bool aKillingBlow = false, bool aForHolding = false, bool aForCrime = false) const noexcept;
+    // The player activated apNpc: when another game runs it, asks for it to talk and holds the activation back (DialogueClaim).
+    // Returns true when the activation is held back, a claim for it being on its way already.
+    bool HoldBackTalk(Actor* apNpc) noexcept;
     // This player's killing blow on another player's protected NPC: asks for it, and kills it once it is this game's.
     void ClaimForKillingBlow(uint32_t aFormId) noexcept;
     // Revives a dead actor for every game: a copy here is asked for first, and revived once this game owns it.
     void ReviveActor(uint32_t aFormId) noexcept;
+    // This player raises a dead copy (a reanimate effect): asks for the body, and raises it once this game owns it, so that it is
+    // this game's AI that follows and fights for the player. False when not asked: the
+    // hook then goes on as without the claim (a raise on a copy goes to the game that runs it).
+    bool ClaimToRaise(Actor* apBody, const MagicTarget::AddTargetData& acData) noexcept;
     // An actor switched back on soon after it left the server: discovery still knows it and will not find it again.
     void AnnounceAgain(uint32_t aFormId) noexcept;
     // Its life follows its owner's from now on, even where this game's save has it dead.
@@ -98,11 +111,13 @@ struct CharacterService
     void OnFactionsChanges(const NotifyFactionsChanges& acEvent) const noexcept;
     void OnOwnershipTransfer(const NotifyOwnershipTransfer& acMessage) noexcept;
     void OnRemoveCharacter(const NotifyRemoveCharacter& acMessage) const noexcept;
+    //! A copy of player aPlayerId was just made for server character aServerId (aNewEntity, apNew): an older copy of the same player goes
+    //! (PlayerCopyRules.h).
+    void RetireOlderPlayerCopy(uint32_t aPlayerId, uint32_t aServerId, entt::entity aNewEntity, Actor* apNew) const noexcept;
     void OnNotifyClash(const NotifyClash& acMessage) const noexcept;
     void OnNotifyArrowNocked(const NotifyArrowNocked& acMessage) const noexcept;
+    void OnProjectileLaunched(const ProjectileLaunchedEvent& acEvent) noexcept;
     void SendClashes() noexcept;
-    void OnMountEvent(const MountEvent& acEvent) const noexcept;
-    void OnNotifyMount(const NotifyMount& acMessage) const noexcept;
     void OnInitPackageEvent(const InitPackageEvent& acEvent) const noexcept;
     void OnNotifyNewPackage(const NotifyNewPackage& acMessage) const noexcept;
     void OnNotifyRespawn(const NotifyRespawn& acMessage) const noexcept;
@@ -143,6 +158,8 @@ struct CharacterService
      * Called on the main thread at the start of a frame.
      */
     static void DisableQueuedCopies() noexcept;
+    //! Makes the raises decided on since the last frame (ClaimToRaise), each checked again first; on the main thread.
+    static void MakeDecidedRaises() noexcept;
     //! Draws or sheathes a remote copy's weapon in two passes, as for a copy that arrives (ApplyCachedWeaponDraws).
     //! aForce: drawn even if the copy's state already says so, as on arrival, for a draw whose animation this game never played.
     void QueueWeaponDraw(const uint32_t aFormId, const bool aDrawn, const bool aForce = false) noexcept
@@ -183,6 +200,10 @@ private:
     void RunFollowerReclaims() const noexcept;
     // As party leader, claims a copy left unclaimed on arrival for being far from this player, once it comes near.
     void RunLeaderClaims() const noexcept;
+    // Tells the server when a hold this game was granted ends (GrabHold).
+    void RunHoldClaims() noexcept;
+    // Opens a conversation held back for a claim once this game runs the NPC, and hands the NPC back when it ends (DialogueClaim).
+    void RunTalkClaims() noexcept;
     // Tells the server who became, or stopped being, this player's follower.
     void RunFollowerReports() const noexcept;
     // Announces references that a stand-in stopped hiding, which discovery may not find again.
@@ -214,6 +235,17 @@ private:
     TiltedPhoques::Map<uint32_t, std::chrono::steady_clock::time_point> m_killingBlows;
     // Bodies asked for to be revived, by server id, until when they are revived once this game owns them.
     TiltedPhoques::Map<uint32_t, std::chrono::steady_clock::time_point> m_revivals;
+    // Bodies asked for to be raised (ClaimToRaise) wait in RaiseClaim::Raises; a raise decided on there is withdrawn when its body changes hands.
+    void AskToRaise(uint32_t aFormId, const RaiseClaim::Target& acBody, const RaiseCast& acCast) noexcept;
+    void RunRaisings() noexcept;
+    void OnRaiseBodyOwnerChanged(entt::registry& aRegistry, entt::entity aEntity) noexcept;
+    std::array<entt::scoped_connection, 6> m_raiseOwnerConnections;
+    // Living NPCs asked for to hold them, by server id, until the hold ends.
+    mutable TiltedPhoques::Map<uint32_t, GrabHold::Claim> m_holdClaims;
+    // Conversations held back until the NPC's game hands it over, by server id (DialogueClaim).
+    TiltedPhoques::Map<uint32_t, DialogueClaim::Claim> m_talkClaims;
+    // Until when this player waits to claim an NPC whose talk the server ended, by server id (DialogueClaim::StartsRest).
+    TiltedPhoques::Map<uint32_t, double> m_talkRests;
 
     float m_cachedExperience = 0.f;
 
@@ -264,6 +296,8 @@ private:
     // Actor form ID -> the owner's last leveled pick for that remote actor.
     // ProcessLeveledConforms checks it again, since the game can re-roll the actor on its own.
     mutable Map<uint32_t, uint32_t> m_ownerLeveledPicks{};
+    // Arrows this player has shot; RunLocalUpdates takes one more as the arrow leaving the string.
+    uint32_t m_localArrowsShot = 0;
 
     entt::scoped_connection m_referenceAddedConnection;
     entt::scoped_connection m_referenceRemovedConnection;
@@ -272,16 +306,20 @@ private:
     entt::scoped_connection m_factionsConnection;
     entt::scoped_connection m_ownershipTransferConnection;
     entt::scoped_connection m_removeCharacterConnection;
+    entt::scoped_connection m_followerCommandConnection;
+    entt::scoped_connection m_dragonSoulConnection;
+    entt::scoped_connection m_stuckArrowConnection;
+    entt::scoped_connection m_dismemberConnection;
+    entt::scoped_connection m_stuckArrowUpdateConnection;
     entt::scoped_connection m_clashConnection;
     entt::scoped_connection m_arrowNockedConnection;
+    entt::scoped_connection m_projectileLaunchedConnection;
     entt::scoped_connection m_connectedConnection;
     entt::scoped_connection m_disconnectedConnection;
     entt::scoped_connection m_assignCharacterConnection;
     entt::scoped_connection m_characterSpawnConnection;
     entt::scoped_connection m_referenceMovementSnapshotConnection;
     entt::scoped_connection m_actionEventsConnection;
-    entt::scoped_connection m_mountConnection;
-    entt::scoped_connection m_notifyMountConnection;
     entt::scoped_connection m_initPackageConnection;
     entt::scoped_connection m_newPackageConnection;
     entt::scoped_connection m_notifyRespawnConnection;

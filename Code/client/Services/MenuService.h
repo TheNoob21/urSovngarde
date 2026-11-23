@@ -73,14 +73,6 @@ struct MenuService
      */
     void Refresh() noexcept;
     /**
-     * Tell whether a flat test rig game's window is in the background.
-     * Such a game reads the rig's keys there, but never the real keyboard and mouse.
-     * Called from the input poll when its window goes to the background or comes back to the front.
-     *
-     * @param aInBackground True while the rig game's window is in the background.
-     */
-    void SetRigGameInBackground(bool aInBackground) noexcept;
-    /**
      * Tell whether something draws a surface now; a surface nothing draws does not open, so no menu is ever open unseen.
      * Only the panel needs this: the dashboard and the screen are drawn whenever their game runs.
      * A panel that stops being drawn closes the menu on it.
@@ -122,20 +114,19 @@ private:
      */
     void ApplyMenuState() noexcept;
     /**
-     * On a flat screen, show the page's own cursor while the menu is open; Windows' cursor stays hidden either way.
+     * On a flat screen, show the page's own cursor while the menu is open.
      *
      * @param aShow True while the menu is open.
      */
     void ShowFlatCursor(bool aShow) noexcept;
     /**
-     * On a flat screen, keep the real keyboard and mouse from the game while the menu has them, or while a rig game is in the background.
+     * On a flat screen, keep the real keyboard and mouse from the game while the menu has them.
      */
     void ApplyRealInput() noexcept;
 
     World& m_world;
     std::atomic<MenuSurface> m_surface{MenuSurface::kNone};
     bool m_panelShowable{false};
-    bool m_rigGameInBackground{false};
 
     entt::scoped_connection m_updateConnection;
 };

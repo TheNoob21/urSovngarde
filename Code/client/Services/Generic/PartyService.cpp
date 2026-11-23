@@ -23,6 +23,11 @@
 #include <Messages/PartyCreateRequest.h>
 #include <Messages/PartyChangeLeaderRequest.h>
 #include <Messages/PartyKickRequest.h>
+#include <Messages/RequestPartyFastTravel.h>
+#include <Messages/RequestPartyFollow.h>
+#include <Messages/NotifyPartyFastTravel.h>
+#include <Interface/UI.h>
+#include <Utils.h>
 
 #include <OverlayApp.hpp>
 
@@ -33,6 +38,7 @@
 #include <Actor.h>
 #include <PlayerCharacter.h>
 #include <Games/References.h>
+#include <Games/TES.h>
 
 // A party member counts for the balance while their character is in this game within 3500 units (50 m).
 constexpr float cNearbyUnits = 3500.f;
@@ -51,6 +57,8 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher, Transpo
     m_partyLeftConnection = aDispatcher.sink<NotifyPartyLeft>().connect<&PartyService::OnPartyLeft>(this);
     m_partyPluginConnection = aDispatcher.sink<NotifyPartyPlugin>().connect<&PartyService::OnPartyPlugin>(this);
     m_partyValueConnection = aDispatcher.sink<NotifyPartyValue>().connect<&PartyService::OnPartyValue>(this);
+    m_partyFastTravelConnection = aDispatcher.sink<NotifyPartyFastTravel>().connect<&PartyService::OnPartyFastTravel>(this);
+    EventDispatcherManager::Get()->loadGameEvent.RegisterSink(this);
 }
 
 void PartyService::CreateParty() const noexcept
@@ -99,6 +107,7 @@ void PartyService::ChangePartyLeader(const uint32_t aPlayerId) const noexcept
 void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
     PerfScope perfScope("PartyService::OnUpdate");
+    RunFastTravelFollow();
 
     // Each frame, so another player's copy is marked before it can hit or be hit.
     PvpRules::MarkOtherGameCopies(m_world);
@@ -190,12 +199,7 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
         m_leaderPlayerId = acPartyInfo.LeaderPlayerId;
         m_partyMembers = acPartyInfo.PlayerIds;
 
-        // TODO: this can be done a bit prettier
-        if (m_isLeader)
-        {
-            TESGlobal* pWorldEncountersEnabled = Cast<TESGlobal>(TESForm::GetById(0xB8EC1));
-            pWorldEncountersEnabled->f = 1.f;
-        }
+        UpdateWorldEncounters();
 
         if (!m_world.GetOverlayService().GetOverlayApp())
             return;
@@ -211,6 +215,31 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
 
         m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("partyInfo", pArguments);
     }
+}
+
+void PartyService::UpdateWorldEncounters() noexcept
+{
+    // While connected, only the party leader rolls encounters; a connected solo player does not.
+    if (TESGlobal* pWorldEncountersEnabled = Cast<TESGlobal>(TESForm::GetById(0xB8EC1)))
+    {
+        const bool cEnable = m_inParty && m_isLeader;
+        const float cWanted = cEnable ? 1.f : 0.f;
+        if (pWorldEncountersEnabled->f != cWanted)
+            spdlog::debug("[PartyService]: world encounters {} in this game (party leader: {})", cEnable ? "on" : "off", cEnable);
+        pWorldEncountersEnabled->f = cWanted;
+    }
+}
+
+BSTEventResult PartyService::OnEvent(const TESLoadGameEvent*, const EventDispatcher<TESLoadGameEvent>*)
+{
+    // The save can restore a stale value. Check current state on the main thread, including a disconnect since load.
+    m_world.GetRunner().Queue(
+        [this]()
+        {
+            if (m_transport.IsConnected())
+                UpdateWorldEncounters();
+        });
+    return BSTEventResult::kOk;
 }
 
 void PartyService::OnPartyInvite(const NotifyPartyInvite& acPartyInvite) noexcept
@@ -253,8 +282,121 @@ void PartyService::OnPartyLeft(const NotifyPartyLeft& acPartyLeft) noexcept
     m_world.GetDispatcher().trigger(PartyLeftEvent());
 }
 
+// OverlayService.cpp: the place a cell is in, as the party menu names it.
+String GetCellName(const GameId& acWorldSpaceId, const GameId& acCellId) noexcept;
+
+void PartyService::OnPartyFastTravel(const NotifyPartyFastTravel& acMessage) noexcept
+{
+    if (!m_inParty || m_isLeader || acMessage.LeaderId != m_leaderPlayerId)
+        return;
+
+    const auto cLeader = m_players.find(acMessage.LeaderId);
+    const String cLeaderName = cLeader != m_players.end() ? cLeader->second : String("The party leader");
+    String cPlace = GetCellName(acMessage.WorldSpaceId, acMessage.CellId);
+    if (cPlace == "UNKNOWN")
+        cPlace.clear();
+
+    m_followOfferUntil = std::chrono::steady_clock::now() + 30s;
+    m_followLeaderId = acMessage.LeaderId;
+    m_followAccepted = false;
+    spdlog::debug("[PartyService]: the leader fast-travelled to '{}'; the Sleep/Wait menu follows for 30 s", cPlace.c_str());
+    Utils::ShowModHudMessage(
+        cLeaderName + " fast-travelled" + (cPlace.empty() ? String("") : String(" to ") + cPlace) +
+        ". Open the Wait menu within 30 s to follow (on foot; followers and a horse stay behind).");
+}
+
+void PartyService::ForgetFollowOffer() noexcept
+{
+    m_followOfferUntil = {};
+    m_followLeaderId = 0;
+    m_followAccepted = false;
+    m_closeFollowMenu.store(false);
+}
+
+void PartyService::RunFastTravelFollow() noexcept
+{
+    const auto cNow = std::chrono::steady_clock::now();
+    if (cNow < m_nextFollowCheck)
+        return;
+    m_nextFollowCheck = cNow + 250ms;
+
+    const UI* pUI = UI::Get();
+    if (!pUI)
+        return;
+    static const BSFixedString s_loadingMenu("Loading Menu");
+    static const BSFixedString s_sleepWaitMenu("Sleep/Wait Menu");
+    const bool cLoading = pUI->GetMenuOpen(s_loadingMenu);
+
+    // The leader: a loading screen queued with the map open is a fast travel. Told once the load is over, from where it arrived.
+    const uint32_t cFastTravels = UI::FastTravelsQueued();
+    if (m_fastTravelsSeen && *m_fastTravelsSeen != cFastTravels && m_inParty && m_isLeader)
+        m_fastTravelSendAt = cNow + 2s;
+    m_fastTravelsSeen = cFastTravels;
+    if (m_fastTravelSendAt != std::chrono::steady_clock::time_point{})
+    {
+        if (cLoading)
+            m_fastTravelSendAt = cNow + 2s;
+        else if (cNow >= m_fastTravelSendAt)
+        {
+            m_fastTravelSendAt = {};
+            if (m_inParty && m_isLeader && m_transport.IsConnected())
+                m_transport.Send(RequestPartyFastTravel{});
+        }
+    }
+
+    // Only a menu opened after the offer came answers it: one already open (a sleep under way) does not.
+    const bool cWaitMenuOpen = pUI->GetMenuOpen(s_sleepWaitMenu);
+    const bool cWaitMenuOpened = cWaitMenuOpen && !m_waitMenuWasOpen;
+    m_waitMenuWasOpen = cWaitMenuOpen;
+
+    if (!HasFollowOffer())
+        return;
+    if (!m_inParty || m_isLeader || m_leaderPlayerId != m_followLeaderId)
+    {
+        ForgetFollowOffer();
+        return;
+    }
+
+    if (!m_followAccepted)
+    {
+        if (cNow >= m_followOfferUntil)
+        {
+            spdlog::debug("[PartyService]: the leader's fast travel was not followed");
+            ForgetFollowOffer();
+            return;
+        }
+        if (cWaitMenuOpened)
+        {
+            m_followAccepted = true;
+            m_followOfferUntil = {};
+            Utils::ShowModHudMessage("press OK or close the menu to follow");
+        }
+        return;
+    }
+
+    // The menu's OK follows: the menu is closed as the game closes it, and the follow below goes on once it is gone.
+    if (cWaitMenuOpen && m_closeFollowMenu.exchange(false) && !UI::CloseMenu(s_sleepWaitMenu))
+        Utils::ShowModHudMessage("close the menu to follow");
+
+    // Once the menu is gone, and with the game able to take the move.
+    if (cWaitMenuOpen || cLoading)
+        return;
+    const PlayerCharacter* pPlayer = PlayerCharacter::Get();
+    const bool cDown = pPlayer && pPlayer->actorState.LifeState() != LifeStates::kAlive;
+    ForgetFollowOffer();
+    if (!pPlayer || cDown || pPlayer->IsInCombat())
+    {
+        Utils::ShowModHudMessage("not followed, not while fighting or down");
+        return;
+    }
+    spdlog::debug("[PartyService]: following the leader's fast travel");
+    m_transport.Send(RequestPartyFollow{});
+}
+
 void PartyService::DestroyParty() noexcept
 {
+    ForgetFollowOffer();
+    m_fastTravelSendAt = {};
     m_inParty = false;
     m_isLeader = false;
     m_leaderPlayerId = -1;

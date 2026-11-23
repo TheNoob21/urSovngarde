@@ -1,4 +1,5 @@
 #include <TiltedOnlinePCH.h>
+#include <Helpers/PerfScope.h>
 
 #include <Services/SteamFriendsService.h>
 #include <Services/ConnectFile.h>
@@ -409,6 +410,8 @@ void SteamFriendsService::JoinFriend(const std::string& acFriendId, const std::s
 
 void SteamFriendsService::OnUpdate(const UpdateEvent&) noexcept
 {
+    PerfScope perfScope("SteamFriendsService::OnUpdate");
+
     const auto cNow = std::chrono::steady_clock::now();
     if (cNow < m_nextLook)
         return;

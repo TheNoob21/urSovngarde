@@ -1,4 +1,5 @@
 #include <TiltedOnlinePCH.h>
+#include <Helpers/PerfScope.h>
 
 #include <Services/PresenceService.h>
 
@@ -19,6 +20,8 @@ PresenceService::PresenceService(World& aWorld, entt::dispatcher& aDispatcher, T
 
 void PresenceService::OnUpdate(const UpdateEvent&) noexcept
 {
+    PerfScope perfScope("PresenceService::OnUpdate");
+
     // The whole list each time, so a lost or late report is put right by the next one.
     // Only once the server has accepted this player: it kicks a connection that sends anything before.
     const auto cNow = std::chrono::steady_clock::now();

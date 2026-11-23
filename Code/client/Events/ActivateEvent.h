@@ -1,7 +1,5 @@
 #pragma once
 
-struct TESObjectREFR;
-struct Actor;
 struct TESBoundObject;
 
 /**
@@ -9,9 +7,11 @@ struct TESBoundObject;
  */
 struct ActivateEvent
 {
-    ActivateEvent(TESObjectREFR* apObject, Actor* apActivator, TESBoundObject* apObjectToGet, int32_t aCount, bool aDefaultProcessing, uint8_t aUnk1, TESObjectREFR::OpenState aPreActivationOpenState, bool aActivateFlag = false, bool aActivationBlocked = false)
-        : pObject(apObject)
-        , pActivator(apActivator)
+    ActivateEvent(
+        uint32_t aObjectId, uint32_t aActivatorId, TESBoundObject* apObjectToGet, int32_t aCount, bool aDefaultProcessing, uint8_t aUnk1,
+        TESObjectREFR::OpenState aPreActivationOpenState, bool aActivateFlag = false, bool aActivationBlocked = false)
+        : ObjectId(aObjectId)
+        , ActivatorId(aActivatorId)
         , pObjectToGet(apObjectToGet)
         , Count(aCount)
         , DefaultProcessing(aDefaultProcessing)
@@ -22,8 +22,10 @@ struct ActivateEvent
     {
     }
 
-    TESObjectREFR* pObject;
-    Actor* pActivator;
+    //! Ids, not pointers: the event is handled on a later update, and by then the game may have freed the reference,
+    //! as it does with an item taken into an inventory.
+    uint32_t ObjectId;
+    uint32_t ActivatorId;
     TESBoundObject* pObjectToGet;
     int32_t Count;
     bool DefaultProcessing;

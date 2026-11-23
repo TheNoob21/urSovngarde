@@ -43,11 +43,13 @@
 #include <Forms/TESGlobal.h>
 #include <Games/Overrides.h>
 #include <Games/References.h>
+#include <Games/TES.h>
 #include <AI/AIProcess.h>
 #include <EquipManager.h>
 #include <Forms/TESRace.h>
 #include <Interface/UI.h>
 #include <Services/PartyService.h>
+#include <KillMoves.h>
 #include <Games/Skyrim/VR/VRHaptics.h>
 #include <UI/Banner/VRBanner.h>
 #include <UI/Banner/DeathCause.h>
@@ -255,10 +257,6 @@ void PlayerService::OnConnected(const ConnectedEvent& acEvent) noexcept
     // The server keeps no safe point from an earlier connection: where the player stands now is the first, as a loaded save is.
     m_safePointAt = std::chrono::steady_clock::now() + 3s;
 
-    // TODO: SkyrimTogether.esm
-    TESGlobal* pKillMove = Cast<TESGlobal>(TESForm::GetById(0x100F19));
-    pKillMove->f = 0.f;
-
     TESGlobal* pWorldEncountersEnabled = Cast<TESGlobal>(TESForm::GetById(0xB8EC1));
     pWorldEncountersEnabled->f = 0.f;
 }
@@ -300,8 +298,8 @@ void PlayerService::OnDisconnected(const DisconnectedEvent& acEvent) noexcept
     // The server forgets safe points between connections, and so does this game: the next save may be elsewhere entirely.
     m_ownSafePoint = {};
 
-    TESGlobal* pKillMove = Cast<TESGlobal>(TESForm::GetById(0x100F19));
-    pKillMove->f = 1.f;
+    ApplyKillMoves(false, false);
+    ApplyProjectileKillCam(false);
 
     // Restore to the default value (150 in skyrim, 175 in fallout 4)
     float* greetDistance = Settings::GetGreetDistance();
@@ -311,8 +309,46 @@ void PlayerService::OnDisconnected(const DisconnectedEvent& acEvent) noexcept
     pWorldEncountersEnabled->f = 1.f;
 }
 
+void PlayerService::ApplyKillMoves(bool aConnected, bool aServerAllows) noexcept
+{
+    if (TESGlobal* pKillMove = Cast<TESGlobal>(TESForm::GetById(KillMoves::kGlobalId)))
+    {
+        const float cWanted = KillMoves::Wanted(aConnected, aServerAllows);
+        if (pKillMove->f != cWanted)
+            spdlog::debug("PlayerService: killmoves {} in this game", cWanted == KillMoves::kOn ? "on" : "off");
+        pKillMove->f = cWanted;
+    }
+}
+
+void PlayerService::ApplyProjectileKillCam(const bool aDisable) noexcept
+{
+    if (!aDisable && !m_previousVatsDisable)
+        return;
+
+    auto* pCollection = INISettingCollection::Get();
+    auto* pSetting = pCollection ? pCollection->GetSetting("bVATSDisable:VATS") : nullptr;
+    if (!pSetting)
+        return;
+
+    auto& disabled = reinterpret_cast<unsigned char&>(pSetting->data);
+    if (aDisable)
+    {
+        if (!m_previousVatsDisable)
+            m_previousVatsDisable = disabled;
+        disabled = 1;
+    }
+    else
+    {
+        disabled = *m_previousVatsDisable;
+        m_previousVatsDisable.reset();
+    }
+}
+
 void PlayerService::OnServerSettingsReceived(const ServerSettings& acSettings) noexcept
 {
+    ApplyKillMoves(true, acSettings.KillMoves);
+    ApplyProjectileKillCam(!acSettings.ProjectileKillCam);
+
     m_previousDifficulty = *Settings::GetDifficulty();
     PlayerCharacter::Get()->SetDifficulty(acSettings.Difficulty);
     m_serverDifficulty = acSettings.Difficulty;
@@ -765,6 +801,17 @@ BSTEventResult PlayerService::OnEvent(const TESLoadGameEvent*, const EventDispat
     m_saveLoaded = true;
     // The player is in the save now, up or down as it has it.
     DownedHold::Set(false);
+    // The save can restore the value it was made with; checked on the main thread, after a disconnect since the load too.
+    m_world.GetRunner().Queue(
+        [this]()
+        {
+            if (m_transport.IsConnected())
+            {
+                const auto& settings = m_world.GetServerSettings();
+                ApplyKillMoves(true, settings.KillMoves);
+                ApplyProjectileKillCam(!settings.ProjectileKillCam);
+            }
+        });
     return BSTEventResult::kOk;
 }
 
@@ -1179,7 +1226,7 @@ void PlayerService::RunCrashPlaceNote() noexcept
 
 void PlayerService::RunBeastFormDetection() const noexcept
 {
-    static uint32_t lastRaceFormID = 0;
+    static BeastForm::RacePoll s_racePoll;
     static Throttle s_sendThrottle(250ms);
     if (!s_sendThrottle.TakeTurn())
         return;
@@ -1188,13 +1235,10 @@ void PlayerService::RunBeastFormDetection() const noexcept
     if (!pPlayer->race)
         return;
 
-    if (pPlayer->race->formID == lastRaceFormID)
-        return;
-
-    if (pPlayer->race->formID == 0x200283A || pPlayer->race->formID == 0xCDD84)
+    // One Dawnguard lookup per poll, so the race and the lookup agree.
+    const uint32_t cLordRace = Actor::GetDawnguardFormId(BeastForm::kVampireLordRaceBase);
+    if (s_racePoll.Observe(pPlayer->race->formID, cLordRace ? static_cast<int>(cLordRace >> 24) : BeastForm::kNotLoaded))
         m_world.GetDispatcher().trigger(BeastFormChangeEvent());
-
-    lastRaceFormID = pPlayer->race->formID;
 }
 
 void PlayerService::ToggleDeathSystem(bool aSet) noexcept

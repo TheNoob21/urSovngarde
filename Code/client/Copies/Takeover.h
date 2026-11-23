@@ -10,6 +10,10 @@ namespace Takeover
 //! An NPC gained while its owner's reports had it moving: half a second later its legs are stopped if this game's AI has it standing.
 //! Standing, that AI never had it moving, so it never stops the legs, and they would hold a stride until its next move.
 void NoteGainedMoving(Actor* apActor, const InterpolationComponent* apInterpolation) noexcept;
+//! An NPC gained just now: for a few seconds, if this game's AI carries its body on while its legs stand still, the engine's own start is performed on it.
+void WatchGainedLegs(const Actor* apActor) noexcept;
+//! A new copy of another game's NPC whose 3D just came: for a few seconds, if its owner's reports carry it on while its legs stand still, its graph is sent the start.
+void WatchNewCopyLegs(entt::entity aEntity, const Actor* apActor) noexcept;
 //! TEMPORARY: what a living NPC carries over from being a copy, read as it is gained and 3 s later, how far from its last owner's newest report it is gained, and its action trail.
 void LogGain(Actor* apActor, const InterpolationComponent* apInterpolation) noexcept;
 //! TEMPORARY: the actions last replayed on an NPC gained just now, and what this game's AI performs on it in the next 6 s.

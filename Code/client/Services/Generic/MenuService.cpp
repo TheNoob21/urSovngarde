@@ -63,9 +63,9 @@ bool MenuService::Open(const MenuSurface aSurface) noexcept
         return true;
 
     if (cWas == MenuSurface::kNone)
-        spdlog::info("MenuService: opened on the {}", SurfaceName(aSurface));
+        spdlog::debug("MenuService: opened on the {}", SurfaceName(aSurface));
     else
-        spdlog::info("MenuService: moved from the {} to the {}", SurfaceName(cWas), SurfaceName(aSurface));
+        spdlog::debug("MenuService: moved from the {} to the {}", SurfaceName(cWas), SurfaceName(aSurface));
     ApplyMenuState();
     return true;
 }
@@ -79,7 +79,7 @@ void MenuService::Close() noexcept
     if (cWas == MenuSurface::kNone)
         return;
 
-    spdlog::info("MenuService: closed on the {}", SurfaceName(cWas));
+    spdlog::debug("MenuService: closed on the {}", SurfaceName(cWas));
     ApplyMenuState();
 }
 
@@ -116,22 +116,6 @@ void MenuService::Refresh() noexcept
 }
 
 /**
- * Tell whether a flat test rig game's window is in the background.
- * Such a game reads the rig's keys there, but never the real keyboard and mouse.
- * Called from the input poll when its window goes to the background or comes back to the front.
- *
- * @param aInBackground True while the rig game's window is in the background.
- */
-void MenuService::SetRigGameInBackground(const bool aInBackground) noexcept
-{
-    if (m_rigGameInBackground == aInBackground)
-        return;
-    m_rigGameInBackground = aInBackground;
-    spdlog::info("MenuService: the rig game is in the {}; the real keyboard and mouse are {}", aInBackground ? "background" : "front", aInBackground ? "not read" : "read");
-    ApplyRealInput();
-}
-
-/**
  * Tell whether something draws a surface now; a surface nothing draws does not open, so no menu is ever open unseen.
  * Only the panel needs this: the dashboard and the screen are drawn whenever their game runs.
  * A panel that stops being drawn closes the menu on it.
@@ -158,7 +142,7 @@ void MenuService::OnUpdate(const UpdateEvent&) noexcept
     // A load or the main menu takes the player out of the game, and the overlay drops the page's active state with them.
     if (IsOpen() && !m_world.GetOverlayService().GetActive())
     {
-        spdlog::info("MenuService: closed on the {}, the player left the game", SurfaceName(GetSurface()));
+        spdlog::debug("MenuService: closed on the {}, the player left the game", SurfaceName(GetSurface()));
         m_surface = MenuSurface::kNone;
         ApplyMenuState();
     }
@@ -182,7 +166,7 @@ bool MenuService::CanOpenNow(const MenuSurface aSurface) const noexcept
 
     if (aSurface == MenuSurface::kPanel && !m_panelShowable)
     {
-        spdlog::info("MenuService: not opened on the panel, which nothing draws yet");
+        spdlog::debug("MenuService: not opened on the panel, which nothing draws yet");
         return false;
     }
     return true;
@@ -208,7 +192,7 @@ void MenuService::ApplyMenuState() noexcept
 }
 
 /**
- * On a flat screen, show the page's own cursor while the menu is open; Windows' cursor stays hidden either way.
+ * On a flat screen, show the page's own cursor while the menu is open.
  *
  * @param aShow True while the menu is open.
  */
@@ -220,22 +204,18 @@ void MenuService::ShowFlatCursor(const bool aShow) noexcept
         if (auto pRenderer = pApp->GetClient()->GetOverlayRenderHandler())
             pRenderer->SetCursorVisible(aShow);
     }
-    // Windows counts how often its cursor was shown: hidden only once that count is below zero.
-    while (ShowCursor(FALSE) >= 0)
-        ;
 #else
     (void)aShow;
 #endif
 }
 
 /**
- * On a flat screen, keep the real keyboard and mouse from the game while the menu has them, or while a rig game is in the background.
+ * On a flat screen, keep the real keyboard and mouse from the game while the menu has them.
  */
 void MenuService::ApplyRealInput() noexcept
 {
 #ifndef SKYRIMVR
     // The game's reads of the real keyboard and mouse come back empty: the page has them while it is open.
-    // A rig game in the background gets none either, so the person using the PC never plays it by typing elsewhere.
-    TiltedPhoques::DInputHook::Get().SetEnabled(IsOpen() || m_rigGameInBackground);
+    TiltedPhoques::DInputHook::Get().SetEnabled(IsOpen());
 #endif
 }

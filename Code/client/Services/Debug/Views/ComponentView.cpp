@@ -196,7 +196,7 @@ void DebugService::DisplayListOfReplayedActions(const ReplayedActionsDebugCompon
         }
         if (ImGui::IsItemClicked(1) && apAnimationComponent && total > 0)
         {
-            AnimationSystem::AddActionsForReplay(*apAnimationComponent, aDebugComponent.ActionsReceivedForReplay);
+            AnimationSystem::AddActionsForReplay(m_world, *apAnimationComponent, aDebugComponent.ActionsReceivedForReplay);
         }
     }
 }

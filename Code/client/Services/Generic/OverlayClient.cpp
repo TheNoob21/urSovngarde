@@ -1,3 +1,4 @@
+#include <Services/GameExtension.h>
 #include <TiltedOnlinePCH.h>
 
 #include <OverlayRenderHandler.hpp>
@@ -10,6 +11,8 @@
 #include <Services/MenuService.h>
 #include <Services/LauncherLinkService.h>
 #include <Services/SteamFriendsService.h>
+#include <Services/JsonText.h>
+#include <CoopActions.h>
 
 #include <Messages/SendChatMessageRequest.h>
 #include <Messages/TeleportRequest.h>
@@ -18,6 +21,33 @@
 
 #include <World.h>
 #include <Utils.h>
+
+namespace
+{
+void SendSavedServers(const std::string& acError = {}, int32_t aRequest = 0, uint32_t aSavedId = 0)
+{
+    auto* pApp = World::Get().GetOverlayService().GetOverlayApp();
+    if (!pApp)
+        return;
+    std::vector<CoopActions::ServerSummary> servers;
+    const bool cRead = CoopActions::GetSavedServers(servers);
+    std::string text = "{\"error\":" + JsonQuoted(cRead ? acError : "could not read servers.txt") + ",\"request\":" + std::to_string(aRequest) +
+                       ",\"savedId\":" + std::to_string(aSavedId) + ",\"status\":" + std::to_string(static_cast<int32_t>(CoopActions::GetStatus())) +
+                       ",\"lastUsed\":" + std::to_string(CoopActions::GetLastUsedServer()) + ",\"servers\":[";
+    for (size_t i = 0; i < servers.size(); ++i)
+    {
+        const auto& server = servers[i];
+        if (i)
+            text += ',';
+        text += "{\"id\":" + std::to_string(server.Id) + ",\"name\":" + JsonQuoted(server.Name) + ",\"address\":" + JsonQuoted(server.Address) +
+                ",\"hasPassword\":" + (server.HasPassword ? "true" : "false") + "}";
+    }
+    text += "]}";
+    auto arguments = CefListValue::Create();
+    arguments->SetString(0, text);
+    pApp->ExecuteAsync("savedServers", arguments);
+}
+} // namespace
 
 OverlayClient::OverlayClient(TransportService& aTransport, TiltedPhoques::OverlayRenderHandler* apHandler)
     : TiltedPhoques::OverlayClient(apHandler)
@@ -39,14 +69,44 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
         auto eventArgs = pArguments->GetList(1);
 
         // Only the name: an event's arguments can hold a server password.
-        spdlog::info(eventName);
-
-#ifndef PUBLIC_BUILD
-        LOG(INFO) << "event=ui_event name=" << eventName;
-#endif
+        spdlog::debug("UI event: {}", eventName);
 
         if (eventName == "connect")
             ProcessConnectMessage(eventArgs);
+        else if (eventName == "getSavedServers")
+            World::Get().GetRunner().Queue([] { SendSavedServers(); });
+        else if (eventName == "saveServer")
+        {
+            const int32_t cId = eventArgs->GetInt(0);
+            const std::string cName = eventArgs->GetString(1);
+            const std::string cAddress = eventArgs->GetString(2);
+            const std::string cPassword = eventArgs->GetString(3);
+            const bool cRemember = eventArgs->GetBool(4);
+            const auto request = eventArgs->GetSize() > 5 ? eventArgs->GetInt(5) : 0;
+            World::Get().GetRunner().Queue(
+                [cId, cName, cAddress, cPassword, cRemember, request]
+                {
+                    const auto savedId = CoopActions::SaveSavedServer(cId, cName, cAddress, cPassword, cRemember);
+                    SendSavedServers(savedId ? "" : CoopActions::GetLastErrorText(), request, savedId);
+                });
+        }
+        else if (eventName == "removeSavedServer")
+        {
+            const int32_t cId = eventArgs->GetInt(0);
+            World::Get().GetRunner().Queue([cId] { SendSavedServers(CoopActions::RemoveSavedServer(cId) ? "" : CoopActions::GetLastErrorText()); });
+        }
+        else if (eventName == "importSavedServer")
+            World::Get().GetRunner().Queue([] { SendSavedServers(CoopActions::ImportSavedServer() ? "" : CoopActions::GetLastErrorText()); });
+        else if (eventName == "connectSavedServer")
+        {
+            const auto id = eventArgs->GetInt(0);
+            if (eventArgs->GetSize() == 1)
+                CoopActions::ConnectSaved(id);
+            else if (eventArgs->GetSize() == 3 && eventArgs->GetType(1) == VTYPE_STRING && eventArgs->GetType(2) == VTYPE_STRING)
+                CoopActions::ConnectSaved(id, CoopActions::JoinCredential{eventArgs->GetString(2).ToString(), eventArgs->GetString(1).ToString()});
+        }
+        else if (eventName == "connectLastUsedServer")
+            CoopActions::ConnectLastUsed();
         else if (eventName == "disconnect")
             ProcessDisconnectMessage();
         else if (eventName == "revealPlayers")
@@ -179,6 +239,8 @@ void OverlayClient::ProcessRevealPlayersMessage()
 void OverlayClient::ProcessChatMessage(CefRefPtr<CefListValue> aEventArgs)
 {
     std::string contents = aEventArgs->GetString(1).ToString();
+    if (GameExtension::Chat(contents))
+        return;
     if (!contents.empty())
     {
         SendChatMessageRequest messageRequest;
@@ -211,4 +273,3 @@ void OverlayClient::ProcessToggleDebugUI()
 {
     World::Get().GetDebugService().m_showDebugStuff = !World::Get().GetDebugService().m_showDebugStuff;
 }
-

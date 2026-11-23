@@ -39,4 +39,6 @@ struct InventoryChangeEvent
     bool UpdateClients = true;
     //! From a reference this player picked up in the world (PlayerCharacter::PickUpObject).
     bool PickedUp = false;
+    //! Taken out of this reference into the local player's inventory.
+    bool IntoPlayer = false;
 };

@@ -1,6 +1,12 @@
 #pragma once
 
+#include <Systems/ModIdMapping.h>
+
+#include <Systems/UnmatchedIds.h>
+
 struct Mods;
+struct NotifyModListsDiffer;
+struct DisconnectedEvent;
 struct GameId;
 
 /**
@@ -18,18 +24,20 @@ struct ModSystem
     uint32_t GetGameId(uint32_t aServerId, uint32_t aFormId) const noexcept;
     uint32_t GetGameId(const GameId& acGameId) const noexcept;
 
+    bool GetSharedSpellId(uint32_t aLocalId, GameId& aSpell) const noexcept;
+    uint32_t GetLocalSpellId(const GameId& acSpell) const noexcept;
+
 protected:
     void HandleMods(const Mods& acMods) noexcept;
+    void HandleDisconnected(const DisconnectedEvent&) noexcept;
+    void HandleModListsDiffer(const NotifyModListsDiffer& acMessage) const noexcept;
 
 private:
-    struct GameMod
-    {
-        uint16_t id;
-        bool isLite;
-    };
-
     entt::scoped_connection m_modsConnection;
-    Map<uint16_t, uint32_t> m_liteToServer;
-    Map<uint32_t, GameMod> m_serverToGame;
-    uint32_t m_standardToServer[0x100];
+    entt::scoped_connection m_disconnectedConnection;
+    entt::scoped_connection m_modListsDifferConnection;
+    ModIdMapping m_mapping;
+    // Mods and plugins already logged as unmatched; the lookups above change nothing else.
+    mutable UnmatchedIds m_unmatchedServerIds;
+    mutable UnmatchedIds m_unmatchedLocalIds;
 };

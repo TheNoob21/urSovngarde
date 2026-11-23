@@ -61,10 +61,11 @@ private:
 //! World::Update reports them every 30 s.
 enum class PerfCounter : uint8_t
 {
-    kVRPoseApply,    // remote VR pose written into the skeleton (animation update hook)
-    kInventoryApply, // full inventory rebuild of a spawned or respawned actor
-    kActorSpawn,     // creating a remote actor
+    kVRPoseApply,       // remote VR pose written into the skeleton (animation update hook)
+    kInventoryApply,    // full inventory rebuild of a spawned or respawned actor
+    kActorSpawn,        // creating a remote actor
     kEquipmentSnapshot, // the once-a-second read of the local player's worn items (large modlist inventories)
+    kVRFrameEnd,        // the whole frame-end work of remote VR players, in the renderer hook (it runs after the mod update, so a PerfScope would not see it)
     kCount
 };
 

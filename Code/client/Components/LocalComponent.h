@@ -14,6 +14,7 @@ struct LocalComponent
     {
     }
 
+    // Set through emplace, replace or patch only: World keeps an index of server ids.
     uint32_t Id;
     uint32_t OwnershipEpoch;
     ActionEvent CurrentAction;

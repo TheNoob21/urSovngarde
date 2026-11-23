@@ -6,6 +6,7 @@ namespace
 {
 std::unordered_set<uint32_t> s_ownCopies;
 TiltedPhoques::Map<uint32_t, uint32_t> s_ghosts;
+TiltedPhoques::Map<uint32_t, CopyRegistry::OwnerPlace> s_awayFromOwner;
 } // namespace
 
 namespace CopyRegistry
@@ -33,6 +34,32 @@ const std::unordered_set<uint32_t>& OwnCopies() noexcept
 void ForgetAllOwnCopies() noexcept
 {
     s_ownCopies.clear();
+}
+
+void NoteAwayFromOwner(const uint32_t aCopy, const OwnerPlace& acPlace) noexcept
+{
+    // Bounded: a copy that went without being forgotten here frees its slot when the list is next full.
+    if (s_awayFromOwner.size() > 512)
+        s_awayFromOwner.clear();
+    s_awayFromOwner[aCopy] = acPlace;
+}
+
+void ForgetAwayFromOwner(const uint32_t aCopy) noexcept
+{
+    s_awayFromOwner.erase(aCopy);
+}
+
+std::optional<OwnerPlace> AwayFromOwner(const uint32_t aCopy) noexcept
+{
+    const auto cItor = s_awayFromOwner.find(aCopy);
+    if (cItor == s_awayFromOwner.end())
+        return std::nullopt;
+    return cItor->second;
+}
+
+void ForgetAllAwayFromOwner() noexcept
+{
+    s_awayFromOwner.clear();
 }
 
 void SetStandIn(const uint32_t aGhost, const uint32_t aCopy) noexcept

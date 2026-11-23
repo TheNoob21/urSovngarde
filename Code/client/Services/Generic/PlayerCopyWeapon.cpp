@@ -34,8 +34,12 @@ bool IsPaused() noexcept
 }
 // By server id.
 TiltedPhoques::Map<uint32_t, Wanted> s_wanted;
+// How often the copies are checked, and how long one must show the other state, settled, before it is drawn or sheathed.
+// Long enough for the owner's replayed draw or sheathe to start here first (a copy mid-draw is not judged); was 1.5 s on a 500 ms check.
+constexpr auto kRunEvery = std::chrono::milliseconds(250);
+constexpr auto kMismatchFor = std::chrono::milliseconds(1000);
 // The last frame this game was paused.
-// The owner sends its state on a half-second poll once the draw is done, so the draw's animation came up to about 1.5 s before the state.
+// The owner sends its state the frame it changes; the draw's animation reaches this game around the same time, a little before or after.
 std::chrono::steady_clock::time_point s_lastPaused{};
 } // namespace
 
@@ -67,7 +71,7 @@ void Run(World& aWorld, const bool aConnected) noexcept
         s_lastPaused = cNow;
     if (s_wanted.empty() || cNow < s_nextRun)
         return;
-    s_nextRun = cNow + std::chrono::milliseconds(500);
+    s_nextRun = cNow + kRunEvery;
 
     // A paused game refuses the draw as it refused the replay: the wait starts again once it runs.
     if (IsPaused())
@@ -138,7 +142,7 @@ void Run(World& aWorld, const bool aConnected) noexcept
             ++it;
             continue;
         }
-        if (cNow - wanted.MismatchSince < std::chrono::milliseconds(1500))
+        if (cNow - wanted.MismatchSince < kMismatchFor)
         {
             ++it;
             continue;

@@ -10,6 +10,7 @@ namespace
 {
 std::mutex s_lock;
 std::vector<uint32_t> s_handles;
+std::vector<uint32_t> s_ghostHandles;
 } // namespace
 
 namespace FrameStartSwitchOff
@@ -35,6 +36,30 @@ std::vector<uint32_t> TakeQueued() noexcept
     std::vector<uint32_t> handles;
     std::scoped_lock lock(s_lock);
     handles.swap(s_handles);
+    return handles;
+}
+
+/**
+ * Queue a hidden reference to be switched off at the start of the next frame.
+ *
+ * @param apGhost The reference.
+ */
+void QueueGhost(const Actor* apGhost) noexcept
+{
+    std::scoped_lock lock(s_lock);
+    s_ghostHandles.push_back(apGhost->GetHandle().handle.iBits);
+}
+
+/**
+ * Take the hidden references' handles queued since the last call.
+ *
+ * @return Their handles, in the order queued; one can be in it twice.
+ */
+std::vector<uint32_t> TakeQueuedGhosts() noexcept
+{
+    std::vector<uint32_t> handles;
+    std::scoped_lock lock(s_lock);
+    handles.swap(s_ghostHandles);
     return handles;
 }
 } // namespace FrameStartSwitchOff

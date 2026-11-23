@@ -1,7 +1,12 @@
+#include <Services/GameExtension.h>
 #include <Services/MagicService.h>
+#include <Services/MagicStateService.h>
+#include <FollowerCommands.h>
 #include <Helpers/Throttle.h>
+#include <EffectQueue.h>
 #include <Services/OverlayService.h>
 #include <Helpers/PerfScope.h>
+#include <Services/KeyPollGate.h>
 
 #include <World.h>
 #ifdef SKYRIMVR
@@ -38,6 +43,10 @@
 
 #include <Games/TES.h>
 #include <Games/Skyrim/Interface/UI.h>
+#include <Effects/ArtObjects.h>
+#include <Forms/EffectSetting.h>
+
+#include <SummonPortal.h>
 
 #ifdef SKYRIMVR
 namespace
@@ -93,6 +102,45 @@ bool IsLocalControlForm(uint32_t aFormId) noexcept
 } // namespace
 #endif
 
+namespace
+{
+SummonPortal::Queue s_summonPortals;
+
+uint64_t NowMs() noexcept
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+// The art a summon's effect plays where its creature appears (SummonTargetFX for Skyrim.esm's summons), as SummonPortal names it; 0 for none.
+uint64_t PortalArtOf(const MagicItem* apSpell) noexcept
+{
+    for (const EffectItem* pEffect : apSpell->listOfEffects)
+        if (pEffect && pEffect->pEffectSetting && pEffect->IsSummonEffect() && pEffect->pEffectSetting->pHitEffectArt)
+            return reinterpret_cast<uint64_t>(pEffect->pEffectSetting->pHitEffectArt);
+    return 0;
+}
+} // namespace
+
+void MagicService::PlaySummonPortal(Actor* apSummonCopy) noexcept
+{
+    const uint64_t cArt = s_summonPortals.Take(NowMs());
+    if (!cArt || !apSummonCopy)
+        return;
+    auto* pArt = reinterpret_cast<BGSArtObject*>(cArt);
+    const bool cPlayed = ArtObjects::Play(apSummonCopy, pArt, nullptr, SummonPortal::kPortalSeconds);
+    spdlog::debug("Summon: copy {:X} of a player's summon came out of its portal ({})", apSummonCopy->formID, cPlayed ? "played" : "not played");
+}
+
+bool MagicService::IsLocalControlForm(uint32_t aFormId) noexcept
+{
+#ifdef SKYRIMVR
+    return ::IsLocalControlForm(aFormId) || GameExtension::LocalMagic(aFormId);
+#else
+    (void)aFormId;
+    return false;
+#endif
+}
+
 MagicService::MagicService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
     , m_dispatcher(aDispatcher)
@@ -126,6 +174,10 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
     if (!m_transport.IsConnected())
         return;
 
+    // The co-op menu's spells open a menu or carry out a follower's word in this game only (FollowerCommands).
+    if (FollowerCommands::IsMenuSpell(acEvent.SpellId))
+        return;
+
     if (!acEvent.pCaster->pCasterActor || !acEvent.pCaster->pCasterActor->GetNiNode())
     {
         spdlog::warn("Spell cast event has no actor or actor is not loaded");
@@ -140,17 +192,22 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
     TESForm* pMagicForm = TESForm::GetById(acEvent.SpellId);
 
     // Summoned creatures are replicated by their owning client (see IsPlayerSummon).
-    // Replaying the summon cast elsewhere spawns a duplicate, unowned creature that fights the real one.
-    // Summon spells avoid this via projectile sync; summon EnchantmentItems (Sanguine Rose, Staff of the Familiar) need this (#791).
+    // Replaying the summon cast elsewhere spawns a duplicate, unowned creature that fights the real one, so no game replays it (OnNotifySpellCast, #791).
+    // The player's own summon is still sent: the other games show the portal its creature's copy comes out of (SummonPortal).
+    // An NPC's is not: its creature's copy is no player's summon, so nothing there would show its portal.
+    bool isSummon = false;
     if (const MagicItem* pMagicItem = Cast<MagicItem>(pMagicForm); pMagicItem && pMagicItem->HasSummonEffect())
     {
-        spdlog::debug("{}: not syncing summon cast {:X}, the summoned actor is synced by its owner", __FUNCTION__, acEvent.SpellId);
-        return;
+        if (acEvent.pCaster->pCasterActor != PlayerCharacter::Get() || !PortalArtOf(pMagicItem))
+        {
+            spdlog::debug("{}: not syncing summon cast {:X}, the summoned actor is synced by its owner", __FUNCTION__, acEvent.SpellId);
+            return;
+        }
+        isSummon = true;
     }
 
     SpellItem* pCastSpell = Cast<SpellItem>(pMagicForm);
 
-#ifdef SKYRIMVR
     // A weapon's strike enchantment on the other player (touch delivery, like Dawnbreaker's fire) is not sent as a cast.
     // It is part of the strike, which travels as the hit and is weighed by the defender's rule; as a cast it would burn through parries.
     if (const EnchantmentItem* pEnchantment = Cast<EnchantmentItem>(pMagicForm); pEnchantment && pEnchantment->eDelivery == MagicSystem::TOUCH && acEvent.DesiredTargetID)
@@ -162,16 +219,20 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
 
     // Powers and dragon shouts are fire-and-forget, so the concentration filter below would drop them.
     // They cast through the OTHER source with spell type POWER, LESSER_POWER or VOICE_POWER (TiltedEvolutionVR 20a62f9).
-    using ST = MagicSystem::SpellType;
-    const bool cIsVoiceCast = pCastSpell && (pCastSpell->eSpellType == ST::POWER || pCastSpell->eSpellType == ST::LESSER_POWER || pCastSpell->eSpellType == ST::VOICE_POWER);
-#else
-    constexpr bool cIsVoiceCast = false;
-#endif
+    const bool cIsVoiceCast = pCastSpell && MagicSystem::IsVoiceCast(pCastSpell->eSpellType);
+
+    // Slow Time and the beast forms already reach the other game through effect and transform sync, so a replayed cast would apply them twice.
+    if (cIsVoiceCast && !MagicSystem::IsVoiceCastSent(pCastSpell->HasSlowOrBeastFormEffect()))
+    {
+        spdlog::debug("{}: not syncing voice cast {:X}, its effects are synced on their own", __FUNCTION__, acEvent.SpellId);
+        return;
+    }
 
     // only sync concentration spells through spell cast sync, the rest through projectile sync for accuracy
-    if (pCastSpell && !cIsVoiceCast)
+    // A healing concentration spell goes too, so its beam or glow is seen; its healing is synced as an effect (MagicTarget).
+    if (pCastSpell && !cIsVoiceCast && !isSummon)
     {
-        if ((pCastSpell->eCastingType != MagicSystem::CastingType::CONCENTRATION || pCastSpell->IsHealingSpell()) && !pCastSpell->IsWardSpell() && !pCastSpell->IsInvisibilitySpell())
+        if (!MagicSystem::IsSentAsCast(pCastSpell->eCastingType, pCastSpell->IsWardSpell(), pCastSpell->IsInvisibilitySpell()))
         {
             spdlog::debug("Canceled magic spell");
             return;
@@ -194,7 +255,7 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
     request.CastingSource = acEvent.pCaster->GetCastingSource();
     request.IsDualCasting = acEvent.pCaster->GetIsDualCasting();
 
-    if (!m_world.GetModSystem().GetServerModId(acEvent.SpellId, request.SpellFormId))
+    if (!m_world.GetModSystem().GetSharedSpellId(acEvent.SpellId, request.SpellFormId))
     {
         spdlog::error("Server spell id not found for spell form id {:X}", acEvent.SpellId);
         return;
@@ -222,6 +283,8 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
 
 void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noexcept
 {
+    if (GameExtension::RejectMagic(acMessage.SpellFormId))
+        return;
     using CS = MagicSystem::CastingSource;
 
     auto remoteView = m_world.view<RemoteComponent, FormIdComponent>();
@@ -236,13 +299,19 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
     auto formIdComponent = remoteView.get<FormIdComponent>(*remoteIt);
     TESForm* pForm = TESForm::GetById(formIdComponent.Id);
     Actor* pActor = Cast<Actor>(pForm);
+    if (!pActor)
+    {
+        spdlog::debug("{}: caster {:X} is not a loaded actor", __FUNCTION__, formIdComponent.Id);
+        return;
+    }
 
     pActor->GenerateMagicCasters();
 
     // Only left hand casters need dual casting (?)
-    pActor->casters[CS::LEFT_HAND]->SetDualCasting(acMessage.IsDualCasting);
+    if (ActorMagicCaster* pLeftCaster = pActor->casters[CS::LEFT_HAND])
+        pLeftCaster->SetDualCasting(acMessage.IsDualCasting);
 
-    if (acMessage.CastingSource >= 4)
+    if (acMessage.CastingSource < 0 || acMessage.CastingSource >= 4)
     {
         spdlog::warn("{}: could not find casting source {}", __FUNCTION__, acMessage.CastingSource);
         return;
@@ -264,13 +333,14 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
         // The id did not resolve here: a mod the caster has and this game does not, or a form not loaded yet.
         // What is staged in that hand is then the best guess left, and it is better than casting nothing.
         MagicItem* pStaged = pActor->magicItems[acMessage.CastingSource];
+        GameId staged{};
+        if (pStaged && GameExtension::ChecksMagic() && !m_world.GetModSystem().GetSharedSpellId(pStaged->formID, staged))
+            pStaged = nullptr;
 
-#ifdef SKYRIMVR
         // magicItems[OTHER] on a remote actor holds whatever was last staged there, not necessarily the power or shout just used.
         // So a voice cast is never resolved from it (TiltedEvolutionVR 20a62f9).
         if (acMessage.CastingSource == CS::OTHER)
             pStaged = nullptr;
-#endif
 
         if (pStaged)
             spdlog::warn("Remote spell {:X}:{:X} did not resolve here; falling back to what is staged in slot {}", acMessage.SpellFormId.ModId, acMessage.SpellFormId.BaseId, acMessage.CastingSource);
@@ -293,9 +363,11 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
 #endif
 
     // Never replay a summon locally, whatever the sender decided: the creature arrives as a replicated actor from its owner.
+    // Only its portal is kept, for the copy of its creature that appears here next (SummonPortal).
     if (pSpell->HasSummonEffect())
     {
-        spdlog::debug("{}: ignoring remote summon cast {:X} from caster {:X}", __FUNCTION__, pSpell->formID, acMessage.CasterId);
+        s_summonPortals.Note(PortalArtOf(pSpell), NowMs());
+        spdlog::debug("{}: remote summon cast {:X} from caster {:X} not replayed; its portal waits for its creature's copy", __FUNCTION__, pSpell->formID, acMessage.CasterId);
         return;
     }
 
@@ -324,7 +396,6 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
         }
     }
 
-#ifdef SKYRIMVR
     // The other player's strike enchantment on this player is part of the strike, which arrives as a hit (see OnSpellCastEvent).
     // Also refused here, for a sender on a build that still sends it.
     if (const EnchantmentItem* pEnchantment = Cast<EnchantmentItem>(pSpell); pEnchantment && pEnchantment->eDelivery == MagicSystem::TOUCH && pDesiredTarget &&
@@ -333,7 +404,6 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
         spdlog::info("PvP: strike enchantment {:X} from player copy {:X} on us not replayed; the strike is the hit", pSpell->formID, pActor->formID);
         return;
     }
-#endif
 
     ScopedSpellCastOverride _;
 
@@ -378,7 +448,7 @@ void MagicService::OnInterruptCastEvent(const InterruptCastEvent& acEvent) const
 
 void MagicService::OnNotifyInterruptCast(const NotifyInterruptCast& acMessage) const noexcept
 {
-    if (acMessage.CastingSource >= 4)
+    if (acMessage.CastingSource < 0 || acMessage.CastingSource >= 4)
     {
         spdlog::warn("{}: could not find casting source {}", __FUNCTION__, acMessage.CastingSource);
         return;
@@ -397,6 +467,11 @@ void MagicService::OnNotifyInterruptCast(const NotifyInterruptCast& acMessage) c
 
     const TESForm* pForm = TESForm::GetById(formIdComponent.Id);
     Actor* pActor = Cast<Actor>(pForm);
+    if (!pActor)
+    {
+        spdlog::debug("{}: caster {:X} is not a loaded actor", __FUNCTION__, formIdComponent.Id);
+        return;
+    }
 
     pActor->GenerateMagicCasters();
 
@@ -422,6 +497,14 @@ void MagicService::OnAddTargetEvent(const AddTargetEvent& acEvent) noexcept
         return;
 #endif
 
+    // A shrine's or a standing stone's blessing stays with the player who used it.
+    if (const PlayerCharacter* pPlayer = PlayerCharacter::Get();
+        pPlayer && acEvent.TargetID == pPlayer->formID && MagicStateService::IsPersonalBlessing(Cast<MagicItem>(TESForm::GetById(acEvent.SpellID))))
+    {
+        spdlog::debug("{}: not syncing blessing {:X}, it is this player's own", __FUNCTION__, acEvent.SpellID);
+        return;
+    }
+
     // These effects are applied through spell cast sync
     if (SpellItem* pSpellItem = Cast<SpellItem>(TESForm::GetById(acEvent.SpellID)))
     {
@@ -433,13 +516,13 @@ void MagicService::OnAddTargetEvent(const AddTargetEvent& acEvent) noexcept
 
     AddTargetRequest request{};
 
-    if (!m_world.GetModSystem().GetServerModId(acEvent.SpellID, request.SpellId.ModId, request.SpellId.BaseId))
+    if (!m_world.GetModSystem().GetSharedSpellId(acEvent.SpellID, request.SpellId))
     {
         spdlog::error("{}: could not find server ID for spell with formID {:X}, discarding", __FUNCTION__, acEvent.SpellID);
         return;
     }
 
-    if (!m_world.GetModSystem().GetServerModId(acEvent.EffectID, request.EffectId.ModId, request.EffectId.BaseId))
+    if (!m_world.GetModSystem().GetSharedSpellId(acEvent.EffectID, request.EffectId))
     {
         spdlog::error("{}: could not find server ID for effect with formID {:X}, discarding", __FUNCTION__, acEvent.EffectID);
         return;
@@ -502,6 +585,8 @@ void MagicService::OnAddTargetEvent(const AddTargetEvent& acEvent) noexcept
 
 void MagicService::OnNotifyAddTarget(const NotifyAddTarget& acMessage) noexcept
 {
+    if (GameExtension::RejectMagic(acMessage.SpellId) || GameExtension::RejectMagic(acMessage.EffectId))
+        return;
     const uint32_t cSpellId = World::Get().GetModSystem().GetGameId(acMessage.SpellId);
     if (cSpellId == 0)
     {
@@ -544,12 +629,27 @@ void MagicService::OnNotifyAddTarget(const NotifyAddTarget& acMessage) noexcept
         return;
     }
 
+    // Also refused on arrival, for a sender running a build that still sends it.
+    if (pActor->GetExtension() && pActor->GetExtension()->IsRemotePlayer() && MagicStateService::IsPersonalBlessing(pSpell))
+    {
+        spdlog::debug("{}: blessing {:X} on another player not applied, it is theirs alone", __FUNCTION__, pSpell->formID);
+        return;
+    }
+
     Actor* pCaster{};
     acMessage.CasterId && (pCaster = Utils::GetByServerId<Actor>(acMessage.CasterId));
     if (acMessage.CasterId && !pCaster)
     {
         MagicQueue::Spdlog("{}: could not find caster Actor for serverID {:X}, queueing", __FUNCTION__, acMessage.CasterId);
         m_queuedRemoteEffects.push(acMessage);
+        return;
+    }
+
+    // With PvP off, another player's hostile effect does not land on this player; a heal or a buff still does.
+    if (pActor == PlayerCharacter::Get() && pCaster && pCaster->GetExtension() && pCaster->GetExtension()->IsRemotePlayer() && pEffect->pEffectSetting &&
+        !MagicSystem::PlayerEffectTaken(World::Get().GetServerSettings().PvpEnabled, pEffect->pEffectSetting->flags))
+    {
+        spdlog::debug("{}: hostile effect {:X} from player copy {:X} not applied, PvP is off", __FUNCTION__, cEffectId, pCaster->formID);
         return;
     }
 
@@ -575,22 +675,42 @@ void MagicService::OnNotifyAddTarget(const NotifyAddTarget& acMessage) noexcept
     if (pEffect->IsVampireLordEffect())
         pActor->GetExtension()->GraphDescriptorHash = AnimationGraphDescriptor_VampireLordBehavior::m_key;
 
+    Actor* pTarget = pActor;
+
     // This hack is here because slow time seems to be twice as slow when cast by an npc
     if (pEffect->IsSlowEffect())
         pActor = PlayerCharacter::Get();
 
     pActor->magicTarget.AddTarget(data, acMessage.CasterPerkFactor, acMessage.ApplyStaminaPerkBonus);
     spdlog::debug("Applied remote magic effect");
+
+    // A hostile spell from another player is an attack even when it does no damage (paralysis, fear, a slow).
+    // Applied here it does not put that player into the target's fight, so it is answered like a hit.
+    // A calm, a frenzy or a command decides whom the target fights itself, and invisibility is no attack, so these are left to the game.
+    const EffectSetting* pSetting = pEffect->pEffectSetting;
+    const auto cLeftToGame = [](const EffectArchetypes::ArchetypeID aArchetype)
+    {
+        return aArchetype == EffectArchetypes::kCalm || aArchetype == EffectArchetypes::kFrenzy || aArchetype == EffectArchetypes::kCommandSummoned ||
+               aArchetype == EffectArchetypes::kInvisibility;
+    };
+    if (pCaster && pSetting && pSetting->IsHostile() && !cLeftToGame(pSetting->eArchetype))
+    {
+        auto playerView = m_world.view<FormIdComponent, PlayerComponent>();
+        if (const auto cCasterEntity = Utils::FindByFormId(playerView, pCaster->formID))
+            m_world.GetCombatService().FightBack(pTarget, playerView.get<PlayerComponent>(*cCasterEntity).Id);
+    }
 }
 
 void MagicService::OnRemoveSpellEvent(const RemoveSpellEvent& acEvent) noexcept
 {
+    if (GameExtension::LocalMagic(acEvent.SpellId))
+        return;
     if (!m_transport.IsConnected())
         return;
 
     RemoveSpellRequest request{};
 
-    if (!m_world.GetModSystem().GetServerModId(acEvent.SpellId, request.SpellId.ModId, request.SpellId.BaseId))
+    if (!m_world.GetModSystem().GetSharedSpellId(acEvent.SpellId, request.SpellId))
     {
         spdlog::error("{}: Could not find spell with form {:X}", __FUNCTION__, acEvent.SpellId);
         return;
@@ -621,6 +741,8 @@ void MagicService::OnRemoveSpellEvent(const RemoveSpellEvent& acEvent) noexcept
 
 void MagicService::OnNotifyRemoveSpell(const NotifyRemoveSpell& acMessage) noexcept
 {
+    if (GameExtension::RejectMagic(acMessage.SpellId) || GameExtension::LocalMagic(m_world.GetModSystem().GetGameId(acMessage.SpellId)))
+        return;
     uint32_t targetFormId = acMessage.TargetId;
 
     Actor* pActor = Utils::GetByServerId<Actor>(acMessage.TargetId);
@@ -653,7 +775,7 @@ void MagicService::OnNotifyRemoveSpell(const NotifyRemoveSpell& acMessage) noexc
 /**
  * Retry the magic effects held back because their target or caster was not known yet, such as a beast just summoned.
  * At most every 100 ms: this game's effects are sent once their target and caster have server ids, and other players' effects are applied once their target and caster exist here.
- * Each queue is taken in order and stops at the first effect still waiting; an effect queued too long is dropped.
+ * Each queue is taken in order; an effect still waiting is kept and the rest go on (EffectQueue::Round), and an effect queued too long is dropped.
  */
 void MagicService::ApplyQueuedEffects() noexcept
 {
@@ -662,22 +784,31 @@ void MagicService::ApplyQueuedEffects() noexcept
         return;
 
     // Search queued events
-    while (!m_queuedEffects.empty())
-    {
-        AddTargetEvent target = m_queuedEffects.front().Target();
-        Actor* pCaster = Cast<Actor>(TESForm::GetById(target.CasterID));
-        Actor* pTarget = Cast<Actor>(TESForm::GetById(target.TargetID));
-        auto pTargetName = !pTarget ? "" : pTarget->baseForm->GetName();
-        auto pCasterName = !pCaster ? "" : pCaster->baseForm->GetName();
-
-        // Check for and skip expired (timed out) events, that Actor isn't likely to exist anymore.
-        if (m_queuedEffects.front().Expired())
-            MagicQueue::Spdlog("{}: removing expired AddTargetEvent from queue: caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})",
-                               __FUNCTION__, pCasterName, target.CasterID, target.SpellID, target.EffectID, pTargetName, target.TargetID);
-        else
+    EffectQueue::Round(
+        m_queuedEffects, [](const MagicAddTargetEventQueue& acQueued) { return acQueued.Target().TargetID; },
+        [this](const MagicAddTargetEventQueue& acQueued, const bool aTargetWaiting)
         {
+            const AddTargetEvent& target = acQueued.Target();
+            Actor* pCaster = Cast<Actor>(TESForm::GetById(target.CasterID));
+            Actor* pTarget = Cast<Actor>(TESForm::GetById(target.TargetID));
+            auto pTargetName = !pTarget ? "" : pTarget->baseForm->GetName();
+            auto pCasterName = !pCaster ? "" : pCaster->baseForm->GetName();
+
+            // Check for and skip expired (timed out) events, that Actor isn't likely to exist anymore.
+            if (acQueued.Expired())
+            {
+                MagicQueue::Spdlog(
+                    "{}: removing expired AddTargetEvent from queue: caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})", __FUNCTION__, pCasterName, target.CasterID,
+                    target.SpellID, target.EffectID, pTargetName, target.TargetID);
+                return false;
+            }
+
+            // An earlier effect on the same target still waits.
+            if (aTargetWaiting)
+                return true;
+
             // Process queued target events. If caster and target now have server IDs, this should work.
-            // If they don't, stop processing the list until next iteration.
+            // If they don't, keep the event for the next iteration.
             auto view = m_world.view<FormIdComponent>();
             const auto it = Utils::FindById<FormIdComponent>(view, target.TargetID);
 
@@ -685,7 +816,7 @@ void MagicService::ApplyQueuedEffects() noexcept
             {
                 spdlog::debug("{}: server entity for AddTargetEvent target formID still not found: caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})",
                               __FUNCTION__, pCasterName, target.CasterID, target.SpellID, target.EffectID, pTargetName, target.TargetID);
-                break;
+                return true;
             }
 
             entt::entity entity = *it;
@@ -694,58 +825,66 @@ void MagicService::ApplyQueuedEffects() noexcept
             {
                 spdlog::debug("{}: serverID for AddTargetEvent target formID still not found: caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})",
                               __FUNCTION__, pCasterName, target.CasterID, target.SpellID, target.EffectID, pTargetName, target.TargetID);
-                break;
+                return true;
             }
 
             if (target.CasterID && !Utils::FindServerIdByFormId(view, target.CasterID))
             {
                 spdlog::debug("{}: serverID for AddTargetEvent caster formID still not found: caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})",
                               __FUNCTION__, pCasterName, target.CasterID, target.SpellID, target.EffectID, pTargetName, target.TargetID);
-                break;
+                return true;
             }
 
             // At this point, it will succeed or fail, but not queue another one ad infinitum
-            MagicQueue::Spdlog("{}: retrying AddTargetEvent for caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})", 
-                               __FUNCTION__, pCasterName, target.CasterID, target.SpellID, target.EffectID, pTargetName, target.TargetID);
-            OnAddTargetEvent(target);        
-        }
-        m_queuedEffects.pop();
-    }
+            MagicQueue::Spdlog(
+                "{}: retrying AddTargetEvent for caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})", __FUNCTION__, pCasterName, target.CasterID, target.SpellID,
+                target.EffectID, pTargetName, target.TargetID);
+            OnAddTargetEvent(target);
+            return false;
+        });
 
     // Same again for remote events
-    while (!m_queuedRemoteEffects.empty())
-    {
-        NotifyAddTarget target = m_queuedRemoteEffects.front().Target();
-        Actor* pTarget = Utils::GetByServerId<Actor>(target.TargetId); 
-        Actor* pCaster = Utils::GetByServerId<Actor>(target.CasterId); 
-        auto pTargetName = !pTarget ? "" : pTarget->baseForm->GetName();
-        auto pCasterName = !pCaster ? "" : pCaster->baseForm->GetName(); 
-
-        if (m_queuedRemoteEffects.front().Expired())
-            MagicQueue::Spdlog("{}: removing expired NotifyAddTarget event from queue: caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})",
-                               __FUNCTION__, pCasterName, target.CasterId, target.SpellId, target.EffectId, pTargetName, target.TargetId);
-        else
+    EffectQueue::Round(
+        m_queuedRemoteEffects, [](const MagicNotifyAddTargetQueue& acQueued) { return acQueued.Target().TargetId; },
+        [this](const MagicNotifyAddTargetQueue& acQueued, const bool aTargetWaiting)
         {
+            const NotifyAddTarget& target = acQueued.Target();
+            Actor* pTarget = Utils::GetByServerId<Actor>(target.TargetId);
+            Actor* pCaster = Utils::GetByServerId<Actor>(target.CasterId);
+            auto pTargetName = !pTarget ? "" : pTarget->baseForm->GetName();
+            auto pCasterName = !pCaster ? "" : pCaster->baseForm->GetName();
+
+            if (acQueued.Expired())
+            {
+                MagicQueue::Spdlog(
+                    "{}: removing expired NotifyAddTarget event from queue: caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})", __FUNCTION__, pCasterName, target.CasterId,
+                    target.SpellId, target.EffectId, pTargetName, target.TargetId);
+                return false;
+            }
+
+            if (aTargetWaiting)
+                return true;
+
             if (!pTarget)
             {
                 spdlog::debug("{}: Actor for target serverID still not found for NotifyAddTarget: caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})",
                               __FUNCTION__, pCasterName, target.CasterId, target.SpellId, target.EffectId, pTargetName, target.TargetId);
-                break;
+                return true;
             }
 
             if (target.CasterId && !pCaster)
             {
                 spdlog::debug("{}: Actor for caster serverID still not found for NotifyAddTarget: caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})",
                               __FUNCTION__, pCasterName, target.CasterId, target.SpellId, target.EffectId, pTargetName, target.TargetId);
-                break; 
+                return true;
             }
 
-            MagicQueue::Spdlog("{}: retrying NotifyAddTarget for caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})",
-                               __FUNCTION__, pCasterName, target.CasterId, target.SpellId, target.EffectId, pTargetName,target.TargetId);
+            MagicQueue::Spdlog(
+                "{}: retrying NotifyAddTarget for caster {}({:X}), spell {:X}, effect {:X}, target {}({:X})", __FUNCTION__, pCasterName, target.CasterId, target.SpellId,
+                target.EffectId, pTargetName, target.TargetId);
             OnNotifyAddTarget(target);
-        }
-        m_queuedRemoteEffects.pop();
-    }
+            return false;
+        });
 }
 
 void MagicService::StartRevealingOtherPlayers() noexcept
@@ -764,7 +903,14 @@ void MagicService::UpdateRevealOtherPlayersEffect(bool aForceTrigger) noexcept
     static std::chrono::steady_clock::time_point lastSendTimePoint;
     static bool s_reported = false;
 
-    const bool shouldActivate = aForceTrigger || GetAsyncKeyState(VK_F4) & 0x01;
+#ifdef SKYRIMVR
+    // F4 is read once per interval on VR, with the other debug keys (see KeyPollGate).
+    const bool cReadKey = KeyPollGate::Shared().IsOpen();
+#else
+    constexpr bool cReadKey = true;
+#endif
+
+    const bool shouldActivate = aForceTrigger || (cReadKey && GetAsyncKeyState(VK_F4) & 0x01);
 
     if (shouldActivate && !m_revealingOtherPlayers)
     {

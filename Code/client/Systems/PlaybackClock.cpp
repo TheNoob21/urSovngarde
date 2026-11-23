@@ -93,7 +93,8 @@ void PlaybackClock::UpdateEstimates(const double aNewestArrivalTime) noexcept
     std::nth_element(transits.begin(), percentile, end);
     m_jitter = *percentile - m_minTransit;
 
-    // Owners send at an even pace while their send rate holds, see RunLocalUpdates
+    // The average gap. An owner faster than its send rate sends on a grid (SendGrid.h), so its gaps are not all equal:
+    // the longest recent gap below covers the frames it has to skip.
     if (count >= 2)
         m_snapshotInterval = static_cast<double>(newestCaptureTick - oldestCaptureTick) / static_cast<double>(count - 1);
 
@@ -105,7 +106,27 @@ void PlaybackClock::UpdateEstimates(const double aNewestArrivalTime) noexcept
         m_snapshotInterval = std::max(m_snapshotInterval, static_cast<double>(newestCaptureTick - *recentCaptureTick) / static_cast<double>(cRecentGaps));
     }
 
-    m_targetDelay = std::clamp(m_snapshotInterval + m_jitter + cSafetyMargin, cMinTargetDelay, cMaxTargetDelay);
+    // The longest of the newest gaps, so that a skipped frame does not run playback out of snapshots
+    m_longestRecentGap = 0.0;
+    if (count >= 2)
+    {
+        const size_t cNewest = std::min(count, cLongestGapWindow + 1);
+        std::partial_sort(captureTicks.begin(), captureTicks.begin() + cNewest, captureTicks.begin() + count, std::greater<>{});
+        for (size_t i = 0; i + 1 < cNewest; ++i)
+        {
+            const double cGap = static_cast<double>(captureTicks[i] - captureTicks[i + 1]);
+            if (cGap <= cMaxPaceGap)
+                m_longestRecentGap = std::max(m_longestRecentGap, cGap);
+        }
+    }
+
+    m_targetDelay = std::clamp(std::max(m_snapshotInterval, m_longestRecentGap) + m_jitter + cSafetyMargin, m_minTargetDelay, cMaxTargetDelay);
+}
+
+void PlaybackClock::SetMinTargetDelay(const double aDelay) noexcept
+{
+    if (std::isfinite(aDelay))
+        m_minTargetDelay = std::clamp(aDelay, cMinTargetDelay, cMaxTargetDelay);
 }
 
 double PlaybackClock::GetDesiredRenderTick(const double aNow) const noexcept

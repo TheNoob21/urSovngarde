@@ -1,11 +1,17 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Copies/Takeover.h>
+#include <Services/CopyWorkGate.h>
 
 #include <World.h>
 #include <Games/ActorExtension.h>
 #include <PlayerCharacter.h>
 #include <Systems/InterpolationSystem.h>
+#include <Games/Skyrim/TakeoverRules.h>
+#include <Games/Animation/ActorMediator.h>
+#include <Games/Animation/TESActionData.h>
+#include <Forms/BGSAction.h>
+#include <NetImmerse/NiTransform.h>
 
 #include <deque>
 #include <map>
@@ -56,10 +62,202 @@ void RunGainedMoving() noexcept
     }
 }
 
+// NPCs gained in the last few seconds, whose legs are read against how far their body goes.
+// This game's AI can carry on a path it started before the NPC was a copy, or one it started while the NPC was a copy and its start was refused.
+// Either way the engine does not start the legs again, and the graph the copy was left in stands: the body would slide.
+// The engine's own start puts the legs where the AI is, and goes out to the other players' copies like any of this game's actions.
+// A new copy of another game's NPC is watched the same way from when its 3D comes: its owner's start came before this game saw it,
+// and the first replays can reach its graph before it takes them, so its owner's reports carry it on standing legs.
+// A copy's own actions are refused here (HookPerformAction), so its graph is sent the start, as when its owner's reports come back (QuietStop).
+struct GainedLegs
+{
+    uint32_t FormId{};
+    bool Copy{};
+    entt::entity Entity{entt::null};
+    std::chrono::steady_clock::time_point GainedAt{};
+    std::chrono::steady_clock::time_point NextSample{};
+    std::chrono::steady_clock::time_point LastMend{};
+    uint32_t Mends{};
+    std::vector<TakeoverRules::Sample> Samples;
+};
+TiltedPhoques::Vector<GainedLegs> s_gainedLegs;
+
+int64_t MsSince(const std::chrono::steady_clock::time_point aFrom, const std::chrono::steady_clock::time_point aTo) noexcept
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(aTo - aFrom).count();
+}
+
+// The body's place and each foot's horizontal distance from the pelvis, in world space.
+bool ReadLegs(Actor* apActor, const int64_t aAtMs, TakeoverRules::Sample& aSample) noexcept
+{
+    using TGetObjectByName = void*(void*, const char* const*, char);
+    POINTER_SKYRIMSE(TGetObjectByName, GetObjectByName, 76207, 76207);
+    static const BSFixedString s_pelvis("NPC Pelvis [Pelv]");
+    static const BSFixedString s_leftFoot("NPC L Foot [Lft ]");
+    static const BSFixedString s_rightFoot("NPC R Foot [Rft ]");
+
+    NiNode* pRoot = apActor->GetNiNode();
+    if (!pRoot)
+        return false;
+    const auto cWorldPlace = [&](const BSFixedString& acName, glm::vec2& aPlace)
+    {
+        const auto* pBone = static_cast<const uint8_t*>(GetObjectByName(pRoot, &acName.data, 1));
+        if (!pBone)
+            return false;
+        const auto& cWorld = WorldTransformOf(pBone);
+        aPlace = {cWorld.translate.x, cWorld.translate.y};
+        return true;
+    };
+    glm::vec2 pelvis{}, leftFoot{}, rightFoot{};
+    if (!cWorldPlace(s_pelvis, pelvis) || !cWorldPlace(s_leftFoot, leftFoot) || !cWorldPlace(s_rightFoot, rightFoot))
+        return false;
+    aSample = {aAtMs, apActor->position.x, apActor->position.y, glm::distance(leftFoot, pelvis), glm::distance(rightFoot, pelvis)};
+    return true;
+}
+
+bool PerformMoveStart(Actor* apActor) noexcept
+{
+    constexpr uint32_t cActionMoveStart = 0x959F8;
+    auto* pAction = Cast<BGSAction>(TESForm::GetById(cActionMoveStart));
+    if (!pAction)
+        return false;
+    TESActionData action(2, apActor, pAction, nullptr);
+    return ActorMediator::Get()->PerformOwnAction(&action);
+}
+
+bool StartCopyGraph(Actor* apActor, const bool aReset, bool& aResetTaken) noexcept
+{
+    static BSFixedString s_defaultState("IdleForceDefaultState");
+    static BSFixedString s_moveStart("moveStart");
+    aResetTaken = aReset && apActor->SendAnimationEvent(&s_defaultState);
+    return apActor->SendAnimationEvent(&s_moveStart);
+}
+
+void RunGainedLegs(World& aWorld) noexcept
+{
+    using namespace TakeoverRules;
+    // Bones are not read while the game exits or loads, nor just after a load (CopyWork.h); a watch from before a load is not carried
+    // past it.
+    static CopyWork::LoadGate s_loadGate;
+    const uint32_t cSeenBefore = s_loadGate.Seen;
+    if (!CopyWorkSettled(s_loadGate))
+    {
+        if (s_loadGate.Seen != cSeenBefore || LoadingScreenUp())
+            s_gainedLegs.clear();
+        return;
+    }
+    const auto cNow = std::chrono::steady_clock::now();
+    for (auto it = s_gainedLegs.begin(); it != s_gainedLegs.end();)
+    {
+        if (MsSince(it->GainedAt, cNow) > kWatchMs)
+        {
+            it = s_gainedLegs.erase(it);
+            continue;
+        }
+        if (cNow < it->NextSample)
+        {
+            ++it;
+            continue;
+        }
+        it->NextSample = cNow + std::chrono::milliseconds(kSampleEveryMs);
+
+        Actor* pActor = Cast<Actor>(TESForm::GetById(it->FormId));
+        const ActorExtension* pExtension = pActor && pActor->GetNiNode() ? pActor->GetExtension() : nullptr;
+        // A copy is watched only while it stays one, with the playback that moves it; a gained NPC only while this game runs it.
+        const auto* pInterpolation = it->Copy && aWorld.valid(it->Entity) ? aWorld.try_get<InterpolationComponent>(it->Entity) : nullptr;
+        bool canMend = false;
+        if (pExtension && it->Copy)
+            canMend = pInterpolation && CanMendCopy(
+                                            pExtension->IsRemote() && !pExtension->IsRemotePlayer(), pInterpolation->ForeignGraph, InterpolationSystem::OnFoot(pActor),
+                                            pActor->actorState.IsDeadOrDying(), pActor->actorState.IsBleedingOut(), pActor->actorState.IsKnockedDown(), pActor->IsMount());
+        else if (pExtension)
+            canMend = CanMend(
+                !pExtension->IsRemote(), InterpolationSystem::OnFoot(pActor), pActor->actorState.IsDeadOrDying(), pActor->actorState.IsBleedingOut(),
+                pActor->actorState.IsKnockedDown(), pActor->IsMount());
+        if (!canMend)
+        {
+            it = s_gainedLegs.erase(it);
+            continue;
+        }
+
+        const int64_t cAtMs = MsSince(it->GainedAt, cNow);
+        Sample sample;
+        if (!ReadLegs(pActor, cAtMs, sample))
+        {
+            // A skeleton without these bones (a creature's) is not judged.
+            it = s_gainedLegs.erase(it);
+            continue;
+        }
+        it->Samples.push_back(sample);
+        while (!it->Samples.empty() && cAtMs - it->Samples.front().AtMs > kWindowMs)
+            it->Samples.erase(it->Samples.begin());
+
+        const Legs cLegs = Judge(it->Samples, cAtMs);
+        const bool cWindowSinceMend = it->Mends == 0 || MsSince(it->LastMend, cNow) >= kWindowMs;
+        // A gained NPC: the AI's own speed for the legs, which this game's AI writes even while the graph stands.
+        // A copy: its owner's reports, which move its body here.
+        const bool cAiMoves = it->Copy ? OwnerMoves(InterpolationSystem::ReportedSpeed(it->FormId, *pInterpolation)) : InterpolationSystem::FootSpeed(pActor) > 1.f;
+        const Mend cMend = NextMend(cLegs, cAiMoves, it->Mends, cWindowSinceMend);
+        if (cMend == Mend::kNone)
+        {
+            ++it;
+            continue;
+        }
+        if (cMend == Mend::kGiveUp)
+        {
+            spdlog::debug(
+                "Takeover: {} {:X} still slides {} ms after {} and two starts; left alone", it->Copy ? "new copy" : "NPC", pActor->formID, cAtMs,
+                it->Copy ? "its 3D came" : "its gain");
+            it = s_gainedLegs.erase(it);
+            continue;
+        }
+
+        bool reset = false;
+        bool started = false;
+        if (it->Copy)
+            started = StartCopyGraph(pActor, cMend == Mend::kResetStart, reset);
+        else
+        {
+            if (cMend == Mend::kResetStart)
+            {
+                static BSFixedString s_defaultState("IdleForceDefaultState");
+                reset = pActor->SendAnimationEvent(&s_defaultState);
+            }
+            started = PerformMoveStart(pActor);
+        }
+        spdlog::debug(
+            "Takeover: {} {:X} slid on still legs {} ms after {}; {}{} {}", it->Copy ? "new copy" : "NPC", pActor->formID, cAtMs, it->Copy ? "its 3D came" : "its gain",
+            cMend == Mend::kResetStart ? (reset ? "graph reset, " : "graph reset refused, ") : "", it->Copy ? "'moveStart'" : "ActionMoveStart", started ? "taken" : "refused");
+        ++it->Mends;
+        it->LastMend = cNow;
+        // The window starts again from the readings after the start.
+        it->Samples.clear();
+        ++it;
+    }
+}
+
 } // namespace
 
 namespace Takeover
 {
+void WatchGainedLegs(const Actor* apActor) noexcept
+{
+    if (apActor->IsDead())
+        return;
+    const auto cNow = std::chrono::steady_clock::now();
+    std::erase_if(s_gainedLegs, [apActor](const GainedLegs& acWatch) { return acWatch.FormId == apActor->formID; });
+    s_gainedLegs.push_back({apActor->formID, false, entt::null, cNow, cNow + std::chrono::milliseconds(TakeoverRules::kFirstLookMs), {}, 0, {}});
+}
+
+void WatchNewCopyLegs(const entt::entity aEntity, const Actor* apActor) noexcept
+{
+    if (apActor->IsDead())
+        return;
+    const auto cNow = std::chrono::steady_clock::now();
+    std::erase_if(s_gainedLegs, [apActor](const GainedLegs& acWatch) { return acWatch.FormId == apActor->formID; });
+    s_gainedLegs.push_back({apActor->formID, true, aEntity, cNow, cNow + std::chrono::milliseconds(TakeoverRules::kFirstLookMs), {}, 0, {}});
+}
+
 // By its owner's reports, not its graph: this game's AI writes its own speed there, even on a copy.
 // A slow walker reports about 60 units a second, and a standing body none.
 void NoteGainedMoving(Actor* apActor, const InterpolationComponent* apInterpolation) noexcept
@@ -266,6 +464,7 @@ void NoteOwnAction(uint32_t aFormId, const char* acpEvent, bool aTaken) noexcept
 void Run(World& aWorld) noexcept
 {
     RunGainedMoving();
+    RunGainedLegs(aWorld);
     RunTakeoverDiag(aWorld);
 }
 } // namespace Takeover

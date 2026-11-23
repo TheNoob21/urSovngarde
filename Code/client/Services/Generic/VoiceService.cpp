@@ -10,6 +10,8 @@
 #include <Components.h>
 #include <PlayerCharacter.h>
 #include <Forms/TESForm.h>
+#include <NetImmerse/BSFaceGenAnimationData.h>
+#include <VoiceLips.h>
 #ifdef SKYRIMVR
 #include <Games/Skyrim/VR/VRBodySync.h>
 #endif
@@ -214,6 +216,15 @@ Actor* FindPlayerActor(World& aWorld, uint32_t aPlayerId) noexcept
     return nullptr;
 }
 
+// Opens a copy's mouth to aOpen with its talking phoneme.
+void SetMouth(Actor* apActor, const float aOpen) noexcept
+{
+    if (!apActor || !apActor->GetNiNode())
+        return;
+    if (BSFaceGenAnimationData* pFace = apActor->GetFaceGenAnimationData())
+        pFace->SetPhoneme(VoiceLips::kPhoneme, aOpen);
+}
+
 // Where our ears are: the headset in VR, else the character's head facing its heading.
 bool ListenerPose(glm::vec3& aPosition, glm::vec3& aForward, glm::vec3& aRight) noexcept
 {
@@ -239,6 +250,12 @@ VoiceService::VoiceService(World& aWorld, entt::dispatcher& aDispatcher)
     m_connectedConnection = aDispatcher.sink<ConnectedEvent>().connect<&VoiceService::OnConnected>(this);
     m_disconnectedConnection = aDispatcher.sink<DisconnectedEvent>().connect<&VoiceService::OnDisconnected>(this);
     m_voiceDataConnection = aDispatcher.sink<NotifyVoiceData>().connect<&VoiceService::OnVoiceData>(this);
+}
+
+VoiceService::~VoiceService() noexcept
+{
+    while (!m_npcSpeakers.empty())
+        StopNpcSpeech(m_npcSpeakers.begin()->first);
 }
 
 void VoiceService::StartMicrophoneTest() noexcept
@@ -280,6 +297,7 @@ void VoiceService::StartMicrophoneTest() noexcept
 
 void VoiceService::OnUpdate(const UpdateEvent&) noexcept
 {
+    UpdateNpcSpeakers();
     if (m_testState == TestState::kIdle && !m_capturing && m_speakers.empty() && !(m_enabled && m_connected))
         return;
 
@@ -585,6 +603,7 @@ void VoiceService::SetPlayerMuted(uint32_t aPlayerId, bool aMuted) noexcept
         m_muted.insert(aPlayerId);
         if (const auto it = m_speakers.find(aPlayerId); it != m_speakers.end())
         {
+            CloseLips(aPlayerId, it->second);
             if (it->second.pVoice)
                 it->second.pVoice->DestroyVoice();
             m_speakers.erase(it);
@@ -604,6 +623,8 @@ void VoiceService::OnConnected(const ConnectedEvent&) noexcept
 void VoiceService::OnDisconnected(const DisconnectedEvent&) noexcept
 {
     m_connected = false;
+    while (!m_npcSpeakers.empty())
+        StopNpcSpeech(m_npcSpeakers.begin()->first);
     StopCapture();
     RemoveSpeakers();
 }
@@ -703,19 +724,9 @@ void VoiceService::OnVoiceData(const NotifyVoiceData& acMessage) noexcept
 
     if (!speaker.pVoice)
     {
-        WAVEFORMATEX format{};
-        format.wFormatTag = WAVE_FORMAT_PCM;
-        format.nChannels = 1;
-        format.nSamplesPerSec = m_sampleRate;
-        format.wBitsPerSample = 16;
-        format.nBlockAlign = format.nChannels * format.wBitsPerSample / 8;
-        format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
-
-        if (FAILED(m_pXAudio->CreateSourceVoice(&speaker.pVoice, &format)) || FAILED(speaker.pVoice->Start(0)))
+        if (!OpenSpeaker(speaker, m_sampleRate))
         {
             spdlog::warn("Voice: could not open a voice for player {}", acMessage.PlayerId);
-            if (speaker.pVoice)
-                speaker.pVoice->DestroyVoice();
             m_speakers.erase(acMessage.PlayerId);
             return;
         }
@@ -737,6 +748,78 @@ void VoiceService::OnVoiceData(const NotifyVoiceData& acMessage) noexcept
         QueueSamples(speaker, std::move(samples));
 }
 
+bool VoiceService::OpenSpeaker(Speaker& aSpeaker, uint32_t aSampleRate) noexcept
+{
+    WAVEFORMATEX format{};
+    format.wFormatTag = WAVE_FORMAT_PCM;
+    format.nChannels = 1;
+    format.nSamplesPerSec = aSampleRate;
+    format.wBitsPerSample = 16;
+    format.nBlockAlign = sizeof(int16_t);
+    format.nAvgBytesPerSec = aSampleRate * format.nBlockAlign;
+    if (FAILED(m_pXAudio->CreateSourceVoice(&aSpeaker.pVoice, &format)))
+        return false;
+    if (SUCCEEDED(aSpeaker.pVoice->Start(0)))
+        return true;
+    aSpeaker.pVoice->DestroyVoice();
+    aSpeaker.pVoice = nullptr;
+    return false;
+}
+
+void VoiceService::PlayNpcSpeech(uint32_t aActorId, uint32_t aSampleRate, std::vector<int16_t> aSamples) noexcept
+{
+    auto* pActor = Utils::GetByServerId<Actor>(aActorId);
+    if (!m_connected || !pActor || aSamples.empty() || !aSampleRate || !EnsureAudio())
+        return;
+
+    auto it = m_npcSpeakers.find(aActorId);
+    if (it == m_npcSpeakers.end())
+    {
+        if (m_npcSpeakers.size() >= 16)
+            return;
+        it = m_npcSpeakers.try_emplace(aActorId).first;
+        if (!OpenSpeaker(it->second, aSampleRate))
+        {
+            m_npcSpeakers.erase(it);
+            return;
+        }
+    }
+    auto& speaker = it->second;
+    PlaceVoice(speaker, pActor, false, 0.f, 1.f);
+    ReleasePlayed(speaker);
+    if (speaker.QueuedSamples + aSamples.size() <= aSampleRate * kMaxQueuedMs / 1000)
+        QueueSamples(speaker, std::move(aSamples));
+}
+
+void VoiceService::StopNpcSpeech(uint32_t aActorId) noexcept
+{
+    auto it = m_npcSpeakers.find(aActorId);
+    if (it == m_npcSpeakers.end())
+        return;
+    it->second.pVoice->DestroyVoice();
+    m_npcSpeakers.erase(it);
+}
+
+void VoiceService::UpdateNpcSpeakers() noexcept
+{
+    for (auto it = m_npcSpeakers.begin(); it != m_npcSpeakers.end();)
+    {
+        auto& speaker = it->second;
+        ReleasePlayed(speaker);
+        auto* pActor = Utils::GetByServerId<Actor>(it->first);
+        const auto* pPlayer = PlayerCharacter::Get();
+        if (!pActor || !pPlayer || !pActor->parentCell || !pPlayer->parentCell || pActor->GetWorldSpace() != pPlayer->GetWorldSpace() ||
+            (!pPlayer->GetWorldSpace() && pActor->parentCell != pPlayer->parentCell) || speaker.Queued.empty())
+        {
+            speaker.pVoice->DestroyVoice();
+            it = m_npcSpeakers.erase(it);
+            continue;
+        }
+        PlaceVoice(speaker, pActor, false, 0.f, 1.f);
+        ++it;
+    }
+}
+
 void VoiceService::ReleasePlayed(Speaker& aSpeaker) noexcept
 {
     if (!aSpeaker.pVoice)
@@ -748,6 +831,7 @@ void VoiceService::ReleasePlayed(Speaker& aSpeaker) noexcept
     while (aSpeaker.Queued.size() > state.BuffersQueued)
     {
         aSpeaker.QueuedSamples -= aSpeaker.Queued.front().size();
+        aSpeaker.ReleasedSamples += aSpeaker.Queued.front().size();
         aSpeaker.Queued.pop_front();
     }
 }
@@ -777,6 +861,9 @@ void VoiceService::QueueSamples(Speaker& aSpeaker, std::vector<int16_t>&& aSampl
 
 void VoiceService::UpdateSpeakers(std::chrono::steady_clock::time_point aNow) noexcept
 {
+    const float cSeconds = std::chrono::duration<float>(aNow - m_lipsAt).count();
+    m_lipsAt = aNow;
+
     for (auto it = m_speakers.begin(); it != m_speakers.end();)
     {
         Speaker& speaker = it->second;
@@ -788,6 +875,7 @@ void VoiceService::UpdateSpeakers(std::chrono::steady_clock::time_point aNow) no
 
         if (speaker.Queued.empty() && speaker.Waiting.empty() && aNow - speaker.LastHeard >= kSpeakerIdle)
         {
+            CloseLips(it->first, speaker);
             if (speaker.pVoice)
                 speaker.pVoice->DestroyVoice();
             it = m_speakers.erase(it);
@@ -795,6 +883,7 @@ void VoiceService::UpdateSpeakers(std::chrono::steady_clock::time_point aNow) no
         }
 
         PlaceSpeaker(it->first, speaker);
+        MoveLips(it->first, speaker, cSeconds);
         ++it;
     }
 
@@ -819,25 +908,28 @@ void VoiceService::PlaceSpeaker(uint32_t aPlayerId, Speaker& aSpeaker) noexcept
 
     // The server sends a party member's voice from any distance.
     // So with the party heard only nearby, a party member whose body is not loaded here is not heard.
-    float gain = cRadio ? kRadioGain : cIsParty ? 0.f : kUnplacedGain;
+    PlaceVoice(aSpeaker, FindPlayerActor(m_world, aPlayerId), cRadio, cRadio ? kRadioGain : cIsParty ? 0.f : kUnplacedGain, m_volume);
+}
+
+void VoiceService::PlaceVoice(Speaker& aSpeaker, Actor* apActor, bool aRadio, float aGain, float aVolume) noexcept
+{
     float pan = 0.f; // -1 left, 1 right
 
     glm::vec3 listener{}, forward{}, right{};
-    Actor* pActor = FindPlayerActor(m_world, aPlayerId);
-    if (pActor && ListenerPose(listener, forward, right))
+    if (apActor && ListenerPose(listener, forward, right))
     {
-        const glm::vec3 cMouth(pActor->position.x, pActor->position.y, pActor->position.z + kHeadHeight);
+        const glm::vec3 cMouth(apActor->position.x, apActor->position.y, apActor->position.z + kHeadHeight);
         const glm::vec3 cToSpeaker = cMouth - listener;
         const float cDistance = glm::length(cToSpeaker);
-        gain = DistanceGain(cDistance);
+        aGain = DistanceGain(cDistance);
         if (cDistance > 1.f)
             pan = std::clamp(glm::dot(cToSpeaker / cDistance, right), -1.f, 1.f);
 
         // A party member far away stays heard, centred, at the radio volume, unless the party is heard only nearby.
-        if (cRadio && gain < kRadioGain)
+        if (aRadio && aGain < kRadioGain)
         {
-            pan *= gain / kRadioGain;
-            gain = kRadioGain;
+            pan *= aGain / kRadioGain;
+            aGain = kRadioGain;
         }
     }
 
@@ -853,13 +945,42 @@ void VoiceService::PlaceSpeaker(uint32_t aPlayerId, Speaker& aSpeaker) noexcept
         matrix[1] = std::sin(cAngle);
     }
     aSpeaker.pVoice->SetOutputMatrix(nullptr, 1, cChannels, matrix.data());
-    aSpeaker.pVoice->SetVolume(gain * m_volume);
+    aSpeaker.pVoice->SetVolume(aGain * aVolume);
+}
+
+void VoiceService::MoveLips(uint32_t aPlayerId, Speaker& aSpeaker, float aSeconds) noexcept
+{
+    // The oldest queued buffer is the one playing; ReleasePlayed has just dropped those finished.
+    float target = 0.f;
+    if (aSpeaker.pVoice && !aSpeaker.Queued.empty() && m_sampleRate)
+    {
+        XAUDIO2_VOICE_STATE state{};
+        aSpeaker.pVoice->GetState(&state, 0);
+        const auto& cPlaying = aSpeaker.Queued.front();
+        const uint64_t cAt = state.SamplesPlayed > aSpeaker.ReleasedSamples ? state.SamplesPlayed - aSpeaker.ReleasedSamples : 0;
+        target = VoiceLips::Openness(VoiceLips::Loudness(cPlaying.data(), cPlaying.size(), static_cast<size_t>(cAt), m_sampleRate * VoiceLips::kWindowMs / 1000));
+    }
+
+    const float cMouth = VoiceLips::Follow(aSpeaker.Mouth, target, aSeconds);
+    if (cMouth == 0.f && aSpeaker.Mouth == 0.f)
+        return;
+    aSpeaker.Mouth = cMouth;
+    SetMouth(FindPlayerActor(m_world, aPlayerId), cMouth);
+}
+
+void VoiceService::CloseLips(uint32_t aPlayerId, Speaker& aSpeaker) noexcept
+{
+    if (aSpeaker.Mouth == 0.f)
+        return;
+    aSpeaker.Mouth = 0.f;
+    SetMouth(FindPlayerActor(m_world, aPlayerId), 0.f);
 }
 
 void VoiceService::RemoveSpeakers() noexcept
 {
     for (auto& [id, speaker] : m_speakers)
     {
+        CloseLips(id, speaker);
         if (speaker.pVoice)
             speaker.pVoice->DestroyVoice();
     }

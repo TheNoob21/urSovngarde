@@ -1,7 +1,8 @@
 #pragma once
 
 /**
- * @brief Dispatched whenever a local actor mounts another actor (i.e. a horse or dragon).
+ * @brief A local actor's native mount package was accepted (horse or dragon).
+ * This is intent, not confirmation that the actor reached a seat.
  */
 struct MountEvent
 {

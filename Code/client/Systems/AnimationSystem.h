@@ -37,16 +37,29 @@ struct AnimationSystem
     static void Clean(World& aWorld, entt::entity aEntity) noexcept;
     /**
      * @brief Adds multiple actions to be replayed.
+     * @param aWorld The registry, for its mod system.
      * @param aAnimationComponent The animation component attached to the actor in question.
      * @param acReplay The replay data.
      */
-    static void AddActionsForReplay(RemoteAnimationComponent& aAnimationComponent, const ActionReplayChain& acReplay) noexcept;
+    static void AddActionsForReplay(World& aWorld, RemoteAnimationComponent& aAnimationComponent, const ActionReplayChain& acReplay) noexcept;
     /**
      * @brief Adds an action (animation) to be processed.
      * @param aAnimationComponent The animation component attached to the actor in question.
      * @param acActionDiff The differential data of the animation.
      */
     static void AddAction(RemoteAnimationComponent& aAnimationComponent, const std::string& acActionDiff) noexcept;
+    /**
+     * @brief Adds the server mod ids of a local action's forms, so they resolve in a game with another load order.
+     * @param aWorld The registry, for its mod system.
+     * @param aAction The action to-be-sent.
+     */
+    static void AddModIds(World& aWorld, ActionEvent& aAction) noexcept;
+    /**
+     * @brief Turns a received action's server mod ids into this game's form ids.
+     * @param aWorld The registry, for its mod system.
+     * @param aAction The received action.
+     */
+    static void ResolveModIds(World& aWorld, ActionEvent& aAction) noexcept;
     /**
      * @brief Drops the oldest queued actions once the backlog is longer than can ever be played.
      *

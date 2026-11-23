@@ -14,11 +14,15 @@ struct ItemDroppedEvent
 struct ItemPickedUpEvent
 {
     uint32_t RefFormId{};
+    //! Its handle (its incarnation): a hand item is known by it, not by its id alone.
+    uint32_t RefHandle{};
+    Inventory::Entry Item{};
 
-    //! A placed book, named here because the reference is gone by the time the event runs.
-    //! Nothing else reports a taken book: activation sync leaves books out, and HIGGS picks them up directly (SkipActivateBooks).
-    bool PlacedBook{};
+    //! A placed reference the server keeps taken (PlacedTakes), named here because the reference is gone by the time the event runs.
+    //! Activation sync takes it in the games that have it loaded now, but leaves books out, and HIGGS picks books up directly (SkipActivateBooks).
+    bool Placed{};
     GameId ObjectId{};
+    //! Scope is captured for every pickup, including a dropped reference whose handle changed on reload.
     GameId CellId{};
     GameId WorldSpaceId{};
     glm::vec3 Position{};

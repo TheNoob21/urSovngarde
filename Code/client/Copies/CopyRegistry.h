@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <unordered_set>
 #include <utility>
@@ -36,6 +37,22 @@ std::optional<uint32_t> TakeGhostOfCopy(uint32_t aCopy) noexcept;
 //! The ghost and its copy for an id that is either of them.
 std::optional<std::pair<uint32_t, uint32_t>> StandInEntryOf(uint32_t aGhostOrCopy) noexcept;
 const TiltedPhoques::Map<uint32_t, uint32_t>& Ghosts() noexcept;
+
+// Copies left where they stood because their owner's NPC is beyond the loaded area here, with where the owner had it then.
+// Set where an assignment or a teleport is not made; gone once the copy is moved there, or goes (NpcFurniture::SkipSeatReplay).
+struct OwnerPlace
+{
+    //! The world space outside, by form id here; 0 inside, or for one this game does not have.
+    uint32_t WorldSpaceId{};
+    //! The cell inside, by form id here; 0 outside, or for one this game does not have.
+    uint32_t CellId{};
+    std::array<float, 3> Position{};
+};
+void NoteAwayFromOwner(uint32_t aCopy, const OwnerPlace& acPlace) noexcept;
+void ForgetAwayFromOwner(uint32_t aCopy) noexcept;
+//! Where its owner had it, when that copy was left away from it.
+std::optional<OwnerPlace> AwayFromOwner(uint32_t aCopy) noexcept;
+void ForgetAllAwayFromOwner() noexcept;
 //! All ghosts and their copies, which are ghosts no longer.
 TiltedPhoques::Map<uint32_t, uint32_t> TakeAllGhosts() noexcept;
 //! The copies standing in for a ghost now.

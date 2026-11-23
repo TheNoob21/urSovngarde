@@ -4,6 +4,8 @@
 #error Include Components.h instead
 #endif
 
+#include <PlayerGraphEvents.h>
+
 struct RemoteAnimationComponent
 {
     List<ActionEvent> TimePoints;
@@ -14,4 +16,7 @@ struct RemoteAnimationComponent
     // The owner has another kind of creature at this reference (see MarkForeignGraph in CharacterService): its
     // actions belong to a graph this actor does not have, so none are replayed.
     bool ForeignGraph{false};
+    // The owner's graph events played on this copy (PlayerGraphEvents.h), within their rate.
+    PlayerGraphEvents::RateLimit GraphEvents;
+    PlayerGraphEvents::EndGate GraphEventGate;
 };

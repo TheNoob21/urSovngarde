@@ -1,46 +1,36 @@
+#include <Services/GameExtension.h>
 #include <TiltedOnlinePCH.h>
 
 #include <Systems/ModSystem.h>
 
+#include <Events/DisconnectedEvent.h>
 #include <Structs/Mods.h>
 #include <Structs/GameId.h>
+#include <Messages/NotifyModListsDiffer.h>
+#include <Structs/PluginList.h>
+
+#include <Services/OverlayService.h>
+#include <UI/Banner/VRBanner.h>
+#include <World.h>
 
 #include <Games/TES.h>
 
 ModSystem::ModSystem(entt::dispatcher& aDispatcher) noexcept
 {
-    std::memset(m_standardToServer, 0, sizeof(m_standardToServer));
-    // Deal with temporary ids
-    m_standardToServer[0xFF] = std::numeric_limits<uint32_t>::max();
-
     m_modsConnection = aDispatcher.sink<Mods>().connect<&ModSystem::HandleMods>(this);
+    m_disconnectedConnection = aDispatcher.sink<DisconnectedEvent>().connect<&ModSystem::HandleDisconnected>(this);
+    m_modListsDifferConnection = aDispatcher.sink<NotifyModListsDiffer>().connect<&ModSystem::HandleModListsDiffer>(this);
 }
 
 bool ModSystem::GetServerModId(const uint32_t aGameId, uint32_t& aModId, uint32_t& aBaseId) const noexcept
 {
-    uint32_t hiByte = aGameId >> 24;
+    if (m_mapping.ToServer(aGameId, aModId, aBaseId))
+        return true;
 
-    // If it's a lite mod
-    if (hiByte == 0xFE)
-    {
-        const uint16_t liteId = ((aGameId & 0x00FFF000) >> 12) & 0xFFFF;
-
-        const auto itor = m_liteToServer.find(liteId);
-        if (itor != std::end(m_liteToServer))
-        {
-            aModId = itor->second;
-            aBaseId = aGameId & 0x00000FFF;
-            return true;
-        }
-
-        return false;
-    }
-
-    // Here we have a standard mod
-    aModId = m_standardToServer[hiByte & 0xFF];
-    aBaseId = aGameId & 0x00FFFFFFu;
-
-    return true;
+    // The form is from a plugin this game did not send to the server, so it cannot be told to the others.
+    if (m_unmatchedLocalIds.First(UnmatchedIds::LocalKey(aGameId)))
+        spdlog::debug("Form {:X} is from a plugin with no server id, it is not synced", aGameId);
+    return false;
 }
 
 bool ModSystem::GetServerModId(uint32_t aGameId, GameId& aServerId) const noexcept
@@ -50,25 +40,12 @@ bool ModSystem::GetServerModId(uint32_t aGameId, GameId& aServerId) const noexce
 
 uint32_t ModSystem::GetGameId(uint32_t aServerId, uint32_t aFormId) const noexcept
 {
-    auto itor = m_serverToGame.find(aServerId);
-    if (itor != std::end(m_serverToGame))
-    {
-        if (itor->second.isLite)
-        {
-            aFormId &= 0xFFFu;
-            aFormId |= 0xFE000000u;
-            aFormId |= uint32_t(itor->second.id) << 12;
-        }
-        else
-        {
-            aFormId &= 0x00FFFFFFu;
-            aFormId |= uint32_t(itor->second.id) << 24;
-        }
-
-        return aFormId;
-    }
-
-    return 0;
+    const uint32_t cGameId = m_mapping.ToGame(aServerId, aFormId);
+    if (cGameId == 0 && (aServerId != 0 || aFormId != 0) && m_unmatchedServerIds.First(aServerId))
+        spdlog::debug(
+            "Form {:X} of server mod {} is not matched in this game (a plugin this game lacks, or a form past a light plugin's range), it falls back to no form", aFormId,
+            aServerId);
+    return cGameId;
 }
 
 uint32_t ModSystem::GetGameId(const GameId& acGameId) const noexcept
@@ -76,33 +53,64 @@ uint32_t ModSystem::GetGameId(const GameId& acGameId) const noexcept
     return GetGameId(acGameId.ModId, acGameId.BaseId);
 }
 
+bool ModSystem::GetSharedSpellId(uint32_t aId, GameId& aSpell) const noexcept
+{
+    if (GetServerModId(aId, aSpell) && !GameExtension::RejectMagic(aSpell))
+        return true;
+    aSpell = {};
+    return false;
+}
+uint32_t ModSystem::GetLocalSpellId(const GameId& acSpell) const noexcept
+{
+    return GameExtension::RejectMagic(acSpell) ? 0 : GetGameId(acSpell);
+}
+
 void ModSystem::HandleMods(const Mods& acMods) noexcept
 {
-    m_serverToGame.clear();
-    m_liteToServer.clear();
-    std::memset(m_standardToServer, 0, sizeof(m_standardToServer));
-    m_standardToServer[0xFF] = std::numeric_limits<uint32_t>::max();
-
+    GameExtension::Module(0, nullptr);
+    m_mapping.Reset();
+    m_unmatchedServerIds.Clear();
+    m_unmatchedLocalIds.Clear();
     const auto pModManager = ModManager::Get();
-
     for (const auto& mod : acMods.ModList)
     {
+        GameExtension::Module(mod.Id, mod.Filename.c_str());
         if (Mod* pMod = pModManager->GetByName(mod.Filename.c_str()))
         {
-            if (mod.IsLite)
-            {
-                m_serverToGame.emplace(mod.Id, GameMod{static_cast<uint16_t>(pMod->GetId() & 0xFFFu), true});
-                m_liteToServer.emplace(pMod->GetId(), mod.Id);
-            }
-            else
-            {
-                m_serverToGame.emplace(mod.Id, GameMod{static_cast<uint16_t>(pMod->GetId() & 0xFFu), false});
-                m_standardToServer[pMod->GetId() & 0xFF] = mod.Id;
-            }
+            if (!m_mapping.Add(pMod->GetId(), pMod->IsLite(), mod.Id, mod.IsLite))
+                spdlog::error("Invalid or conflicting mapping for mod {}, server lite? {}, local lite? {}, id: {:X}", mod.Filename.c_str(), mod.IsLite, pMod->IsLite(), mod.Id);
         }
         else
         {
             spdlog::error("Failed to find mod {}, is lite? {}, id: {:X}", mod.Filename.c_str(), mod.IsLite, mod.Id);
         }
     }
+}
+
+void ModSystem::HandleDisconnected(const DisconnectedEvent&) noexcept
+{
+    GameExtension::Module(0, nullptr);
+    m_mapping.Reset();
+    m_unmatchedServerIds.Clear();
+    m_unmatchedLocalIds.Clear();
+}
+
+// The server tells both players of a pair once when their plugin lists differ; what only one game loads cannot be matched in the other.
+void ModSystem::HandleModListsDiffer(const NotifyModListsDiffer& acMessage) const noexcept
+{
+    constexpr uint32_t cPlaceColour = 0xD4AF37;
+    constexpr size_t cShown = 6;
+
+    const std::string cWho = acMessage.Username.c_str();
+
+    spdlog::debug("Mod lists: {} loads other plugins: {} only there, {} only here", cWho, acMessage.OnlyThere.size(), acMessage.OnlyHere.size());
+
+    std::string message = "You and " + cWho + " don't load the same plugins, so things from a plugin only one of you has won't show for the other.";
+    if (!acMessage.OnlyThere.empty())
+        message += " Only " + cWho + " has: " + PluginList::Joined(acMessage.OnlyThere, cShown).c_str() + ".";
+    if (!acMessage.OnlyHere.empty())
+        message += " Only you have: " + std::string(PluginList::Joined(acMessage.OnlyHere, cShown).c_str()) + ".";
+
+    World::Get().GetOverlayService().SendSystemMessage(message);
+    VRBanner::Show("Not the same plugins as " + cWho, cPlaceColour, 60, 8.f);
 }

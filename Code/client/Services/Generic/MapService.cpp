@@ -68,11 +68,13 @@ void MapService::OnNotifySetWaypoint(const NotifySetWaypoint& acMessage) noexcep
         return;
     }
 
-    PlayerCharacter::Get()->SetWaypoint(&pos, reinterpret_cast<TESWorldSpace*>(pLocation));
+    if (PlayerCharacter* pPlayer = PlayerCharacter::Get())
+        pPlayer->SetWaypoint(&pos, reinterpret_cast<TESWorldSpace*>(pLocation));
 }
 
 void MapService::OnNotifyRemoveWaypoint(const NotifyRemoveWaypoint& acMessage) noexcept
 {
-    PlayerCharacter::Get()->RemoveWaypoint();
+    if (PlayerCharacter* pPlayer = PlayerCharacter::Get())
+        pPlayer->RemoveWaypoint();
 }
 

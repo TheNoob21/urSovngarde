@@ -9,4 +9,5 @@ struct ConnectionErrorEvent
     ConnectionErrorEvent() = default;
 
     TiltedPhoques::String ErrorDetail;
+    TiltedPhoques::String HudMessage;
 };

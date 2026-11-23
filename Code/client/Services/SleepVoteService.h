@@ -83,6 +83,12 @@ private:
     void FollowWaitAfterRefusal() noexcept;
 
     /**
+     * Tell the server when this game goes to a loading screen or the main menu, and when it is back in the world.
+     * A player away for a while then no longer holds the shared vote there.
+     */
+    void ReportAwayOrBack() noexcept;
+
+    /**
      * Show the wait after a refusal in the menu.
      *
      * @param aSeconds The seconds left.
@@ -139,6 +145,7 @@ private:
     TransportService& m_transport;
     CalendarService& m_calendar;
     bool m_awaitingResync = false; // an agreed skip's time resync is still to come
+    bool m_away = false;           // the server was last told this game is loading or at the main menu
     std::string m_voteLine;        // where the vote stands, for the menu; empty when no vote is open
     std::string m_waitLine;        // the wait after a refusal, for the menu; empty when the player does not wait
     const void* m_waitMenu = nullptr; // the menu the wait was last written for; only compared, never read

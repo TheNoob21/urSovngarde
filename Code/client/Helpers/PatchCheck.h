@@ -47,6 +47,20 @@ inline bool IsCall(const uint8_t* apAddress) noexcept
     return (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
 }
 
+//! True when apAddress holds a call (IsCall) to apExpected, or to code outside the image [aImageBegin, aImageEnd): a plugin
+//! that swapped the call first points it at its own code and calls apExpected from there. A call to another function of
+//! the image is some other call.
+inline bool IsCallTo(const uint8_t* apAddress, const void* apExpected, const uintptr_t aImageBegin, const uintptr_t aImageEnd) noexcept
+{
+    if (!apExpected || !IsCall(apAddress))
+        return false;
+
+    int32_t displacement;
+    std::memcpy(&displacement, apAddress + 1, sizeof(displacement));
+    const uintptr_t cTarget = reinterpret_cast<uintptr_t>(apAddress) + 5 + static_cast<intptr_t>(displacement);
+    return cTarget == reinterpret_cast<uintptr_t>(apExpected) || cTarget < aImageBegin || cTarget >= aImageEnd;
+}
+
 //! True when apAddress holds a two-byte conditional jump: 70 to 7F, then its offset.
 inline bool IsShortConditionalJump(const uint8_t* apAddress) noexcept
 {

@@ -10,7 +10,7 @@ struct TransportService;
  * Reads again what a local NPC wears after its equipment changes are sent, and corrects the other games' copies when it differs.
  * Its owner's game sends each equip and unequip its hooks see, but the game also equips through paths they do not see.
  * After an unequip the hooks saw, a quest put a shield back on with none: the other game kept the unequip.
- * The correction is an equipment snapshot, and a snapshot corrects only the copy's hands, spells and shield; other armor stays as the copy has it.
+ * The correction is an equipment snapshot, and a snapshot corrects the copy's hands, spells, worn armor and ammo (ApplyWornItems).
  */
 namespace NpcEquipmentCheck
 {
@@ -57,11 +57,24 @@ void Note(uint32_t aFormId, uint32_t aServerId, uint32_t aOwnershipEpoch, const 
 void Run(World& aWorld, TransportService& aTransport) noexcept;
 
 /**
- * Make an NPC's copy wear the shield its owner wears, or none, from an equipment snapshot.
- * A shield the copy lacks is added to its inventory first; when that fails, the copy keeps its own.
+ * Remember what a remote copy's owner wears, from the copy's spawn or assignment data, so its next snapshot can take off what the owner took off.
+ *
+ * @param apActor The copy. Nothing is kept for an actor this game owns.
+ * @param acOwnerInventory The inventory its owner's game sent, with the worn flags.
+ * @param aAddOnly True for a single equip or unequip message: its pieces are added to what is remembered, and nothing is forgotten.
+ *        Only a snapshot, which is compared with what the copy wears, or the spawn data replaces the list; otherwise a piece the owner
+ *        lost unseen before an unrelated message would be forgotten while the copy still wears it, and never come off.
+ */
+void NoteOwnerEquipment(Actor* apActor, const Inventory& acOwnerInventory, bool aAddOnly = false) noexcept;
+
+/**
+ * Make an NPC's copy wear every armor piece its owner wears (shield, rings, amulet, helmet and the rest) and its ammo, from an equipment snapshot.
+ * A piece of the copy comes off when a piece its owner wears takes its slot, or when its owner wore it before (spawn data or an earlier snapshot) and no longer does.
+ * A piece its owner was never known to wear stays when nothing takes its slot: its owner may wear one there that this game cannot name.
+ * A piece the copy lacks is added to its inventory first; when that fails, the copy keeps its own.
  *
  * @param apActor The copy.
  * @param acOwnerEquipment The equipment its owner's game sent.
  */
-void ApplyShield(Actor* apActor, const Inventory& acOwnerEquipment) noexcept;
+void ApplyWornItems(Actor* apActor, const Inventory& acOwnerEquipment) noexcept;
 } // namespace NpcEquipmentCheck

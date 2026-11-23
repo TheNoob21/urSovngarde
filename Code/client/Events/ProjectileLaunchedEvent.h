@@ -6,6 +6,7 @@
 struct ProjectileLaunchedEvent
 {
     NiPoint3 Origin;
+    uint32_t Handle{}, Form{};
     uint32_t ProjectileBaseID;
     uint32_t ShooterID;
     uint32_t WeaponID;

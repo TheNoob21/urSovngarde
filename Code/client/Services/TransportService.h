@@ -12,6 +12,7 @@ struct UpdateEvent;
 struct ClientMessage;
 struct AuthenticationResponse;
 struct NotifySettingsChange;
+struct NotifyServerIdentity;
 
 struct World;
 
@@ -64,6 +65,8 @@ struct TransportService : Client
      * @return Its address as "host:port".
      */
     [[nodiscard]] const std::string& GetServerEndpoint() const noexcept { return m_serverEndpoint; }
+    [[nodiscard]] const String& GetServerName() const noexcept { return m_serverName; }
+    [[nodiscard]] uint32_t GetServerPlayerCount() const noexcept { return m_serverPlayerCount; }
 
     /**
      * Check whether the server this game connects to, or is on, was given a password.
@@ -84,6 +87,7 @@ protected:
     // Packet handlers
     void HandleAuthenticationResponse(const AuthenticationResponse& acMessage) noexcept;
     void HandleNotifySettingsChange(const NotifySettingsChange& acMessage) noexcept;
+    void HandleServerIdentity(const NotifyServerIdentity& acMessage) noexcept;
 
 private:
     World& m_world;
@@ -91,12 +95,15 @@ private:
     bool m_connected;
     double m_lastPollTime{};
     ServerPassword m_serverPassword{};
+    String m_serverName{};
+    uint32_t m_serverPlayerCount{};
     std::string m_serverEndpoint{};
     uint32_t m_localPlayerId;
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_sendServerMessageConnection;
     entt::scoped_connection m_settingsChangeConnection;
+    entt::scoped_connection m_serverIdentityConnection;
     entt::scoped_connection m_connectedConnection;
     entt::scoped_connection m_disconnectedConnection;
     std::function<void(UniquePtr<ServerMessage>&)> m_messageHandlers[kServerOpcodeMax];

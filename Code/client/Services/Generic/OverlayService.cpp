@@ -1,4 +1,6 @@
 #include <TiltedOnlinePCH.h>
+
+#include <exception>
 #include <BuildVersion.h>
 #include <Helpers/Throttle.h>
 #include <Helpers/PerfScope.h>
@@ -11,6 +13,7 @@
 #include <OverlayRenderHandlerD3D11.hpp>
 
 #include <Systems/RenderSystemD3D11.h>
+#include <Systems/VROverlaySupport.h>
 #ifdef SKYRIMVR
 #include <UI/Menu/VRDashboard.h>
 #include <UI/Menu/VRPage.h>
@@ -21,7 +24,9 @@
 #include <Utils.h>
 
 #include <Services/OverlayClient.h>
+#include <Services/OverlayNotice.h>
 #include <Services/TransportService.h>
+#include <Services/VRConnectService.h>
 
 #include <Messages/NotifyChatMessageBroadcast.h>
 #include <Messages/NotifyPlayerList.h>
@@ -76,22 +81,22 @@ private:
     RenderSystemD3D11* m_pRenderSystem;
 };
 
-String GetCellName(const GameId& aWorldSpaceId, const GameId& aCellId) noexcept
+String GetCellName(const GameId& acWorldSpaceId, const GameId& acCellId) noexcept
 {
     auto& modSystem = World::Get().GetModSystem();
 
     String cellName = "UNKNOWN";
 
-    if (aWorldSpaceId)
+    if (acWorldSpaceId)
     {
-        const uint32_t worldSpaceId = modSystem.GetGameId(aWorldSpaceId);
+        const uint32_t worldSpaceId = modSystem.GetGameId(acWorldSpaceId);
         TESWorldSpace* pWorldSpace = Cast<TESWorldSpace>(TESForm::GetById(worldSpaceId));
         if (pWorldSpace)
             cellName = pWorldSpace->GetName();
     }
     else
     {
-        const uint32_t cellId = modSystem.GetGameId(aCellId);
+        const uint32_t cellId = modSystem.GetGameId(acCellId);
         TESObjectCELL* pCell = Cast<TESObjectCELL>(TESForm::GetById(cellId));
         if (pCell)
             cellName = pCell->GetName();
@@ -157,7 +162,16 @@ void OverlayService::CreateVR() noexcept
     // CEF can only be initialized once per process, so a failed attempt is not retried.
     if (m_vrOverlayAttempted)
         return;
+    // Decided once OpenVR is up; until then, try again on a later call.
+    if (!GetModuleHandleW(L"openvr_api.dll"))
+        return;
     m_vrOverlayAttempted = true;
+
+    if (!VROverlaySupport::CefAvailable())
+    {
+        spdlog::debug("OverlayService: no browser available; connect.txt drives connecting");
+        return;
+    }
 
     // The page renders offscreen; the presenters (the SteamVR dashboard, the panel inside the game) show its pictures.
     m_pVRPage = TiltedPhoques::MakeUnique<VRPage>();
@@ -172,6 +186,18 @@ void OverlayService::CreateVR() noexcept
 // The cost is a rare crash at libcef.dll+7A52582, when CEF cannot start that process.
 void OverlayService::CreateOverlay(OverlayApp::RenderProvider* apProvider) noexcept
 {
+    // libcef.dll is delay-loaded: without it, the first CEF call would kill the process.
+    if (!VROverlaySupport::CefAvailable())
+    {
+#ifndef SKYRIMVR
+        // Flat has no other on-screen server list; VR without a browser connects through connect.txt by design.
+        m_overlayDropped = true;
+        // SetActive returns early without the overlay, so the page would stay "open" for MenuService.
+        m_active = false;
+#endif
+        return;
+    }
+
     m_pOverlay = new OverlayApp(apProvider, new ::OverlayClient(m_transport, apProvider->Create()));
 
     if (!m_pOverlay->Initialize())
@@ -185,12 +211,51 @@ void OverlayService::CreateOverlay(OverlayApp::RenderProvider* apProvider) noexc
 #ifdef SKYRIMVR
         // Without CEF every overlay call would kill the process; keep the overlay absent instead.
         m_pOverlay = nullptr;
+        m_overlayDropped = true;
+        // SetActive returns early without the overlay, so the page would stay "open" for MenuService.
+        m_active = false;
         return;
 #endif
     }
 
-    m_pOverlay->GetClient()->Create();
+    // The page's Direct3D resources can be refused by a device (DirectXTK throws on a failed call): an exception here ended
+    // the process at start-up (0xC0000409, 2026-11-22). The game runs without the page instead. The render handler is
+    // created directly, as OverlayClient::Create is noexcept and would end the process before the exception got here.
+    try
+    {
+        if (const auto pRenderHandler = m_pOverlay->GetClient()->GetOverlayRenderHandler())
+            pRenderHandler->Create();
+    }
+    catch (const std::exception& acException)
+    {
+        spdlog::error("Overlay could not create its Direct3D resources, the game runs without it: {}", acException.what());
+        m_pOverlay = nullptr;
+        m_overlayDropped = true;
+        // SetActive returns early without the overlay, so the page would stay "open" for MenuService.
+        m_active = false;
+    }
 }
+
+namespace
+{
+// The render handler makes the page's Direct3D resources again when they are missing at a draw and after a device reset, and a
+// refusal throws there as it does at start-up (CreateOverlay). OverlayClient's Render and Reset are noexcept and would end the
+// process, so the handler is called directly. False when it threw.
+template <class TCall> bool CallRenderHandler(OverlayApp* apOverlay, const char* acpWhen, const TCall& acCall) noexcept
+{
+    try
+    {
+        if (const auto pRenderHandler = apOverlay->GetClient()->GetOverlayRenderHandler())
+            acCall(*pRenderHandler);
+        return true;
+    }
+    catch (const std::exception& acException)
+    {
+        spdlog::error("Overlay could not make its Direct3D resources {}, the game runs without it: {}", acpWhen, acException.what());
+        return false;
+    }
+}
+} // namespace
 
 void OverlayService::Render() noexcept
 {
@@ -207,7 +272,14 @@ void OverlayService::Render() noexcept
     // Catches the state up the moment the page finishes loading; a no-op once the UI is in step.
     PushUiState();
 
-    m_pOverlay->GetClient()->Render();
+    if (!CallRenderHandler(m_pOverlay.get(), "to draw", [](auto& aHandler) { aHandler.Render(); }))
+    {
+        m_pOverlay = nullptr;
+        m_overlayDropped = true;
+        // SetActive returns early without the overlay, so the page would stay "open" for MenuService.
+        m_active = false;
+        return;
+    }
 
 #ifdef SKYRIMVR
     // The presenters first, which say whether they show the page; then the page, told whether it is seen.
@@ -220,12 +292,18 @@ void OverlayService::Render() noexcept
 #endif
 }
 
-void OverlayService::Reset() const noexcept
+void OverlayService::Reset() noexcept
 {
     if (!m_pOverlay)
         return;
 
-    m_pOverlay->GetClient()->Reset();
+    if (!CallRenderHandler(m_pOverlay.get(), "after a device reset", [](auto& aHandler) { aHandler.Reset(); }))
+    {
+        m_pOverlay = nullptr;
+        m_overlayDropped = true;
+        // SetActive returns early without the overlay, so the page would stay "open" for MenuService.
+        m_active = false;
+    }
 }
 
 void OverlayService::Reload() noexcept
@@ -358,6 +436,7 @@ void OverlayService::SetVersion(const std::string& acVersion)
     auto pArguments = CefListValue::Create();
 
     pArguments->SetString(0, acVersion);
+    pArguments->SetString(1, BUILD_PROTOCOL);
     m_pOverlay->ExecuteAsync("setVersion", pArguments);
 }
 
@@ -415,8 +494,17 @@ void OverlayService::OnUpdate(const UpdateEvent&) noexcept
     Render();
 #endif
 
+    // Without the page a player sees no server list and no reason why: one HUD line, once the HUD is there (OverlayNotice).
     if (!m_pOverlay)
+    {
+        PlayerCharacter* pPlayer = PlayerCharacter::Get();
+        if (OverlayNotice::ShowDroppedLine(m_overlayDropped, m_overlayDroppedShown, pPlayer && pPlayer->GetNiNode()))
+        {
+            m_overlayDroppedShown = true;
+            Utils::ShowModHudMessage(OverlayNotice::kDroppedLine);
+        }
         return;
+    }
 
     RunDebugDataUpdates();
     RunPlayerHealthUpdates();
@@ -443,7 +531,10 @@ void OverlayService::OnDisconnectedEvent(const DisconnectedEvent&) noexcept
     if (!m_pOverlay)
         return;
 
-    m_pOverlay->ExecuteAsync("disconnect");
+    const auto status = m_world.ctx().at<VRConnectService>().GetStatus();
+    auto arguments = CefListValue::Create();
+    arguments->SetBool(0, status != CoopMenu::Status::kOffline);
+    m_pOverlay->ExecuteAsync("disconnect", arguments);
 }
 
 void OverlayService::OnWaitingFor3DRemoved(entt::registry& aRegistry, entt::entity aEntity) const noexcept
@@ -557,8 +648,11 @@ TiltedPhoques::String DescribeConnectionError(const TiltedPhoques::String& acDet
 
 void OverlayService::OnConnectionError(const ConnectionErrorEvent& acConnectedEvent) const noexcept
 {
+    if (!acConnectedEvent.HudMessage.empty())
+        Utils::ShowHudMessage(acConnectedEvent.HudMessage);
 #ifdef SKYRIMVR
-    Utils::ShowModHudMessage(DescribeConnectionError(acConnectedEvent.ErrorDetail));
+    else
+        Utils::ShowModHudMessage(DescribeConnectionError(acConnectedEvent.ErrorDetail));
 #endif
     if (!m_pOverlay)
         return;

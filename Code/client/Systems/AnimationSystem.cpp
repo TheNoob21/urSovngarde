@@ -1,6 +1,12 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Systems/AnimationSystem.h>
+#include <Systems/InterpolationSystem.h>
+#include <Systems/JumpSync.h>
+#include <Systems/BodySolver.h>
+#include <FlyState.h>
+#include <SneakState.h>
+#include <PlayerGraphEvents.h>
 
 #include <Games/Animation/TESActionData.h>
 #include <Games/Animation/ActorMediator.h>
@@ -12,21 +18,31 @@
 #include <Forms/ActorValueInfo.h>
 #include <AI/AIProcess.h>
 #include <Misc/MiddleProcess.h>
+#include <Games/Misc/MenuTopicManager.h>
 
 #include <Messages/RequestActionEvents.h>
 #include <Structs/ReferenceUpdate.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_VampireLordBehavior.h>
 
 #include <Components.h>
 #include <World.h>
 #include <Copies/Takeover.h>
+#include <Services/MountService.h>
+#include <Copies/CopyRegistry.h>
+#include <NpcFurniture.h>
+#include <DialogueFacing.h>
+#include <ActionModIds.h>
 
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESWorldSpace.h>
 #include <NetImmerse/NiTransform.h>
 
+#include <Games/Skyrim/CopyBodyRules.h>
+#include <Games/Skyrim/VR/VRBodySync.h>
+#include <Services/CopyWorkGate.h>
+
 #ifdef SKYRIMVR
 #include <PlayerCharacter.h>
-#include <Games/Skyrim/VR/VRBodySync.h>
 #include <Interface/UI.h>
 #include <BSAnimationGraphManager.h>
 #include <Structs/AnimationGraphDescriptorManager.h>
@@ -49,6 +65,14 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
     const auto it = std::begin(actions);
     if (it != std::end(actions) && it->Tick <= aTick)
     {
+        // GetExtension() returns null for an actor this client did not allocate (Actor::ForcePosition); no owner's action plays on it.
+        auto* pExtension = apActor->GetExtension();
+        if (!pExtension)
+        {
+            actions.clear();
+            return;
+        }
+
         // Check if animation graph is ready before attempting to play animations
         if (!apActor->animationGraphHolder.IsReady())
         {
@@ -74,6 +98,24 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
 
         const auto& first = *it;
 
+        // Another player's own graph event, with no action behind it: sent to its copy's graph, if it is one sent at all.
+        // One from the history a copy is spawned with is over; any other kind of copy, name or rate is ignored.
+        if (PlayerGraphEvents::IsGraphEvent(first.Type, first.ActionId))
+        {
+            const auto cNow = std::chrono::steady_clock::now();
+            if (aAnimationComponent.ReplayCount == 0 && pExtension->IsRemotePlayer() && aAnimationComponent.GraphEventGate.Allows(first.EventName, cNow) &&
+                aAnimationComponent.GraphEvents.Take(cNow))
+            {
+                BSFixedString event(first.EventName.c_str());
+                const bool cTaken = apActor->SendAnimationEvent(&event);
+                spdlog::debug("Player graph events: '{}' on player copy {:X} {}", first.EventName.c_str(), apActor->formID, cTaken ? "taken" : "refused");
+            }
+            if (aAnimationComponent.ReplayCount > 0)
+                aAnimationComponent.ReplayCount--;
+            actions.pop_front();
+            return;
+        }
+
         const auto actionId = first.ActionId;
         const auto targetId = first.TargetId;
 
@@ -90,15 +132,111 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
         // Another player's copy never goes down (ActorValueService keeps it at 25 health).
         // It keeps its own life state too, and the owner's "Ragdoll" is not replayed on it.
         // A replayed fall would leave the copy on the floor, since the later "GetUpBegin" does not stand it up.
-        const bool cPlayerCopy = apActor->GetExtension()->IsRemotePlayer();
+        const bool cPlayerCopy = pExtension->IsRemotePlayer();
+        // Its owner's fall and get-up are read from them (InterpolationSystem, PlayerKnockMirror.h),
+        // except from the history a copy is spawned with: that fall is over.
+        if (cPlayerCopy && aAnimationComponent.ReplayCount == 0)
+            InterpolationSystem::NotePlayerOwnerAction(apActor->formID, first.EventName.c_str(), first.State1);
+
+        // Its owner's stop from a fall before the one its copy kneels in now: that fall's history came after the live actions.
+        // Played, its state word and its stop would stand the copy up while its owner's NPC is down again.
+        const bool cOwnersStop = !first.EventName.empty() && _stricmp(first.EventName.c_str(), "bleedOutStop") == 0;
+        if (cPlayerCopy && cOwnersStop)
+            InterpolationSystem::NotePlayerOwnerStop(apActor->formID, first.Tick);
+        if (cOwnersStop && CopyBodyRules::StopBeforeFall(!cPlayerCopy, first.Tick, pExtension->OwnerFallTick.load(std::memory_order_relaxed)))
+        {
+            spdlog::debug(
+                "KnockReplay: copy {:X} dropped its owner's 'bleedOutStop' of tick {}, from before its owner's fall at tick {}", apActor->formID, first.Tick,
+                pExtension->OwnerFallTick.load(std::memory_order_relaxed));
+            aAnimationComponent.LastRanAction = first;
+            if (aAnimationComponent.ReplayCount > 0)
+                aAnimationComponent.ReplayCount--;
+            actions.pop_front();
+            return;
+        }
+        if (!cPlayerCopy && !first.EventName.empty() && _stricmp(first.EventName.c_str(), "bleedOutStart") == 0 &&
+            first.Tick > pExtension->OwnerFallTick.load(std::memory_order_relaxed))
+            pExtension->OwnerFallTick.store(first.Tick, std::memory_order_relaxed);
+
         const uint32_t cOwnStateBefore = apActor->actorState.flags1;
         uint32_t keptMask = cKnockStateMask;
-        if (cPlayerCopy || apActor->actorState.IsDeadOrDying())
+        // FurnitureService and MountService set a player copy's native seat; actions still drive its graph.
+        if (cPlayerCopy)
+            keptMask |= NpcFurniture::kSitSleepMask;
+        // A live owner's first action used to erase a copy's own essential-down/bleedout state while its graph still knelt.
+        // Interpolation then saw an alive copy with no knock state and carried it after the owner, never reaching its recovery.
+        // Keep the local down state until OnBleedingOut has seen the owner's separate up word for long enough.
+        if (CopyBodyRules::KeepLifeStateHere(cPlayerCopy, cOwnStateBefore))
             keptMask |= cLifeStateMask;
-        apActor->actorState.flags1 = (first.State1 & ~keptMask) | (apActor->actorState.flags1 & keptMask);
+
+        // A copy left away from where its owner's NPC is (beyond the loaded area here) does not sit down mid-road as its owner
+        // does in its seat over there: that way in is left out, and the copy keeps its own seat state.
+        if (!cPlayerCopy)
+        {
+            if (const auto cOwnerPlace = CopyRegistry::AwayFromOwner(apActor->formID))
+            {
+                const TESWorldSpace* pWorldSpace = apActor->GetWorldSpace();
+                const TESObjectCELL* pCell = pWorldSpace ? nullptr : apActor->GetParentCellEx();
+                const bool cSameSpace = NpcFurniture::SameSpace(cOwnerPlace->WorldSpaceId, cOwnerPlace->CellId, pWorldSpace ? pWorldSpace->formID : 0, pCell ? pCell->formID : 0);
+                const auto& cOwnerPosition = cOwnerPlace->Position;
+                const float cDistance =
+                    glm::distance(glm::vec3(apActor->position.x, apActor->position.y, apActor->position.z), glm::vec3(cOwnerPosition[0], cOwnerPosition[1], cOwnerPosition[2]));
+                if (NpcFurniture::SkipSeatReplay(NpcFurniture::IsSeatReplay(first.EventName.c_str(), first.State1), true, cSameSpace, cDistance))
+                {
+                    keptMask |= NpcFurniture::kSitSleepMask;
+                    if (NpcFurniture::IsSeatReplay(first.EventName.c_str(), 0))
+                    {
+                        if (cSameSpace)
+                            spdlog::debug(
+                                "ReplayDiag: '{}' not replayed on copy {:X}; its owner's NPC sits {:.0f} units from it, beyond the loaded area here", first.EventName.c_str(),
+                                apActor->formID, cDistance);
+                        else
+                            spdlog::debug(
+                                "ReplayDiag: '{}' not replayed on copy {:X}; its owner's NPC sits in another cell or world space", first.EventName.c_str(), apActor->formID);
+                        aAnimationComponent.LastRanAction = first;
+                        if (aAnimationComponent.ReplayCount > 0)
+                            aAnimationComponent.ReplayCount--;
+                        actions.pop_front();
+                        return;
+                    }
+                }
+            }
+        }
+        // Its flight state is its own too, set through the game (FlyState.h): written over raw, the copy kept the ground's
+        // character controller, and fell the moment its game took it over in the air.
+        apActor->actorState.flags1 = FlyState::CopyFlags1(first.State1, apActor->actorState.flags1, keptMask);
+        // A vampire lord's copy too: its owner's hover, if the game gives it a flight state, is set the same way.
+        const bool cVampireLord = pExtension->GraphDescriptorHash == AnimationGraphDescriptor_VampireLordBehavior::m_key;
+        if (FlyState::SetThroughGame(cVampireLord || apActor->IsDragon(), apActor->movementDrivenControl != nullptr, first.State1, apActor->actorState.flags1))
+        {
+            if (cVampireLord)
+                spdlog::debug("FlyState: vampire lord copy {:X} set to its owner's flight state {}", apActor->formID, FlyState::Of(first.State1));
+            apActor->SetFlyState(FlyState::Of(first.State1));
+        }
         apActor->actorState.flags2 = first.State2;
 
-        if (cPlayerCopy && !first.EventName.empty() && _stricmp(first.EventName.c_str(), "Ragdoll") == 0)
+        // On VR the owner's own "Ragdoll" knocks the copy down when it mirrors its owner's falls, as an NPC copy's does here.
+        // It plays only when the mirror takes it as the knock a flat frame would make: an alive owner's live word, this Ragdoll's
+        // own included, a copy on its feet, not pinned, not dying and not knocked already (InterpolationSystem::AdmitPlayerRagdoll).
+        // On a flat screen the game's own knock does it instead (InterpolationSystem), as the action left the copy without a knock state.
+        const bool cOwnersRagdoll = cPlayerCopy && !first.EventName.empty() && _stricmp(first.EventName.c_str(), "Ragdoll") == 0;
+#ifdef SKYRIMVR
+        const bool cMirrorsKnocks = cOwnersRagdoll;
+        const bool cMirroredRagdoll = cMirrorsKnocks && InterpolationSystem::AdmitPlayerRagdoll(aWorld, apActor, aAnimationComponent.ReplayCount > 0, first.State1);
+#else
+        constexpr bool cMirrorsKnocks = false;
+        constexpr bool cMirroredRagdoll = false;
+#endif
+        if (cMirrorsKnocks && !cMirroredRagdoll)
+        {
+            spdlog::debug("KnockDown: owner's 'Ragdoll' not played on player copy {:X}; its mirror did not take it as a knock", apActor->formID);
+            aAnimationComponent.LastRanAction = first;
+            if (aAnimationComponent.ReplayCount > 0)
+                aAnimationComponent.ReplayCount--;
+            actions.pop_front();
+            return;
+        }
+        if (cOwnersRagdoll && !cMirroredRagdoll)
         {
             static std::chrono::steady_clock::time_point s_nextSaid{};
             if (std::chrono::steady_clock::now() >= s_nextSaid)
@@ -113,9 +251,106 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
             return;
         }
 
-        apActor->LoadAnimationVariables(first.Variables);
+        // The owner's climb on or off its horse names the horse by its own game's id, and is played on the copy by MountService, which
+        // seats the copy on its horse here: the climb is only noted, so that the copy climbs on with its owner (and never twice).
+        if (!first.EventName.empty() && MountService::TakesClimbs() &&
+            (_stricmp(first.EventName.c_str(), "HorseEnter") == 0 || _stricmp(first.EventName.c_str(), "HorseExit") == 0))
+        {
+            // Not one from the history a copy is spawned with: that rider has been riding for a while.
+            if (_stricmp(first.EventName.c_str(), "HorseEnter") == 0 && aAnimationComponent.ReplayCount == 0)
+                MountService::NoteOwnerClimb(apActor->formID);
+            aAnimationComponent.LastRanAction = first;
+            if (aAnimationComponent.ReplayCount > 0)
+                aAnimationComponent.ReplayCount--;
+            actions.pop_front();
+            return;
+        }
+
+        // Its legs keep the speed it is shown moving at, which its interpolation set this frame.
+        AnimationVariables variables = first.Variables;
+        InterpolationSystem::HoldStride(apActor, variables);
+        apActor->LoadAnimationVariables(variables);
 
         aAnimationComponent.LastRanAction = first;
+
+#ifndef SKYRIMVR
+        // An essential NPC brought to 0 by its owner's game falls into its bleedout there and kneels; its copy here, kept above 0 health,
+        // took that fall as a full ragdoll and lay through the bleedout while its owner's knelt (live-copy-knockdown-place).
+        // So the copy kneels too, and lies only when its owner's is thrown over from there.
+        if (!cPlayerCopy && !first.EventName.empty() && (_stricmp(first.EventName.c_str(), "Ragdoll") == 0 || _stricmp(first.EventName.c_str(), "DeathAnim") == 0))
+        {
+            bool deadAtOwner = true;
+            float ownerHealth = std::numeric_limits<float>::quiet_NaN();
+            const auto remotes = aWorld.view<RemoteComponent>();
+            for (const auto entity : remotes)
+                if (remotes.get<RemoteComponent>(entity).CachedRefId == apActor->formID)
+                {
+                    deadAtOwner = remotes.get<RemoteComponent>(entity).DeadAtOwner;
+                    ownerHealth = remotes.get<RemoteComponent>(entity).OwnerHealth;
+                    break;
+                }
+            // Kept at 1 health here (ActorValueService), the copy has healed a little by the time its owner's fall is replayed.
+            constexpr float cCopyHealthFloor = 1.f;
+            const float cHealth = apActor->GetActorValue(ActorValueInfo::kHealth);
+            if (CopyBodyRules::KneelsInsteadOfFalling(
+                    VRBodySync::MovesFlatRagdolls(), true, pExtension && pExtension->IsRemote(), apActor->IsEssential(),
+                    CopyBodyRules::AtOwnersHealthFloor(cHealth, ownerHealth, cCopyHealthFloor), apActor->actorState.IsDeadOrDying(), deadAtOwner, first.State1))
+            {
+                BSFixedString event("bleedOutStart");
+                const bool cTaken = apActor->SendAnimationEvent(&event);
+                spdlog::debug(
+                    "KnockReplay: essential copy {:X} kneels for its owner's '{}' ({}; health {:.0f} here, {:.0f} at its owner)", apActor->formID, first.EventName.c_str(),
+                    cTaken ? "taken" : "not taken", cHealth, ownerHealth);
+                if (cTaken)
+                {
+                    InterpolationSystem::NoteReplayedFall(aWorld, apActor, true, pExtension->NativeLifeGeneration.load(std::memory_order_relaxed), first.Tick);
+                    if (first.Tick > pExtension->OwnerFallTick.load(std::memory_order_relaxed))
+                        pExtension->OwnerFallTick.store(first.Tick, std::memory_order_relaxed);
+                }
+                if (aAnimationComponent.ReplayCount > 0)
+                    aAnimationComponent.ReplayCount--;
+                actions.pop_front();
+                return;
+            }
+        }
+#endif
+
+        // Its owner's NPC got up from its bleedout, while the copy's own is kept here: the game ends it its own way, writing it alive
+        // and then performing the stop (Actor::SetLifeState). Forced as an action while its life still reads down, the stop was refused,
+        // and the copy knelt on while its owner's NPC fought (Lydia, 2026-11-06).
+        if (!cPlayerCopy && !first.EventName.empty() && _stricmp(first.EventName.c_str(), "bleedOutStop") == 0)
+        {
+            bool deadAtOwner = true;
+            const auto remotes = aWorld.view<RemoteComponent>();
+            for (const auto entity : remotes)
+                if (remotes.get<RemoteComponent>(entity).CachedRefId == apActor->formID)
+                {
+                    deadAtOwner = remotes.get<RemoteComponent>(entity).DeadAtOwner;
+                    break;
+                }
+            if (CopyBodyRules::RecoversOnOwnersStop(true, apActor->actorState.flags1, first.State1, deadAtOwner))
+            {
+                const uint32_t cLifeBefore = apActor->actorState.LifeState();
+                // The game's stop plays on a copy only while its owner's word has its NPC up, and this word does.
+                const uint8_t cWordBefore = pExtension->OwnerWordOfCopy.exchange(static_cast<uint8_t>(CopyBodyRules::OwnerWord::Up), std::memory_order_relaxed);
+                pExtension->EngineStopPlayed.store(0, std::memory_order_relaxed);
+                apActor->SetLifeState(LifeStates::kAlive);
+                pExtension->OwnerWordOfCopy.store(cWordBefore, std::memory_order_relaxed);
+                const bool cPlayed = pExtension->EngineStopPlayed.load(std::memory_order_relaxed) == 1;
+                spdlog::debug(
+                    "KnockReplay: copy {:X} got its owner's 'bleedOutStop' while in its own bleedout (life state {}); ended it the game's way, "
+                    "its stop {}, life state now {}",
+                    apActor->formID, cLifeBefore, cPlayed ? "played" : "not played", apActor->actorState.LifeState());
+                if (cPlayed)
+                {
+                    pExtension->KneelsInGraph.store(false, std::memory_order_relaxed);
+                    if (aAnimationComponent.ReplayCount > 0)
+                        aAnimationComponent.ReplayCount--;
+                    actions.pop_front();
+                    return;
+                }
+            }
+        }
 
         // Play the animation
         TESActionData actionData(first.Type & 0x3, apActor, pAction, pTarget);
@@ -123,18 +358,123 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
         actionData.idleForm = Cast<TESIdleForm>(TESForm::GetById(first.IdleId));
         actionData.someFlag = ((first.Type & 0x4) != 0) ? 1 : 0;
 
+        const uint64_t cNativeLifeAtAction = pExtension->NativeLifeGeneration.load(std::memory_order_relaxed);
         const auto result = ActorMediator::Get()->ForceAction(&actionData);
+        // A jump, fall or landing its graph refused as an action: the graph is sent the event itself, as its owner's took it.
+        bool jumpTaken = result != 0;
+        if (JumpSync::SendsRefusedEvent(cPlayerCopy, result != 0, first.EventName.c_str(), apActor->actorState.IsDeadOrDying() || apActor->actorState.IsKnockedDown()))
+        {
+            BSFixedString event(first.EventName.c_str());
+            const bool cTaken = apActor->SendAnimationEvent(&event);
+            jumpTaken = cTaken;
+            spdlog::debug("Jump: '{}' refused as an action on player copy {:X}; its graph {} the event", first.EventName.c_str(), apActor->formID, cTaken ? "took" : "refused");
+        }
+        // Where its jump stands, so that it lands once its owner is on the ground (InterpolationSystem, JumpSync::Landing).
+        if (cPlayerCopy)
+            InterpolationSystem::NoteCopyJumpEvent(apActor->formID, first.EventName.c_str(), jumpTaken);
+        bool cGraphRagdoll = false;
+        bool cDeadAtOwner = true; // unknown canonical authority is not permission to replay a fall
+        const auto remotes = aWorld.view<RemoteComponent>();
+        for (const auto entity : remotes)
+            if (remotes.get<RemoteComponent>(entity).CachedRefId == apActor->formID)
+            {
+                cDeadAtOwner = remotes.get<RemoteComponent>(entity).DeadAtOwner;
+                break;
+            }
+#ifndef SKYRIMVR
+        const bool cRagdoll = !first.EventName.empty() && _stricmp(first.EventName.c_str(), "Ragdoll") == 0;
+        const auto* extension = apActor->GetExtension();
+        if (CopyBodyRules::MayRetryRagdoll(
+                result != 0, cRagdoll, extension && extension->IsRemote() && !cPlayerCopy, apActor->actorState.IsDeadOrDying(), cDeadAtOwner,
+                extension && extension->NativeLifeGeneration.load(std::memory_order_relaxed) == cNativeLifeAtAction))
+        {
+            // The owner's real push action can be refused by PerformComplexAction on a locally kneeling copy.
+            // Ask its graph for the SAME event, as the existing refused bleedOutStop path does below.
+            // Actual consecutive flat bones, not this acknowledgement, must still establish its ragdoll.
+            BSFixedString event("Ragdoll");
+            cGraphRagdoll = apActor->SendAnimationEvent(&event);
+        }
+        // Refused both ways, as by a copy kneeling in its bleedout when its owner's is thrown over: the game knocks it down itself,
+        // with no push, so that it lies as its owner's does and its own knock word gets it up (live-copy-knockdown-place).
+        if (CopyBodyRules::KnockAfterRefusedRagdoll(
+                VRBodySync::MovesFlatRagdolls(), result != 0 || cGraphRagdoll, cRagdoll, extension && extension->IsRemote() && !cPlayerCopy, apActor->actorState.IsDeadOrDying(),
+                cDeadAtOwner, extension && extension->NativeLifeGeneration.load(std::memory_order_relaxed) == cNativeLifeAtAction, apActor->actorState.flags1) &&
+            apActor->currentProcess)
+        {
+            const NiPoint3 cAt = apActor->position;
+            apActor->currentProcess->KnockExplosion(apActor, &cAt, 0.f);
+            spdlog::debug(
+                "KnockReplay: copy {:X} refused its owner's 'Ragdoll'; knocked down here instead (knock state {})", apActor->formID,
+                CopyBodyRules::KnockState(apActor->actorState.flags1));
+        }
+        // Taken by the graph of a copy kneeling in its essential fall, it lies flat but still in its bleedout, with no knock word of its own.
+        // The game's own knock gives it one, as when it refused the fall above.
+        else if (
+            CopyBodyRules::KnockAfterKneelingRagdoll(
+                VRBodySync::MovesFlatRagdolls(), result != 0 || cGraphRagdoll, cRagdoll, extension && extension->IsRemote() && !cPlayerCopy, apActor->actorState.IsDeadOrDying(),
+                cDeadAtOwner, extension && extension->NativeLifeGeneration.load(std::memory_order_relaxed) == cNativeLifeAtAction, apActor->actorState.flags1) &&
+            apActor->currentProcess)
+        {
+            const NiPoint3 cAt = apActor->position;
+            apActor->currentProcess->KnockExplosion(apActor, &cAt, 0.f);
+            spdlog::debug(
+                "KnockReplay: copy {:X} took its owner's 'Ragdoll' while kneeling; knocked down here too (knock state {})", apActor->formID,
+                CopyBodyRules::KnockState(apActor->actorState.flags1));
+        }
+#endif
+        // The game refuses "bleedOutStart" as an action on a copy above 0 health, and a player's copy always is; its graph takes the
+        // event, as its owner's did, so it kneels where its owner kneels instead of lying in the fall that came before or standing.
+        if (!result && !first.EventName.empty() && _stricmp(first.EventName.c_str(), "bleedOutStart") == 0 &&
+            CopyBodyRules::SendRefusedBleedOutStart(VRBodySync::MovesFlatRagdolls(), cPlayerCopy, apActor->actorState.IsDeadOrDying(), cDeadAtOwner))
+        {
+            BSFixedString event("bleedOutStart");
+            const bool cTaken = apActor->SendAnimationEvent(&event);
+            spdlog::debug("ReplayDiag: 'bleedOutStart' refused as an action on {:X}; sent to its graph instead ({})", apActor->formID, cTaken ? "taken" : "not taken");
+            // Only its graph kneels, its life still alive: nothing else would take it for down, and with its owner's "bleedOutStop" lost
+            // it knelt for good while its owner's NPC stood (live-copy-essential-up). Remembered, it gets up once its owner's does.
+            if (CopyBodyRules::KneelsInGraphOnly(true, cTaken, apActor->actorState.flags1))
+            {
+                pExtension->KneelsInGraph.store(true, std::memory_order_relaxed);
+                // A player's copy gets up on a word of its owner's from after this kneel (CopyBodyRules::PlayerKneelEnds).
+                if (cPlayerCopy && first.Tick > pExtension->OwnerFallTick.load(std::memory_order_relaxed))
+                    pExtension->OwnerFallTick.store(first.Tick, std::memory_order_relaxed);
+            }
+        }
+        if (!first.EventName.empty() && (_stricmp(first.EventName.c_str(), "Ragdoll") == 0 || _stricmp(first.EventName.c_str(), "DeathAnim") == 0 ||
+                                         _stricmp(first.EventName.c_str(), "GetUpBegin") == 0 || _stricmp(first.EventName.c_str(), "bleedOutStop") == 0))
+            spdlog::debug(
+                "KnockReplay: copy {:X} event {} tick {}, owner flags {:#x}, local before {:#x} after {:#x}, native action {}, same-event graph retry {}, native life generation "
+                "{}",
+                apActor->formID, first.EventName.c_str(), first.Tick, first.State1, cOwnStateBefore, apActor->actorState.flags1, result != 0, cGraphRagdoll, cNativeLifeAtAction);
+        if ((result || cGraphRagdoll) && !cPlayerCopy && !first.EventName.empty())
+        {
+            if (_stricmp(first.EventName.c_str(), "Ragdoll") == 0)
+                InterpolationSystem::NoteReplayedFall(aWorld, apActor, false, cNativeLifeAtAction, first.Tick);
+            else if (_stricmp(first.EventName.c_str(), "DeathAnim") == 0)
+                InterpolationSystem::NoteReplayedFall(aWorld, apActor, true, cNativeLifeAtAction, first.Tick);
+        }
+        if (!cPlayerCopy && !first.EventName.empty() && _stricmp(first.EventName.c_str(), "GetUpBegin") == 0)
+            InterpolationSystem::NoteOwnerGetUp(aWorld, apActor, first.Tick);
+        if (result && !first.EventName.empty() && _stricmp(first.EventName.c_str(), "bleedOutStop") == 0)
+            pExtension->KneelsInGraph.store(false, std::memory_order_relaxed);
+
+        // The owner's flags1 came from just before its sneak toggle; the owner now sneaks, or no longer does. Detection reads this bit,
+        // in this game and in the NPCs' owner's game, which judges this copy. Whether or not this copy's graph took the action.
+        apActor->actorState.flags1 = SneakState::AfterAction(actionId, first.State1, apActor->actorState.flags1);
 
         // The game can refuse "bleedOutStop" as an action, which leaves the copy down while its owner is up again.
         // Sending the graph event itself takes the copy out of the pose, as on the owner's side.
-        // A player's copy can refuse the graph event too and lie on after its owner is revived.
+        // A player's copy can refuse the graph event too and lie on after its owner is revived, and so can an NPC copy whose owner is up.
         // "IdleForceDefaultState" puts its graph back to standing from whatever state it is in.
         if (!result && !first.EventName.empty() && _stricmp(first.EventName.c_str(), "bleedOutStop") == 0)
         {
             BSFixedString event("bleedOutStop");
             const bool cSent = apActor->SendAnimationEvent(&event);
             const char* cpOutcome = cSent ? "taken" : "not taken";
-            if (!cSent && cPlayerCopy)
+            if (cSent)
+                pExtension->KneelsInGraph.store(false, std::memory_order_relaxed);
+            const uint32_t cOwnLifeBefore = ActorState::LifeStateOf(cOwnStateBefore);
+            if (!cSent && CopyBodyRules::ForceStandAfterRefusedStop(cPlayerCopy, cOwnLifeBefore == 1 || cOwnLifeBefore == 2, first.State1))
             {
                 BSFixedString reset("IdleForceDefaultState");
                 cpOutcome = apActor->SendAnimationEvent(&reset) ? "not taken; IdleForceDefaultState taken" : "not taken; IdleForceDefaultState not taken either";
@@ -144,6 +484,20 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
                          "health {:.0f}; the owner's life state {}",
                          apActor->formID, cpOutcome, ActorState::LifeStateOf(cOwnStateBefore), (cOwnStateBefore >> 25) & 0x7,
                          apActor->GetActorValue(ActorValueInfo::kHealth), ActorState::LifeStateOf(first.State1));
+        }
+
+        // The game refuses its owner's way out of a seat as an action on a copy that was put in its seat here, so its get-up did not play
+        // and the copy was stood 2 s later (FurnitureService). Its graph is sent the event itself, as with a refused "bleedOutStop"
+        // above: the get-up plays if the graph is in the seat, and is ignored if it is not.
+        if (!result && (first.Type & 0x4) == 0 && NpcFurniture::IsSeatExitReplay(first.EventName.c_str()))
+        {
+            BSFixedString event(first.EventName.c_str());
+            const bool cTaken = apActor->SendAnimationEvent(&event);
+            spdlog::info(
+                "ReplayDiag: seat exit '{}' refused as an action on {:X}; sent to its graph instead ({}); its sit/sleep state was {} before its owner's flags "
+                "were written, is {} now, and its owner's was {}",
+                first.EventName.c_str(), apActor->formID, cTaken ? "taken" : "not taken", (cOwnStateBefore >> NpcFurniture::kSitSleepShift) & 0xF,
+                (apActor->actorState.flags1 >> NpcFurniture::kSitSleepShift) & 0xF, (first.State1 >> NpcFurniture::kSitSleepShift) & 0xF);
         }
 
         // TEMPORARY: kept to show what state an NPC copy's graph was left in.
@@ -231,11 +585,23 @@ void AnimationSystem::TrimBacklog(RemoteAnimationComponent& aAnimationComponent,
     }
 }
 
-void AnimationSystem::AddActionsForReplay(RemoteAnimationComponent& aAnimationComponent,
-                                          const ActionReplayChain& acReplay) noexcept
+void AnimationSystem::AddModIds(World& aWorld, ActionEvent& aAction) noexcept
 {
-    aAnimationComponent.TimePoints.insert(aAnimationComponent.TimePoints.end(), acReplay.Actions.begin(),
-                                          acReplay.Actions.end());
+    ActionModIds::Fill(aWorld.GetModSystem(), aAction);
+}
+
+void AnimationSystem::ResolveModIds(World& aWorld, ActionEvent& aAction) noexcept
+{
+    ActionModIds::Resolve(aWorld.GetModSystem(), aAction);
+}
+
+void AnimationSystem::AddActionsForReplay(World& aWorld, RemoteAnimationComponent& aAnimationComponent, const ActionReplayChain& acReplay) noexcept
+{
+    for (ActionEvent action : acReplay.Actions)
+    {
+        ResolveModIds(aWorld, action);
+        aAnimationComponent.TimePoints.push_back(std::move(action));
+    }
     aAnimationComponent.ReplayCount = acReplay.Actions.size();
     aAnimationComponent.ResetAnimationGraphForReplay = acReplay.ResetAnimationGraph;
 
@@ -310,10 +676,12 @@ void NoteBodyJump(const Actor* apActor, const glm::vec3& acSent, const bool aFro
     if (cJump > 300.f)
     {
         const auto* pPlayer = PlayerCharacter::Get();
-        spdlog::info("CorpseDiag: own body {:X} sent {:.0f} units from its last report, from ({:.0f}) to ({:.0f}), read from its {}; "
-                     "reference at ({:.0f}) in cell {:X}, attached {}, player at ({:.0f}, {:.0f}, {:.0f})",
-                     apActor->formID, cJump, it->second, acSent, aFromRoot ? "3D root" : "reference", apActor->position, apActor->parentCell ? apActor->parentCell->formID : 0, apActor->parentCell && apActor->parentCell->IsAttached(),
-                     pPlayer ? pPlayer->position.x : 0.f, pPlayer ? pPlayer->position.y : 0.f, pPlayer ? pPlayer->position.z : 0.f);
+        spdlog::debug(
+            "CorpseDiag: own body {:X} sent {:.0f} units from its last report, from ({:.0f}) to ({:.0f}), read from its {}; "
+            "reference at ({:.0f}) in cell {:X}, attached {}, player at ({:.0f}, {:.0f}, {:.0f})",
+            apActor->formID, cJump, it->second, acSent, aFromRoot ? "3D root" : "reference", apActor->position, apActor->parentCell ? apActor->parentCell->formID : 0,
+            apActor->parentCell && apActor->parentCell->IsAttached(), pPlayer ? pPlayer->position.x : 0.f, pPlayer ? pPlayer->position.y : 0.f,
+            pPlayer ? pPlayer->position.z : 0.f);
     }
     it->second = acSent;
 }
@@ -337,11 +705,12 @@ void AnimationSystem::SerializeMovement(World& aWorld, Actor* apActor, Reference
     const bool cKnockedNpc = apActor != PlayerCharacter::Get() && apActor->actorState.IsInKnockRagdoll();
     if (apActor != PlayerCharacter::Get() && (apActor->actorState.IsDead() || cKnockedNpc))
     {
-        const NiNode* pRoot = apActor->GetNiNode();
+        // Not while a load is up: the client's update can run beside the main thread then, which may be freeing the 3D. Its reference
+        // position goes instead until the load is over.
+        const NiNode* pRoot = LoadingScreenUp() ? nullptr : apActor->GetNiNode();
         if (pRoot)
         {
-            // NiAVObject::world is at 0x7C, as VRBodySync and DroppedItemService read it.
-            const auto& world = *reinterpret_cast<const NiTransform*>(reinterpret_cast<const uint8_t*>(pRoot) + 0x7C);
+            const auto& world = WorldTransformOf(pRoot);
             movement.Position = glm::vec3(world.translate.x, world.translate.y, world.translate.z);
         }
 #ifdef SKYRIMVR
@@ -376,6 +745,8 @@ void AnimationSystem::SerializeMovement(World& aWorld, Actor* apActor, Reference
         // when the menu closes. The heading is held; UI.cpp blocks turning while one of these menus is open.
         static float s_heldHeading = 0.f;
         static bool s_hasHeldHeading = false;
+        // Without a body plugin, while a weapon or spell is out, the others see the body's own drawn stance (BodySolver.h).
+        const bool cSendsPose = BodySolver::SendsPose(VRBodySync::HasBodySolver(), static_cast<uint32_t>(pPlayer->actorState.GetWeaponState()));
         if (IsOptionalMenuOpenUnpaused() || (UnpausedMenusOnline() && VRBodySync::IsRigParked(pPlayer)))
         {
             if (s_hasHeldHeading)
@@ -383,10 +754,18 @@ void AnimationSystem::SerializeMovement(World& aWorld, Actor* apActor, Reference
         }
         // In any other full menu the game shows a second body, in another pose, so the copy would snap at each opening and closing.
         // The others see this player as they were when it opened, and the heading is held with it.
-        else if (IsPausingMenuOpen() && VRBodySync::LastLocalPose(pPlayer, pose))
+        else if (IsPausingMenuOpen() && cSendsPose && VRBodySync::LastLocalPose(pPlayer, pose))
         {
             if (s_hasHeldHeading)
                 movement.Rotation.y = s_heldHeading;
+        }
+        // The pose left out: a snapshot with no bones goes instead, as a flat player's, so the copy lets go of the last pose at
+        // once and shows its own drawn stance; it carries the held spell's aim while there is one.
+        else if (!cSendsPose)
+        {
+            VRBodySync::CaptureSpellAimOnly(pose);
+            s_heldHeading = heading;
+            s_hasHeldHeading = true;
         }
         else if (!VRBodySync::CaptureLocalPose(pPlayer, pose, heading))
         {
@@ -402,6 +781,14 @@ void AnimationSystem::SerializeMovement(World& aWorld, Actor* apActor, Reference
         }
         else
         {
+            // In the air and just after landing the legs are left out, so the copy's legs play the jump, fall and land (JumpSync.h).
+            static JumpSync::Legs s_legs;
+            static BSFixedString s_inJump("bInJumpState");
+            bool inJump = false;
+            pPlayer->animationGraphHolder.GetVariableBool(&s_inJump, &inJump);
+            if (!s_legs.Sent(inJump, std::chrono::steady_clock::now()))
+                pose.HasLegs = false;
+
             // The body's facing is sent as the heading, so a head turn alone does not turn the copy's hips and legs.
             // The game's walk direction is relative to its own heading, which follows the headset, so it is re-based on the body.
             float turn = std::fmod(heading - apActor->rotation.z, glm::two_pi<float>());
@@ -433,8 +820,29 @@ void AnimationSystem::SerializeMovement(World& aWorld, Actor* apActor, Reference
         aUpdate.UpdatedVRPose = pose;
     }
     else if (apActor->actorState.IsDead() || cKnockedNpc)
+#else
+    if (apActor == PlayerCharacter::Get())
+    {
+        // In a conversation the others see this player face the one they talk to, whichever way the game leaves the body here.
+        if (const MenuTopicManager* pTopics = MenuTopicManager::Get(); pTopics && pTopics->menuOpen && pTopics->speaker)
+        {
+            if (const TESObjectREFR* pSpeaker = TESObjectREFR::GetByHandle(pTopics->speaker.handle.iBits); pSpeaker && pSpeaker != apActor)
+            {
+                if (const auto cHeading = DialogueFacing::HeadingTo(static_cast<glm::vec3>(apActor->position), static_cast<glm::vec3>(pSpeaker->position)))
+                    movement.Rotation.y = *cHeading;
+            }
+        }
+
+        // No tracked body on flat: the held spell's aim rides a boneless, rootless snapshot while it is held.
+        VRPose pose{};
+        if (VRBodySync::CaptureSpellAimOnly(pose))
+            aUpdate.UpdatedVRPose = pose;
+    }
+    else if (apActor->actorState.IsDead() || cKnockedNpc)
+#endif
     {
         // A body this machine owns, dead or knocked down, within reach of this player: its bones let the others see it carried, dragged, thrown or shoved.
+        // Skyrim SE sends them too, so a VR player sees a body dragged with the grab key bend as it does here.
         // It is only sent while the body is moving (CaptureBodyPose returns false otherwise), and far bodies are never read.
         // Measured from where the body lies (movement.Position above), not where it died: a body dragged far away is still in reach.
         constexpr float cReachSquared = 600.f * 600.f;
@@ -450,7 +858,6 @@ void AnimationSystem::SerializeMovement(World& aWorld, Actor* apActor, Reference
             }
         }
     }
-#endif
 }
 
 void AnimationSystem::SerializeActions(RequestActionEvents& aMessage, LocalComponent& localComponent, LocalAnimationComponent& animationComponent) noexcept
