@@ -1,5 +1,5 @@
   
-function main (target)
+function main ()
 	local host = os.host()
 	local subhost = os.subhost()
 
@@ -92,8 +92,8 @@ function main (target)
 				end
 
 				-- The protocol id: what the server actually compares on connect. It is a digest of the contents of
-				-- Code/encoding -- every message, struct and opcode -- and of nothing else, so two builds accept
-				-- each other exactly when they agree on what goes over the wire. The version above changes with any
+				-- the tracked encoding sources; optional modules use the same wire protocol.
+				-- The version above changes with any
 				-- edit anywhere and with every commit, which is right for telling builds apart and wrong for
 				-- deciding who may talk to whom: on 2026-10-01 a build made before a commit and one made after it,
 				-- from the same files, could not connect to each other.

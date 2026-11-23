@@ -10,13 +10,11 @@ set_languages("c99", "cxx20")
 
 if is_plat("windows") then
     add_cxflags("/bigobj")
+    add_ldflags("/PDBALTPATH:%_PDB%", {tools = "link", force = true})
+    add_shflags("/PDBALTPATH:%_PDB%", {tools = "link", force = true})
     add_syslinks("kernel32")
     set_arch("x64")
-    -- MERGE NOTE 2026-09-22: upstream switched the C runtime to static (MT). Every cached dependency was built
-    -- against the dynamic one, so taking it rebuilds and re-downloads the whole package set, and openvr, CEF,
-    -- protobuf and directxtk all failed to install here. It is also an ABI change for a DLL that lives inside
-    -- the game next to other SKSE plugins. Left off until it can be done deliberately, with a clean build.
-    -- set_runtimes("MT")
+    set_runtimes("MT")
 end
 
 if is_plat("linux") then

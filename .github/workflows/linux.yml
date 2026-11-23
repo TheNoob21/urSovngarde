@@ -117,7 +117,7 @@ jobs:
                   server=$!
                   timeout 10 sh -c 'until grep -q "started on port" join.txt; do sleep 0.2; done'
                   timeout 8 "$GITHUB_WORKSPACE/packaged/bin/STBot" "$GITHUB_WORKSPACE/Code/bot/scripts/smoke.txt" \
-                    --server 127.0.0.1:10578 > bot.txt 2>&1 || true
+                    --manifest "$GITHUB_WORKSPACE/Code/bot/scripts/bot-only-content.txt" --server 127.0.0.1:10578 > bot.txt 2>&1 || true
                   cat join.txt bot.txt
                   grep -q "Accepted as player" bot.txt
                   kill "$server"

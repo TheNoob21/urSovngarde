@@ -8,6 +8,7 @@ target("TPTests")
     add_files("*.cpp")
     -- The public server's admin keys: pure code, the hash handed in (no OpenSSL here).
     add_files("../server/AdminKeys.cpp")
+    add_files("../server/Services/ExtensionRecords.cpp")
     -- The client's remote playback timing has no game dependencies.
     add_files("../client/Systems/PlaybackClock.cpp")
     -- Who may revive whom (ReviveRules): plain values in and out.
@@ -38,7 +39,7 @@ target("TPTests")
         -- The VR banner's pictures are drawn with GDI, in the game's fonts read from its zlib-compressed font library.
         add_files("../client/UI/Banner/BannerPicture.cpp")
         add_syslinks("gdi32", "user32")
-        add_packages("zlib")
+        add_packages("zlib", "spdlog")
         -- The panel's marks in the eye images: plain numbers, with Direct3D's viewport type.
         add_files("../client/UI/Menu/EyeGeometry.cpp")
         -- Where the banner and the meter are shown relative to the headset: plain numbers, in the eye geometry's corners.
@@ -57,4 +58,5 @@ target("TPTests")
         "hopscotch-map",
         "catch2",
         "mimalloc",
+        "spdlog",
         "glm")

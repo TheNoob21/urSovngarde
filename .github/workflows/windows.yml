@@ -16,6 +16,7 @@ on:
                 required: false
                 type: boolean
                 default: false
+    workflow_dispatch:
 
 env:
     BUILD_MODE: ${{ inputs.build-mode || 'releasedbg' }}
@@ -78,20 +79,17 @@ jobs:
               run: xmake config --plat=windows --arch=${{ matrix.arch }} --mode="$BUILD_MODE" --yes -vD
 
             # Build the client
-            # A push builds what urSovngarde ships, as release.yml does: the VR client (through its launcher), the
-            # server, the menu's process and the tests. Upstream's flat-Skyrim client is never shipped and took about
-            # half of the 21 minutes `xmake -y` needed (2026-10-10). The playable-build packaging below still wants
-            # everything, so it keeps the full build.
+            # Check both desktop and VR clients through their launchers, along with the server, browser and tests.
+            # Playable-build packaging still uses the full build.
             - name: Build with xmake
               run: |
                   if [ "${{ inputs.upload-build-for-next-job }}" = "true" ]; then
                       xmake -y
                   else
-                      xmake build -y SkyrimImmersiveLauncherVR
-                      xmake build -y SkyrimServerRunner
-                      xmake build -y TPProcess
-                      xmake build -y TPTests
+                      xmake build -y Vanilla
                   fi
+                  xmake build -y STBot
+                  xmake build -y TPTests
                   echo "STR_BUILD_DIR=build/windows/${{ matrix.arch }}/${BUILD_MODE}/" >> "$GITHUB_ENV"
 
             # The encoding round trips and the rest of TPTests
@@ -132,6 +130,10 @@ jobs:
             - name: Package build and organize directories
               if: ${{ inputs.upload-build-for-next-job }}
               run: |
+                  if find "$STR_BUILD_DIR" GameFiles/Skyrim -type f -iname urSovngardeEssentials.dll -print -quit | grep -q .; then
+                      echo "Optional plugin found in package inputs" >&2
+                      exit 1
+                  fi
                   mkdir -p str-build/SkyrimTogetherReborn str-pdb
                   mv "$STR_BUILD_DIR"/* str-build/SkyrimTogetherReborn/
                   cp -r GameFiles/Skyrim/* str-build/
