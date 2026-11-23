@@ -27,9 +27,11 @@ public:
 
 private:
     void LoadSections(const IMAGE_NT_HEADERS* apNtHeader);
+    void PatchStartupJoinRace(const IMAGE_NT_HEADERS* apNtHeader);
     void LoadImports(const IMAGE_NT_HEADERS* apNtHeader);
     void LoadTLS(const IMAGE_NT_HEADERS* apNtHeader, const IMAGE_NT_HEADERS* apSourceNt);
     void LoadExceptionTable(IMAGE_NT_HEADERS* apNtHeader);
+    bool BuildMergedExceptionTable(const IMAGE_NT_HEADERS* apNtHeader, const IMAGE_DATA_DIRECTORY& acLauncherTable, uint32_t aLauncherImageSize, IMAGE_DATA_DIRECTORY& aMerged);
     void DecryptCeg(IMAGE_NT_HEADERS* apSourceNt);
 
     template <typename T> inline T* GetRVA(uint32_t aRva) { return (T*)(m_pBinary + aRva); }

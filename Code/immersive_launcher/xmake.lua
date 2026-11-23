@@ -14,7 +14,9 @@ local function build_launcher()
         "/INCREMENTAL:NO",
         "/LAST:.zdata",
         "/SUBSYSTEM:WINDOWS",
-        "/ENTRY:mainCRTStartup", { force = true })
+        "/ENTRY:mainCRTStartup",
+        -- Standalone headsets ship without CEF; the client checks libcef.dll loads before any CEF call (VROverlaySupport).
+        "/DELAYLOAD:libcef.dll", { force = true })
     add_includedirs(
         ".",
         "../",

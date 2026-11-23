@@ -3,6 +3,10 @@
 #include "TargetConfig.h"
 #include "launcher.h"
 
+#ifdef SKYRIMVR
+#include <common/VRSupportedVersion.h>
+#endif
+
 #include "loader/ExeLoader.h"
 #include "loader/PathRerouting.h"
 #include "loader/OpenVRLoader.h"
@@ -24,6 +28,15 @@
 extern void InstallStartHook();
 extern void RunTiltedApp();
 extern void RunTiltedInit(const std::filesystem::path& acGamePath, const TiltedPhoques::String& aExeVersion);
+// Logs one line to the client's log at once. The launcher keeps no thread locals of its own: its TLS block is the game's (TlsMemory.cpp).
+extern void LogLauncherNote(const char* apNote);
+
+// Defined in Main.cpp: whether System32's dinput8.dll was preloaded, and why (SystemPreload.h).
+extern const char* SystemDinput8PreloadNote() noexcept;
+// Defined in loader/ExeLoader.cpp: whether the Wine thread-name handler went in.
+extern bool ThreadNameHandlerInstalled() noexcept;
+// Defined in loader/ExeLoader.cpp: what the Wine exception-table merge did, or nullptr off Wine.
+extern const char* ExceptionTableMergeNote() noexcept;
 
 // Defined in EarlyLoad.dll
 bool __declspec(dllimport) EarlyInstallSucceeded();
@@ -121,6 +134,13 @@ int StartUp(int argc, char** argv)
     // Initialize all hooks before calling game init
     // TiltedPhoques::Initializer::RunAll();
     RunTiltedInit(LC->gamePath, LC->Version);
+    // The client's log is open now. What main() chose for System32's dinput8.dll goes there too, written at once in case
+    // the process ends soon after.
+    LogLauncherNote(SystemDinput8PreloadNote());
+    if (const char* pNote = ExceptionTableMergeNote())
+        LogLauncherNote(pNote);
+    if (ThreadNameHandlerInstalled())
+        LogLauncherNote("urSovngarde ExeLoader: thread-name exceptions (0x406D1388) resumed by a vectored handler");
 
     // This shouldn't return until the game is killed
     LC->gameMain();
@@ -136,6 +156,15 @@ bool LoadProgram(LaunchContext& LC)
     LC.Version = QueryFileVersion(LC.exePath.c_str());
     if (LC.Version.empty())
         DIE_NOW(L"Failed to query game version");
+#ifdef SKYRIMVR
+    // Check before mapping the executable or installing the launcher start hook.
+    if (!VRSupportedVersion::IsSupported(LC.Version.c_str()))
+    {
+        const std::wstring detectedVersion(LC.Version.begin(), LC.Version.end());
+        const std::wstring message = L"urSovngarde requires Skyrim VR 1.4.15.0, but this executable is " + detectedVersion + L".";
+        DIE_NOW(message.c_str());
+    }
+#endif
     LC.SetLoaded();
 
     ExeLoader loader(CurrentTarget.exeLoadSz);

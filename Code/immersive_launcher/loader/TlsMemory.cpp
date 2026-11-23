@@ -24,3 +24,15 @@ struct TlsToucher
 };
 
 TlsToucher toucher;
+
+// The game's TLS is copied to the start of this thread's block, over the placeholder (ExeLoader::LoadTLS).
+// So the placeholder has to come first: a thread local of ours ahead of it shares memory with the game's.
+size_t TlsPlaceholderOffset(const void* apTlsBase) noexcept
+{
+    return static_cast<size_t>(reinterpret_cast<const uint8_t*>(&tls[0]) - static_cast<const uint8_t*>(apTlsBase));
+}
+
+size_t TlsPlaceholderSize() noexcept
+{
+    return sizeof(tls);
+}

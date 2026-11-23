@@ -13,6 +13,12 @@ void ProcessHandler::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<C
     m_pCoreObject->SetValue("on", CefV8Value::CreateFunction("on", m_pEventsHandler), V8_PROPERTY_ATTRIBUTE_NONE);
     m_pCoreObject->SetValue("off", CefV8Value::CreateFunction("off", m_pEventsHandler), V8_PROPERTY_ATTRIBUTE_NONE);
 
+    m_pCoreObject->SetValue("getSavedServers", CefV8Value::CreateFunction("getSavedServers", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
+    m_pCoreObject->SetValue("saveServer", CefV8Value::CreateFunction("saveServer", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
+    m_pCoreObject->SetValue("removeSavedServer", CefV8Value::CreateFunction("removeSavedServer", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
+    m_pCoreObject->SetValue("importSavedServer", CefV8Value::CreateFunction("importSavedServer", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
+    m_pCoreObject->SetValue("connectSavedServer", CefV8Value::CreateFunction("connectSavedServer", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
+    m_pCoreObject->SetValue("connectLastUsedServer", CefV8Value::CreateFunction("connectLastUsedServer", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
     m_pCoreObject->SetValue("connect", CefV8Value::CreateFunction("connect", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
     m_pCoreObject->SetValue("disconnect", CefV8Value::CreateFunction("disconnect", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
     m_pCoreObject->SetValue("revealPlayers", CefV8Value::CreateFunction("revealPlayers", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);

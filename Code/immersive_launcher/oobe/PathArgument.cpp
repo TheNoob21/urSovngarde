@@ -1,4 +1,5 @@
 ﻿#include "PathArgument.h"
+#include "TitlePath.h"
 
 #include "TargetConfig.h"
 
@@ -23,7 +24,7 @@ constexpr wchar_t kTiltedRegistryPath[] = LR"(Software\TiltedPhoques\TiltedEvolu
 
 bool ValidatePath(const std::wstring& acPath)
 {
-    const std::wstring cTitlePath = acPath.substr(0, acPath.find_last_of('\\'));
+    const std::wstring cTitlePath = TitlePathOf(acPath);
     std::wstring errorText{};
 
     if (acPath.find_last_of('\\') == std::string::npos || acPath.ends_with(*"\\"))
@@ -62,7 +63,7 @@ bool ValidatePath(const std::wstring& acPath)
 bool PathArgument(const std::string& acPath)
 {
     const std::wstring cExePath = std::wstring(acPath.begin(), acPath.end());
-    const std::wstring cTitlePath = cExePath.substr(0, cExePath.find_last_of('\\'));
+    const std::wstring cTitlePath = TitlePathOf(cExePath);
 
     if (!ValidatePath(cExePath))
     {

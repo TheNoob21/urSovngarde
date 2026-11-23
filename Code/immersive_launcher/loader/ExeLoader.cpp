@@ -12,12 +12,21 @@
 #define SPDLOG_WCHAR_FILENAMES
 #include <TiltedCore/Filesystem.hpp>
 #include <spdlog/formatter.h>
+#include <cstdio>
+#include <cstring>
 #include <winternl.h>
+#include <cstddef>
+#include <base/system/Wine.h>
 
 #include "ExeLoader.h"
+#include "SehTableMerge.h"
 #include "steam/SteamCeg.h"
 #include "utils/Error.h"
 #include "utils/NtInternal.h"
+
+// TlsMemory.cpp
+size_t TlsPlaceholderOffset(const void* apTlsBase) noexcept;
+size_t TlsPlaceholderSize() noexcept;
 
 #if defined(_M_AMD64)
 typedef enum _FUNCTION_TABLE_TYPE
@@ -44,6 +53,60 @@ typedef struct _DYNAMIC_FUNCTION_TABLE
     ULONG EntryCount;
 } DYNAMIC_FUNCTION_TABLE, *PDYNAMIC_FUNCTION_TABLE;
 #endif
+
+#if defined(_M_AMD64)
+namespace
+{
+bool s_threadNameHandlerInstalled = false;
+// What the Wine exception-table merge did, for the client's log (empty off Wine).
+char s_exceptionTableNote[160] = {};
+
+// Thread naming: 0x406D1388 is raised to hand a debugger a thread's name, and the code that raises it catches it itself.
+// Under Wine that catch can be in our code, which has unwind data only through the merged exception table, so the exception
+// would go uncaught and end the process. This handler stays on next to the merge as a second line, as it ran on
+// the Quest. URSOVNGARDE_THREADNAME_VEH=0 (off, false, no) turns it off. Wine has applied the name
+// before any vectored handler runs (dispatch_exception, dlls/ntdll/exception.c), so resuming loses nothing.
+LONG CALLBACK ResumeAfterThreadName(PEXCEPTION_POINTERS apInfo) noexcept
+{
+    const EXCEPTION_RECORD* pRecord = apInfo->ExceptionRecord;
+    if (pRecord->ExceptionCode == 0x406D1388 && (pRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE) == 0 && !IsDebuggerPresent())
+        return EXCEPTION_CONTINUE_EXECUTION;
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// On under Wine unless URSOVNGARDE_THREADNAME_VEH says off; a value that is not off turns it on anywhere.
+bool ThreadNameHandlerWanted() noexcept
+{
+    char setting[16] = {};
+    const DWORD cSettingLength = GetEnvironmentVariableA("URSOVNGARDE_THREADNAME_VEH", setting, sizeof(setting));
+    const bool cSettingPresent = cSettingLength > 0 && cSettingLength < sizeof(setting);
+    const bool cSettingOff =
+        cSettingPresent && (std::strcmp(setting, "0") == 0 || _stricmp(setting, "off") == 0 || _stricmp(setting, "false") == 0 || _stricmp(setting, "no") == 0);
+    return cSettingPresent ? !cSettingOff : Base::IsRunningUnderWine();
+}
+} // namespace
+#endif
+
+// Launcher.cpp writes this to the client's log once it is open: the Wine exception-table merge's entry counts, or that
+// it was skipped. nullptr off Wine.
+const char* ExceptionTableMergeNote() noexcept
+{
+#if defined(_M_AMD64)
+    return s_exceptionTableNote[0] ? s_exceptionTableNote : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
+// Launcher.cpp writes this to the client's log once it is open.
+bool ThreadNameHandlerInstalled() noexcept
+{
+#if defined(_M_AMD64)
+    return s_threadNameHandlerInstalled;
+#else
+    return false;
+#endif
+}
 
 // TODO: move me to wstring util..
 std::wstring ConvertStringToWstring(const std::string_view str)
@@ -176,6 +239,20 @@ void ExeLoader::LoadTLS(const IMAGE_NT_HEADERS* apNtHeader, const IMAGE_NT_HEADE
 
         LPVOID tlsBase = *(LPVOID*)__readgsqword(0x58);
 
+        // Only the start of the TLS section itself (_tls_start) may come before the placeholder. Anything else of ours there,
+        // such as a logger's thread id, would be written over the game's per-thread data, and the game's over it.
+        constexpr size_t cSectionStart = 0x20;
+        const size_t cGameTlsSize = sourceTls->EndAddressOfRawData - sourceTls->StartAddressOfRawData + sourceTls->SizeOfZeroFill;
+        const size_t cPlaceholderOffset = TlsPlaceholderOffset(tlsBase);
+        if (cPlaceholderOffset > cSectionStart || cGameTlsSize > cPlaceholderOffset + TlsPlaceholderSize())
+        {
+            wchar_t msg[256];
+            swprintf_s(
+                msg, L"The launcher's TLS placeholder is at +0x%zX (at most +0x%zX allowed) and holds 0x%zX bytes; the game needs 0x%zX.", cPlaceholderOffset, cSectionStart,
+                TlsPlaceholderSize(), cGameTlsSize);
+            Die(msg, true);
+        }
+
         DWORD oldProtect;
         VirtualProtect(reinterpret_cast<LPVOID>(targetTls->StartAddressOfRawData), sourceTls->EndAddressOfRawData - sourceTls->StartAddressOfRawData, PAGE_READWRITE, &oldProtect);
 
@@ -231,6 +308,51 @@ void ExeLoader::LoadExceptionTable(IMAGE_NT_HEADERS* apNtHeader)
     }
 }
 
+#if defined(_M_AMD64)
+static_assert(sizeof(RUNTIME_FUNCTION) == sizeof(seh_table::RuntimeFunction));
+static_assert(offsetof(RUNTIME_FUNCTION, BeginAddress) == offsetof(seh_table::RuntimeFunction, BeginAddress));
+static_assert(offsetof(RUNTIME_FUNCTION, EndAddress) == offsetof(seh_table::RuntimeFunction, EndAddress));
+static_assert(offsetof(RUNTIME_FUNCTION, UnwindData) == offsetof(seh_table::RuntimeFunction, UnwindData));
+
+// Writes one exception table for the game and the launcher into free memory of the image (SehTableMerge.h).
+// Changes nothing when it returns false.
+bool ExeLoader::BuildMergedExceptionTable(
+    const IMAGE_NT_HEADERS* apNtHeader, const IMAGE_DATA_DIRECTORY& acLauncherTable, uint32_t aLauncherImageSize, IMAGE_DATA_DIRECTORY& aMerged)
+{
+    using seh_table::RuntimeFunction;
+
+    const IMAGE_DATA_DIRECTORY& gameExceptions = apNtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if (!gameExceptions.VirtualAddress || !acLauncherTable.VirtualAddress)
+        return false;
+
+    // Each table must lie inside its own image before anything reads it.
+    if (uint64_t{gameExceptions.VirtualAddress} + gameExceptions.Size > apNtHeader->OptionalHeader.SizeOfImage ||
+        uint64_t{acLauncherTable.VirtualAddress} + acLauncherTable.Size > aLauncherImageSize)
+        return false;
+
+    const auto* pGame = GetTargetRVA<const RuntimeFunction>(gameExceptions.VirtualAddress);
+    const size_t cGameCount = gameExceptions.Size / sizeof(RuntimeFunction);
+    const auto* pLauncher = GetTargetRVA<const RuntimeFunction>(acLauncherTable.VirtualAddress);
+    const size_t cLauncherCount = acLauncherTable.Size / sizeof(RuntimeFunction);
+
+    // The load buffer (MemoryLayout.cpp) goes on past the end of the game's image up to m_loadLimit, unused.
+    const uint32_t cFreeBegin = (apNtHeader->OptionalHeader.SizeOfImage + 0xFFF) & ~0xFFFu;
+
+    seh_table::Plan plan;
+    if (seh_table::PlanMerge(pGame, cGameCount, gameExceptions.VirtualAddress, pLauncher, cLauncherCount, acLauncherTable.VirtualAddress, cFreeBegin, m_loadLimit, plan) !=
+        seh_table::Result::kOk)
+        return false;
+
+    seh_table::WriteMerged(pGame, cGameCount, pLauncher, cLauncherCount, GetTargetRVA<RuntimeFunction>(plan.TableRva));
+
+    aMerged.VirtualAddress = plan.TableRva;
+    aMerged.Size = plan.SizeBytes;
+    std::snprintf(
+        s_exceptionTableNote, sizeof(s_exceptionTableNote), "urSovngarde ExeLoader: merged exception table for Wine, %zu game + %zu launcher entries", cGameCount, cLauncherCount);
+    return true;
+}
+#endif
+
 uint32_t ExeLoader::Rva2Offset(uint32_t aRva) noexcept
 {
     const auto* dos = GetRVA<const IMAGE_DOS_HEADER>(0);
@@ -272,6 +394,58 @@ void ExeLoader::DecryptCeg(IMAGE_NT_HEADERS* apSourceNt)
     apSourceNt->OptionalHeader.AddressOfEntryPoint = static_cast<uint32_t>(realEntry);
 }
 
+// Skyrim VR 1.4.15 can deadlock on its logo under emulation. TESInitThread clears its busy flag and then joins itself,
+// taking the BSThread object's lock to close its handle; the main thread, seeing the flag, runs ~BSThread, whose join takes
+// the same lock and waits for the worker to exit. Whichever gets the lock first decides, and emulator timing lets the main
+// thread win almost every time (Wine: "RtlpWaitForCriticalSection ... blocked by" the main thread).
+// The worker's self-join call is replaced with a 5-byte NOP; the main thread's join still closes the handle.
+// Applied under Wine only (GameNative and other emulators), or when URSOVNGARDE_LOGO_PATCH is 1; 0 turns it off.
+// On a Quest 3, patched launches passed the logo and unpatched ones froze there.
+void ExeLoader::PatchStartupJoinRace(const IMAGE_NT_HEADERS* apNtHeader)
+{
+    constexpr uint32_t cSkyrimVR1415Timestamp = 0x5AEADAA0;
+    constexpr uint32_t cSelfJoinCallRva = 0x5C0613; // VA 0x1405C0613
+    constexpr uint8_t cExpected[5] = {0xE8, 0x48, 0x27, 0x68, 0x00};
+    constexpr uint8_t cNop5[5] = {0x0F, 0x1F, 0x44, 0x00, 0x00};
+
+    if (apNtHeader->FileHeader.TimeDateStamp != cSkyrimVR1415Timestamp)
+        return;
+
+    char setting[16] = {};
+    const DWORD cSettingLength = GetEnvironmentVariableA("URSOVNGARDE_LOGO_PATCH", setting, sizeof(setting));
+    const bool cUnderWine = Base::IsRunningUnderWine();
+    // Explicit false values override Wine detection; an absent or oversized setting uses that default.
+    const bool cSettingPresent = cSettingLength > 0 && cSettingLength < sizeof(setting);
+    const bool cSettingOff =
+        cSettingPresent && (std::strcmp(setting, "0") == 0 || _stricmp(setting, "off") == 0 || _stricmp(setting, "false") == 0 || _stricmp(setting, "no") == 0);
+    const bool cWanted = cSettingPresent ? !cSettingOff : cUnderWine;
+    if (!cWanted)
+        return;
+
+    if (cSelfJoinCallRva + sizeof(cExpected) > apNtHeader->OptionalHeader.SizeOfImage)
+        return;
+    auto* pCall = GetTargetRVA<uint8_t>(cSelfJoinCallRva);
+    if (std::memcmp(pCall, cNop5, sizeof(cNop5)) == 0)
+    {
+        OutputDebugStringA("urSovngarde ExeLoader: startup join patch already applied\n");
+        return;
+    }
+    if (std::memcmp(pCall, cExpected, sizeof(cExpected)) != 0)
+    {
+        // The log file isn't open yet this early; Wine's debugstr channel (and DebugView on Windows) shows this.
+        OutputDebugStringA("urSovngarde ExeLoader: startup join patch skipped, unexpected bytes at RVA 0x5C0613\n");
+        return;
+    }
+
+    DWORD oldProtect;
+    if (!VirtualProtect(pCall, sizeof(cNop5), PAGE_EXECUTE_READWRITE, &oldProtect))
+        return;
+    std::memcpy(pCall, cNop5, sizeof(cNop5));
+    VirtualProtect(pCall, sizeof(cNop5), oldProtect, &oldProtect);
+    FlushInstructionCache(GetCurrentProcess(), pCall, sizeof(cNop5));
+    OutputDebugStringA("urSovngarde ExeLoader: TESInitThread self-join replaced with a NOP (startup deadlock under emulation)\n");
+}
+
 bool ExeLoader::Load(const uint8_t* apProgramBuffer)
 {
     m_pBinary = apProgramBuffer;
@@ -306,8 +480,14 @@ bool ExeLoader::Load(const uint8_t* apProgramBuffer)
     auto sourceDebugDir = sourceNtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
     // Other plugins find this mod's calls through it, and the game has no exports of its own.
     auto sourceExportDir = sourceNtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+#if defined(_M_AMD64)
+    // The launcher's own functions, for the merged exception table below.
+    const auto sourceExceptionDir = sourceNtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    const uint32_t cSourceSizeOfImage = sourceNtHeader->OptionalHeader.SizeOfImage;
+#endif
 
     LoadSections(ntHeader);
+    PatchStartupJoinRace(ntHeader);
 
     // skse64_plugin_preloader (proxy d3dx9_42_dll and others?) may hook
     // _initterm_e during LoadImports(), so we have to ensure that IAT entry exists.
@@ -321,6 +501,20 @@ bool ExeLoader::Load(const uint8_t* apProgramBuffer)
 #if defined(_M_AMD64)
     LoadExceptionTable(ntHeader);
     LoadTLS(ntHeader, sourceNtHeader);
+
+    // Wine finds unwind data through the headers copied below, so it would only know the game's functions and an
+    // exception raised in our own code would end the process. Windows keeps the table it loaded and is left as it was.
+    IMAGE_DATA_DIRECTORY mergedExceptionDir{};
+    if (Base::IsRunningUnderWine())
+    {
+        if (BuildMergedExceptionTable(ntHeader, sourceExceptionDir, cSourceSizeOfImage, mergedExceptionDir))
+            ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION] = mergedExceptionDir;
+        else
+            std::snprintf(
+                s_exceptionTableNote, sizeof(s_exceptionTableNote), "urSovngarde ExeLoader: exception table merge for Wine skipped; only the game's functions have unwind data");
+    }
+    if (ThreadNameHandlerWanted() && AddVectoredExceptionHandler(1, &ResumeAfterThreadName))
+        s_threadNameHandlerInstalled = true;
 #endif
 
     const size_t ntCompleteHeaderSize = sizeof(IMAGE_NT_HEADERS) + (ntHeader->FileHeader.NumberOfSections * (sizeof(IMAGE_SECTION_HEADER)));

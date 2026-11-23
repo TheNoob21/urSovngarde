@@ -8,6 +8,7 @@
 
 #include "TargetConfig.h"
 #include "launcher.h"
+#include "TitlePath.h"
 
 #include "utils/ComUtils.h"
 #include "utils/Registry.h"
@@ -94,7 +95,7 @@ bool SelectInstall(bool aForceSelect)
                 if (pos == std::string::npos)
                     return false;
 
-                titlePath = path->substr(0, pos);
+                titlePath = TitlePathOf(*path);
                 exePath = (*path);
 
                 // game is installed into our directory, or otherwise.
