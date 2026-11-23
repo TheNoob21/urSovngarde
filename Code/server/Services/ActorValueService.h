@@ -20,8 +20,13 @@ struct ActorValueService
 
     TP_NOCOPYMOVE(ActorValueService);
 
+    // Gameplay:bEnableDragonSouls, sent to every client with the server's settings.
+    static bool IsDragonSoulsOn() noexcept;
+
 private:
     World& m_world;
+    //! Placed dragons whose soul was given, by reference: a dragon's entity made again (left and announced anew) gives none again.
+    mutable TiltedPhoques::Set<uint64_t> m_dragonSoulsGiven;
 
     void OnActorValueChanges(const PacketEvent<RequestActorValueChanges>& acMessage) const noexcept;
     void OnActorMaxValueChanges(const PacketEvent<RequestActorMaxValueChanges>& acMessage) const noexcept;

@@ -26,4 +26,10 @@ struct PresenceComponent
     //! Kept apart from SeenBy, which loses the owner's entry as soon as it lets the character go.
     uint32_t CombatTarget{};
     std::chrono::steady_clock::time_point CombatTargetAt{};
+
+    //! The target last passed on to the other games (CombatService::OnCombatTargets), at which epoch, and when.
+    //! A word that changes neither goes on again at most every 1.5 s.
+    uint32_t CombatTargetRelayed{};
+    uint32_t CombatTargetRelayedEpoch{};
+    std::chrono::steady_clock::time_point CombatTargetRelayedAt{};
 };

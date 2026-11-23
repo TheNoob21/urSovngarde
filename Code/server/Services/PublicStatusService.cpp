@@ -260,18 +260,23 @@ bool SameFilename(std::string_view aLeft, std::string_view aRight)
 // Empty when the plugin is unknown, and then no position is sent.
 std::string WorldSpaceName(World& aWorld, const GameId& acWorldSpaceId)
 {
-    for (const auto& entry : aWorld.ctx().at<ModsComponent>().GetStandardMods())
+    // A plugin has one id whether a game loads it light or not, so it is in either list.
+    const auto& cMods = aWorld.ctx().at<ModsComponent>();
+    for (const auto* pList : {&cMods.GetStandardMods(), &cMods.GetLiteMods()})
     {
-        if (entry.second.id != acWorldSpaceId.ModId)
-            continue;
-
-        const std::string_view plugin{entry.first.c_str(), entry.first.size()};
-        for (const auto& known : kKnownWorldSpaces)
+        for (const auto& entry : *pList)
         {
-            if (known.BaseId == acWorldSpaceId.BaseId && SameFilename(plugin, known.Plugin))
-                return std::string(known.EditorId);
+            if (entry.second.id != acWorldSpaceId.ModId)
+                continue;
+
+            const std::string_view plugin{entry.first.c_str(), entry.first.size()};
+            for (const auto& known : kKnownWorldSpaces)
+            {
+                if (known.BaseId == acWorldSpaceId.BaseId && SameFilename(plugin, known.Plugin))
+                    return std::string(known.EditorId);
+            }
+            return fmt::format("{}:{:X}", plugin, acWorldSpaceId.BaseId);
         }
-        return fmt::format("{}:{:X}", plugin, acWorldSpaceId.BaseId);
     }
     return {};
 }

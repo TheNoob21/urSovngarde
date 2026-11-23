@@ -4,24 +4,35 @@
 #include <Services/CharacterService.h>
 #include <Services/PresenceService.h>
 #include <Services/ObjectService.h>
+#include <Services/ActivationService.h>
+#include <Services/ReferenceStateService.h>
 #include <Services/QuestService.h>
+#include <Services/QuestAliasService.h>
 #include <Services/ServerListService.h>
 #include <Services/PublicStatusService.h>
 #include <Services/ActorValueService.h>
 #include <Services/AdminService.h>
 #include <Services/InventoryService.h>
 #include <Services/DroppedItemService.h>
+#include <Services/ItemTakeService.h>
 #include <Services/MagicService.h>
+#include <Services/MagicStateService.h>
 #include <Services/OverlayService.h>
 #include <Services/CommandService.h>
 #include <Services/StringCacheService.h>
 #include <Services/CombatService.h>
+#include <Services/FurnitureService.h>
+#include <Services/HeadTrackService.h>
+#include <Services/RagdollPoseService.h>
+#include <Services/ItemDataService.h>
 #include <Services/WeatherService.h>
 #include <Services/ScriptService.h>
 #include <Services/MapService.h>
+#include <Services/ExtensionService.h>
 #include <Services/VoiceService.h>
 #include <Services/WhereaboutsService.h>
 #include <Services/ReviveService.h>
+#include <Services/ArrowPickupService.h>
 #include <Services/SleepVoteService.h>
 #include <Services/HourMoveService.h>
 
@@ -42,24 +53,35 @@ World::World()
     ctx().emplace<PlayerService>(*this, m_dispatcher);
     ctx().emplace<CalendarService>(*this, m_dispatcher);
     ctx().emplace<ObjectService>(*this, m_dispatcher);
+    ctx().emplace<ActivationService>(*this, m_dispatcher);
+    ctx().emplace<ReferenceStateService>(*this, m_dispatcher);
     ctx().emplace<ModsComponent>();
     ctx().emplace<ServerListService>(*this, m_dispatcher);
     ctx().emplace<PublicStatusService>(*this, m_dispatcher);
     ctx().emplace<QuestService>(*this, m_dispatcher);
+    ctx().emplace<QuestAliasService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher);
     ctx().emplace<ActorValueService>(*this, m_dispatcher);
     ctx().emplace<InventoryService>(*this, m_dispatcher);
     ctx().emplace<DroppedItemService>(*this, m_dispatcher);
+    ctx().emplace<ItemTakeService>(*this, m_dispatcher);
     ctx().emplace<MagicService>(*this, m_dispatcher);
+    ctx().emplace<MagicStateService>(*this, m_dispatcher);
     ctx().emplace<OverlayService>(*this, m_dispatcher);
     ctx().emplace<CommandService>(*this, m_dispatcher);
     ctx().emplace<StringCacheService>(*this, m_dispatcher);
     ctx().emplace<CombatService>(*this, m_dispatcher);
+    ctx().emplace<FurnitureService>(*this, m_dispatcher);
+    ctx().emplace<HeadTrackService>(*this, m_dispatcher);
+    ctx().emplace<RagdollPoseService>(*this, m_dispatcher);
+    ctx().emplace<ItemDataService>(*this, m_dispatcher);
     ctx().emplace<WeatherService>(*this, m_dispatcher);
+    ctx().emplace<ExtensionService>(*this, m_dispatcher);
     ctx().emplace<MapService>(*this, m_dispatcher);
     ctx().emplace<VoiceService>(*this, m_dispatcher);
     ctx().emplace<WhereaboutsService>(*this, m_dispatcher);
     ctx().emplace<ReviveService>(*this, m_dispatcher);
+    ctx().emplace<ArrowPickupService>(*this, m_dispatcher);
     ctx().emplace<SleepVoteService>(*this, m_dispatcher);
     ctx().emplace<HourMoveService>(*this, m_dispatcher);
 

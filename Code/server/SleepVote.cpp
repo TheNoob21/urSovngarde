@@ -105,6 +105,72 @@ void SleepVote::Forget(const uint32_t aPlayerId) noexcept
     m_confirmations.erase(aPlayerId);
     m_cooldownSinceMs.erase(aPlayerId);
     m_freeDropsSinceEnd.erase(aPlayerId);
+    m_away.erase(aPlayerId);
+}
+
+/**
+ * Note that a player's game is loading or at the main menu; once kAwayGraceMs has passed, the vote no longer waits for them.
+ * Kept across votes, as a player can be away before a vote opens.
+ *
+ * @param aPlayerId The player's server id.
+ * @param aNowMs Server time now, in milliseconds.
+ * @return True when the player was not noted away already.
+ */
+bool SleepVote::MarkAway(const uint32_t aPlayerId, const uint64_t aNowMs) noexcept
+{
+    // A repeated word keeps the first time, so it cannot push the grace back.
+    return m_away.try_emplace(aPlayerId, Away{aNowMs, false}).second;
+}
+
+/**
+ * Note that a player's game is back in the world; the vote waits for them again.
+ *
+ * @param aPlayerId The player's server id.
+ * @return True when the player had been away long enough to be left out of the vote.
+ */
+bool SleepVote::MarkBack(const uint32_t aPlayerId) noexcept
+{
+    const auto cIt = m_away.find(aPlayerId);
+    if (cIt == m_away.end())
+        return false;
+
+    const bool cWasLeftOut = cIt->second.Told;
+    m_away.erase(cIt);
+    return cWasLeftOut;
+}
+
+/**
+ * List the connected players the vote waits for: all but those loading or at the main menu for kAwayGraceMs or more.
+ *
+ * @param acConnectedIds Server ids of every connected player.
+ * @param aNowMs Server time now, in milliseconds.
+ * @return Their server ids, in the order given.
+ */
+std::vector<uint32_t> SleepVote::ListVoters(const std::vector<uint32_t>& acConnectedIds, const uint64_t aNowMs) const
+{
+    std::vector<uint32_t> voters;
+    std::copy_if(acConnectedIds.begin(), acConnectedIds.end(), std::back_inserter(voters), [this, aNowMs](const uint32_t acId) { return !IsLeftOut(acId, aNowMs); });
+    return voters;
+}
+
+/**
+ * Take the players who have just been away for kAwayGraceMs, so the vote can be settled without them.
+ *
+ * @param aNowMs Server time now, in milliseconds.
+ * @return Their server ids; each is returned once per time away.
+ */
+std::vector<uint32_t> SleepVote::TakeNewlyAway(const uint64_t aNowMs) noexcept
+{
+    std::vector<uint32_t> newlyAway;
+    for (auto& [cId, away] : m_away)
+    {
+        if (away.Told || !ServerClock::HasPassed(away.SinceMs, kAwayGraceMs, aNowMs))
+            continue;
+
+        away.Told = true;
+        newlyAway.push_back(cId);
+    }
+    return newlyAway;
 }
 
 /**
@@ -262,6 +328,19 @@ bool SleepVote::HasCrossedEnd(const Confirmation& acConfirmation, const uint64_t
 {
     return m_endedAtMs && !ServerClock::HasPassed(*m_endedAtMs, kCrossGraceMs, acConfirmation.RecordedAtMs) &&
            !ServerClock::HasPassed(*m_endedAtMs, kCrossGraceMs, aNowMs);
+}
+
+/**
+ * Tell whether a player has been away for kAwayGraceMs or more.
+ *
+ * @param aPlayerId The player's server id.
+ * @param aNowMs Server time now, in milliseconds.
+ * @return True when they have, or when the server's clock went back since they were noted away.
+ */
+bool SleepVote::IsLeftOut(const uint32_t aPlayerId, const uint64_t aNowMs) const noexcept
+{
+    const auto cIt = m_away.find(aPlayerId);
+    return cIt != m_away.end() && ServerClock::HasPassed(cIt->second.SinceMs, kAwayGraceMs, aNowMs);
 }
 
 /**

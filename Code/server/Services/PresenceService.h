@@ -28,7 +28,7 @@ struct PresenceService
     std::optional<ActorPresenceKind> LoadedAs(entt::entity aEntity, uint32_t aPlayerId, std::chrono::steady_clock::time_point aNow) const noexcept;
 
     //! Who may run the character next, best first: a game with the reference, then one showing it on a stand-in, then one whose loaded cells take it in.
-    //! A silent game comes after all of those.
+    //! A silent game comes after all of those. Within each, the game running the fewest living characters goes first.
     TiltedPhoques::Vector<Player*> NextOwners(entt::entity aEntity, const OwnerComponent& acOwner, const CellIdComponent& acCell, bool aIsDragon,
                                               std::chrono::steady_clock::time_point aNow) const noexcept;
 

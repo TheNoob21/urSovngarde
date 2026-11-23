@@ -24,7 +24,7 @@ void WeatherService::OnWeatherChange(const PacketEvent<RequestWeatherChange>& ac
     if (!pParty)
         return;
 
-    pParty->CachedWeather = notify.Id;
+    pParty->Weathers.Set(acMessage.pPlayer->GetCellComponent().WorldSpaceId, notify.Id);
 
     if (!acMessage.pPlayer->GetCharacter())
         return;
@@ -40,8 +40,11 @@ void WeatherService::OnRequestCurrentWeather(const PacketEvent<RequestCurrentWea
     if (!pParty)
         return;
 
+    // The weather reported where this player is; none indoors, or before anyone there reported one, and then nothing is sent.
     NotifyWeatherChange notify{};
-    notify.Id = pParty->CachedWeather;
+    notify.Id = pParty->Weathers.Get(acMessage.pPlayer->GetCellComponent().WorldSpaceId);
+    if (!notify.Id)
+        return;
 
     acMessage.pPlayer->Send(notify);
 }

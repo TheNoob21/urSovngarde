@@ -1,6 +1,7 @@
 #include "InventoryService.h"
 
 #include <Components.h>
+#include <ContainerTrust.h>
 #include <EpochDrop.h>
 #include <World.h>
 #include <GameServer.h>
@@ -12,8 +13,12 @@
 #include <Messages/NotifyEquipmentChanges.h>
 #include <Messages/DrawWeaponRequest.h>
 #include <Messages/NotifyDrawWeapon.h>
+#include <Structs/ItemDataChange.h>
+
+#include <Services/ItemTakeService.h>
 
 #include <Setting.h>
+#include <FollowerCommand.h>
 
 InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
@@ -26,6 +31,10 @@ InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher)
 void InventoryService::OnInventoryChanges(const PacketEvent<RequestInventoryChanges>& acMessage) noexcept
 {
     auto& message = acMessage.Packet;
+
+    // A run-time item sent without what it is can be made by no other game.
+    if (!ItemDataChanges::IsSyncable(message.Item))
+        return;
 
     auto view = m_world.view<InventoryComponent>();
 
@@ -64,6 +73,21 @@ void InventoryService::OnInventoryChanges(const PacketEvent<RequestInventoryChan
                     "Rejected inventory change from player {:X} for actor {:X} because it is owned by player {:X}", acMessage.pPlayer->GetId(), message.ServerId, ownerId);
                 return;
             }
+
+            // A follower's trade accepts additions from her player's party, as her other commands do.
+            // Ordinary non-follower looting and transfers keep their existing range/epoch policy.
+            if (message.Item.Count > 0 && pOwnerComponent->FollowerOfPlayerId != 0)
+            {
+                auto& parties = m_world.GetPartyService();
+                Player* pFollowerPlayer = m_world.GetPlayerManager().GetById(pOwnerComponent->FollowerOfPlayerId);
+                const auto* pParty = parties.GetPlayerParty(acMessage.pPlayer);
+                const bool cSameParty = pParty && pFollowerPlayer && pParty == parties.GetPlayerParty(pFollowerPlayer);
+                if (!FollowerCommand::MayAsk(pOwnerComponent->FollowerOfPlayerId, pFollowerPlayer != nullptr, acMessage.pPlayer->GetId(), cSameParty))
+                {
+                    spdlog::debug("Rejected inventory addition from player {:X} for follower {:X}: not of her player's party", acMessage.pPlayer->GetId(), message.ServerId);
+                    return;
+                }
+            }
         }
     }
     else if (message.OwnershipEpoch != 0)
@@ -74,8 +98,45 @@ void InventoryService::OnInventoryChanges(const PacketEvent<RequestInventoryChan
         return;
     }
 
+    // A container no player owns is changed only from a game that has it in range, by a count it could hold, as the whole-chest path does.
+    if (!pOwnerComponent)
+    {
+        if (const auto* pContainerCell = m_world.try_get<CellIdComponent>(*it))
+        {
+            const auto* pContainerCharacter = m_world.try_get<CharacterComponent>(*it);
+            const bool cInRange =
+                acMessage.pPlayer->GetCellComponent() && acMessage.pPlayer->GetCellComponent().IsInRange(*pContainerCell, pContainerCharacter && pContainerCharacter->IsDragon());
+            if (!ContainerTrust::MayChange(cInRange, message.Item.Count))
+            {
+                spdlog::debug(
+                    "Rejected inventory change from player {:X} for container {:X}: out of range or an impossible count ({})", acMessage.pPlayer->GetId(), message.ServerId,
+                    message.Item.Count);
+                return;
+            }
+        }
+    }
+
     auto& inventoryComponent = view.get<InventoryComponent>(*it);
-    inventoryComponent.Content.AddOrRemoveEntry(message.Item);
+    Inventory::Entry item = message.Item;
+
+    // A take out of a chest or a body, which another player may have made first: the server gives what it still holds, never below none.
+    // Only a chest or a dead body refuses one. A merchant's chest is sent whole after a trade instead (VendorChest), and a living NPC's
+    // removals are mostly its own (a potion drunk, an arrow shot) or paid for (barter).
+    const auto* pCharacterComponent = m_world.try_get<CharacterComponent>(*it);
+    if (item.Count < 0 && !(pCharacterComponent && pCharacterComponent->IsPlayer()))
+    {
+        const auto* pObjectComponent = m_world.try_get<ObjectComponent>(*it);
+        const bool cMayRefuse = pCharacterComponent ? pCharacterComponent->IsDead() : !(pObjectComponent && pObjectComponent->IsVendor);
+        item.Count = -m_world.ctx().at<ItemTakeService>().TakeOut(acMessage.pPlayer, message.ServerId, inventoryComponent.Content, message.Item, cMayRefuse);
+        if (item.Count == 0)
+            return;
+    }
+    else
+        inventoryComponent.Content.AddOrRemoveEntry(item);
+
+    // A shared chest that came empty and is changed now is still a container: the ContainerLedger keeps it when its cell empties.
+    if (auto* pObjectComponent = m_world.try_get<ObjectComponent>(*it))
+        pObjectComponent->HadContent = true;
 
     if (!message.UpdateClients && !isRemoteNpcInteraction)
         return;
@@ -83,7 +144,7 @@ void InventoryService::OnInventoryChanges(const PacketEvent<RequestInventoryChan
     NotifyInventoryChanges notify;
     notify.ServerId = message.ServerId;
     notify.OwnershipEpoch = message.OwnershipEpoch;
-    notify.Item = message.Item;
+    notify.Item = item;
     notify.PickedUp = message.PickedUp;
 
     // Never forwarded as a drop: DroppedItemService places the item, and the flag would drop a second one.

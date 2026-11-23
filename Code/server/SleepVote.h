@@ -30,6 +30,12 @@ public:
     /** How soon after a vote ended a confirmation, and its drop, count as having crossed the end on their way, in milliseconds; such a confirmation is dropped with no wait. */
     static constexpr uint64_t kCrossGraceMs = 2000;
 
+    /**
+     * How long a player has to be loading or at the main menu before the vote stops waiting for them, in milliseconds.
+     * A door's loading screen is shorter, so walking through one never counts as agreeing.
+     */
+    static constexpr uint64_t kAwayGraceMs = 15000;
+
     /** What came of a confirmation. */
     enum class ConfirmResult
     {
@@ -99,6 +105,41 @@ public:
      * @param aPlayerId The player's server id.
      */
     void Forget(uint32_t aPlayerId) noexcept;
+
+    /**
+     * Note that a player's game is loading or at the main menu; once kAwayGraceMs has passed, the vote no longer waits for them.
+     * Kept across votes, as a player can be away before a vote opens.
+     *
+     * @param aPlayerId The player's server id.
+     * @param aNowMs Server time now, in milliseconds.
+     * @return True when the player was not noted away already.
+     */
+    bool MarkAway(uint32_t aPlayerId, uint64_t aNowMs) noexcept;
+
+    /**
+     * Note that a player's game is back in the world; the vote waits for them again.
+     *
+     * @param aPlayerId The player's server id.
+     * @return True when the player had been away long enough to be left out of the vote.
+     */
+    bool MarkBack(uint32_t aPlayerId) noexcept;
+
+    /**
+     * List the connected players the vote waits for: all but those loading or at the main menu for kAwayGraceMs or more.
+     *
+     * @param acConnectedIds Server ids of every connected player.
+     * @param aNowMs Server time now, in milliseconds.
+     * @return Their server ids, in the order given.
+     */
+    std::vector<uint32_t> ListVoters(const std::vector<uint32_t>& acConnectedIds, uint64_t aNowMs) const;
+
+    /**
+     * Take the players who have just been away for kAwayGraceMs, so the vote can be settled without them.
+     *
+     * @param aNowMs Server time now, in milliseconds.
+     * @return Their server ids; each is returned once per time away.
+     */
+    std::vector<uint32_t> TakeNewlyAway(uint64_t aNowMs) noexcept;
 
     /**
      * Take the players whose change of length was recorded quietly and may now be told, as kChangeNoticeIntervalMs has passed.
@@ -194,6 +235,22 @@ private:
      */
     bool HasCrossedEnd(const Confirmation& acConfirmation, uint64_t aNowMs) const noexcept;
 
+    /** One player's time away from the world: loading or at the main menu. */
+    struct Away
+    {
+        uint64_t SinceMs = 0; // server time the player was noted away
+        bool Told = false;    // returned by TakeNewlyAway already
+    };
+
+    /**
+     * Tell whether a player has been away for kAwayGraceMs or more.
+     *
+     * @param aPlayerId The player's server id.
+     * @param aNowMs Server time now, in milliseconds.
+     * @return True when they have, or when the server's clock went back since they were noted away.
+     */
+    bool IsLeftOut(uint32_t aPlayerId, uint64_t aNowMs) const noexcept;
+
     /**
      * Tell whether the vote has been open for its whole timeout.
      *
@@ -215,4 +272,5 @@ private:
     uint64_t m_openedAtMs = 0;                        // server time of the vote's first confirmation
     std::optional<uint64_t> m_endedAtMs;              // server time the last vote was agreed or ran out; nothing before the first
     std::set<uint32_t> m_freeDropsSinceEnd;           // players whose drop since the last end cost no wait
+    std::map<uint32_t, Away> m_away;                  // players loading or at the main menu, by server id
 };

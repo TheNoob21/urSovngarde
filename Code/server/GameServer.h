@@ -13,6 +13,11 @@ struct AuthenticationRequest;
 struct Player;
 struct PartyComponent;
 
+namespace ModContent
+{
+struct Manifest;
+}
+
 namespace Resources
 {
 struct ResourceCollection;
@@ -45,16 +50,19 @@ struct GameServer final : Server
     void Initialize();
     void Kill();
 
-    bool CheckMoPo();
     void BindMessageHandlers();
     void BindServerCommands();
 
     void UpdateInfo();
     void UpdateTimeScale();
     void UpdateSettings();
+    void SendSettingsTo(Player* apPlayer) const;
 
     // Packet dispatching
     void Send(ConnectionId_t aConnectionId, const ServerMessage& acServerMessage, TiltedPhoques::EPacketFlags aFlags = TiltedPhoques::kReliable) const;
+    //! One message to several players, written once for all of them.
+    void SendToConnections(const ConnectionId_t* apConnectionIds, size_t aCount, const ServerMessage& acServerMessage, TiltedPhoques::EPacketFlags aFlags) const;
+    void SendToConnections(const TiltedPhoques::Vector<ConnectionId_t>& acConnectionIds, const ServerMessage& acServerMessage) const;
     void Send(ConnectionId_t aConnectionId, const ServerAdminMessage& acServerMessage) const;
     // Small messages only (voice): a 16 KB buffer, not Send's 1 MB.
     void SendUnreliable(ConnectionId_t aConnectionId, const ServerMessage& acServerMessage) const;
@@ -70,6 +78,10 @@ struct GameServer final : Server
     bool IsPasswordProtected() const noexcept { return m_isPasswordProtected; }
     [[nodiscard]] bool IsPublicServer() const noexcept;
     [[nodiscard]] bool AllowsAutoPartyJoin() const noexcept;
+    [[nodiscard]] bool IsPvpEnabled() const noexcept;
+    [[nodiscard]] TiltedPhoques::Vector<String> GetPersonalPlugins() const;
+    // Gameplay:bValidateClientReports (ClientTrust.h)
+    [[nodiscard]] bool ValidatesClientReports() const noexcept;
 
     template <class T> void ForEachAdmin(const T& aFunctor)
     {
@@ -108,6 +120,7 @@ protected:
     void OnDisconnection(ConnectionId_t aConnectionId, EDisconnectReason aReason) override;
 
 private:
+    void BroadcastServerIdentity() const;
     void UpdateTitle() const;
     String SanitizeUsername(const String& acUsername) const noexcept;
 
@@ -127,6 +140,7 @@ private:
     TiltedPhoques::Map<ConnectionId_t, entt::entity> m_connectionToEntity;
 
     UniquePtr<World> m_pWorld;
+    UniquePtr<ModContent::Manifest> m_pHostContent;
 
     bool m_requestStop;
 

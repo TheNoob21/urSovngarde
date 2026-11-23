@@ -1,8 +1,10 @@
 #pragma once
 
 #include <Events/PacketEvent.h>
+#include <ViewerResends.h>
 
 struct World;
+struct PlayerLeaveEvent;
 struct ShiftGridCellRequest;
 struct EnterInteriorCellRequest;
 struct EnterExteriorCellRequest;
@@ -29,11 +31,14 @@ protected:
     void OnPlayerRespawnRequest(const PacketEvent<PlayerRespawnRequest>& acMessage) const noexcept;
     void OnPlayerLevelRequest(const PacketEvent<PlayerLevelRequest>& acMessage) const noexcept;
     void OnNpcPlugins(const PacketEvent<RequestNpcPlugins>& acMessage) const noexcept;
+    void OnPlayerLeave(const PlayerLeaveEvent& acEvent) const noexcept;
 
 private:
     void RemoveWhatLeftRange(Player* apPlayer, const CellIdComponent& acPrevious) const noexcept;
 
     World& m_world;
+    //! The characters each player was last sent at a shift of its loaded cells, by player id then server id (ViewerResends).
+    mutable TiltedPhoques::Map<uint32_t, TiltedPhoques::Map<uint32_t, ViewerResends::Record>> m_spawnsSent;
 
     entt::scoped_connection m_gridCellShiftConnection;
     entt::scoped_connection m_exteriorCellEnterConnection;
@@ -41,4 +46,5 @@ private:
     entt::scoped_connection m_playerRespawnConnection;
     entt::scoped_connection m_playerLevelConnection;
     entt::scoped_connection m_npcPluginsConnection;
+    entt::scoped_connection m_playerLeaveConnection;
 };

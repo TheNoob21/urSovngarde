@@ -6,11 +6,10 @@
 #include <Events/UpdateEvent.h>
 
 #include <Messages/NotifyPlayerWhereabouts.h>
+#include <WhereaboutsRules.h>
 
-namespace
-{
-constexpr auto kPeriod = std::chrono::seconds(2);
-} // namespace
+Console::Setting bLivePlayerMap{
+    "Gameplay:bLivePlayerMap", "Tells the players where everyone is four times a second while someone moves, so world map icons move smoothly. Off: every two seconds", true};
 
 WhereaboutsService::WhereaboutsService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
     : m_world(aWorld)
@@ -20,10 +19,13 @@ WhereaboutsService::WhereaboutsService(World& aWorld, entt::dispatcher& aDispatc
 
 void WhereaboutsService::OnUpdate(const UpdateEvent&) noexcept
 {
+    // Looked at as often as a moving position is told; only sent when something changed, or once the heartbeat is due.
+    // Off: every two seconds, whatever changed.
+    const bool cLive = bLivePlayerMap;
     const auto cNow = std::chrono::steady_clock::now();
-    if (cNow < m_nextSend)
+    if (cNow < m_nextLook)
         return;
-    m_nextSend = cNow + kPeriod;
+    m_nextLook = cNow + std::chrono::milliseconds(cLive ? WhereaboutsRules::kMovingEveryMs : WhereaboutsRules::kHeartbeatMs);
 
     auto& players = m_world.GetPlayerManager();
     if (players.Count() < 2)
@@ -53,7 +55,13 @@ void WhereaboutsService::OnUpdate(const UpdateEvent&) noexcept
     if (notify.Players.size() < 2)
         return;
 
-    // Unreliable: the next one is two seconds away, and a lost one is only a marker two seconds late.
+    const auto cSinceLast = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(cNow - m_lastSent).count());
+    if (cLive && !WhereaboutsRules::SendDue(cSinceLast, !(notify == m_last)))
+        return;
+    m_lastSent = cNow;
+    m_last = notify;
+
+    // Unreliable: the next one is a quarter of a second away while they move, and a lost one is only a marker that much late.
     for (Player* pPlayer : players)
         pPlayer->SendUnreliable(notify);
 }

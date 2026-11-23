@@ -72,6 +72,12 @@ public:
     TDate GetDate() const noexcept;
 
     float GetTimeScale() const noexcept { return m_dateTime.m_timeModel.TimeScale; }
+    /**
+     * Give the game hours on the calendar every player's game follows.
+     *
+     * @return The hours counted from year 0.
+     */
+    double GetGameHours() const noexcept { return m_dateTime.GetTimeInDays() * 24.0; }
     bool SetTimeScale(float aScale) noexcept;
 
 private:

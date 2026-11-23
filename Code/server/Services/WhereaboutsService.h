@@ -1,10 +1,12 @@
 #pragma once
 
+#include <Messages/NotifyPlayerWhereabouts.h>
+
 struct World;
 struct UpdateEvent;
 
 /**
- * @brief Every two seconds, tells every player where every player is (NotifyPlayerWhereabouts).
+ * @brief Tells every player where every player is (NotifyPlayerWhereabouts): four times a second while someone moves, every two seconds otherwise.
  * Clients already know who is in their party.
  */
 struct WhereaboutsService
@@ -19,7 +21,9 @@ protected:
 
 private:
     World& m_world;
-    std::chrono::steady_clock::time_point m_nextSend{};
+    std::chrono::steady_clock::time_point m_nextLook{};
+    std::chrono::steady_clock::time_point m_lastSent{};
+    NotifyPlayerWhereabouts m_last{};
 
     entt::scoped_connection m_updateConnection;
 };

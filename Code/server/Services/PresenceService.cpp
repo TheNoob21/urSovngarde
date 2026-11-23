@@ -6,6 +6,7 @@
 
 #include <Events/UpdateEvent.h>
 #include <Messages/RequestActorPresence.h>
+#include <OwnerSpread.h>
 
 namespace
 {
@@ -63,6 +64,9 @@ TiltedPhoques::Vector<Player*> PresenceService::NextOwners(const entt::entity aE
     };
 
     TiltedPhoques::Vector<Player*> candidates;
+    std::vector<OwnerSpread::Candidate> ranks;
+    uint32_t tier = 0;
+    bool tied = false;
     for (const bool cSilentToo : {false, true})
     {
         for (const Has cHas : {Has::Reference, Has::StandIn, Has::RangeOnly})
@@ -85,11 +89,34 @@ TiltedPhoques::Vector<Player*> PresenceService::NextOwners(const entt::entity aE
                 else
                     takes = pPlayer->GetCellComponent().IsInRange(acCell, aIsDragon);
                 if (takes)
+                {
+                    tied = tied || (!ranks.empty() && ranks.back().Tier == tier);
                     candidates.push_back(pPlayer);
+                    ranks.push_back({tier, 0});
+                }
             }
+            ++tier;
         }
     }
-    return candidates;
+    if (!tied)
+        return candidates;
+
+    // Within a tier, the game running the fewest living characters goes first, so a leaving owner's NPCs are spread out.
+    const auto view = m_world.view<OwnerComponent, CharacterComponent>();
+    for (const auto cEntity : view)
+    {
+        const auto& cCharacter = view.get<CharacterComponent>(cEntity);
+        if (cCharacter.IsPlayer() || cCharacter.IsDead())
+            continue;
+        const auto cCandidate = std::find(candidates.begin(), candidates.end(), view.get<OwnerComponent>(cEntity).GetOwner());
+        if (cCandidate != candidates.end())
+            ++ranks[static_cast<size_t>(cCandidate - candidates.begin())].Owned;
+    }
+
+    TiltedPhoques::Vector<Player*> ordered;
+    for (const size_t cIndex : OwnerSpread::Order(ranks))
+        ordered.push_back(candidates[cIndex]);
+    return ordered;
 }
 
 uint32_t PresenceService::FightOf(const entt::entity aEntity) const noexcept

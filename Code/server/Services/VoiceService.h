@@ -1,10 +1,12 @@
 #pragma once
 
 #include <Events/PacketEvent.h>
+#include <VoiceRelayRules.h>
 
 struct World;
 struct VoiceDataRequest;
 struct VoiceStateRequest;
+struct PlayerLeaveEvent;
 
 /**
  * @brief Relays each voice piece, unreliable, to nearby players with voice on and to the speaker's party.
@@ -19,21 +21,16 @@ struct VoiceService
 protected:
     void OnVoiceState(const PacketEvent<VoiceStateRequest>& acMessage) const noexcept;
     void OnVoiceData(const PacketEvent<VoiceDataRequest>& acMessage) noexcept;
+    void OnPlayerLeave(const PlayerLeaveEvent& acEvent) noexcept;
 
 private:
     bool CanHear(const Player& acListener, const Player& acSpeaker) const noexcept;
 
-    struct Budget
-    {
-        std::chrono::steady_clock::time_point Since{};
-        uint32_t Packets{0};
-    };
-
     World& m_world;
-    // Pieces per speaker this second; past the limit the rest of the second is dropped.
-    // Steam sends about 17 a second while talking.
-    Map<uint32_t, Budget> m_budgets;
+    // Pieces and bytes per speaker this second; past the limit the rest of the second is dropped (VoiceRelayRules).
+    Map<uint32_t, VoiceRelayRules::Budget> m_budgets;
 
     entt::scoped_connection m_voiceStateConnection;
     entt::scoped_connection m_voiceDataConnection;
+    entt::scoped_connection m_leaveConnection;
 };

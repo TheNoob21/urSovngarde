@@ -1,61 +1,34 @@
 #include "PluginRules.h"
 
-#include <algorithm>
-#include <cctype>
-#include <cstring>
-#include <iterator>
+#include <ModContent.h>
 
 namespace PluginRules
 {
 namespace
 {
-// VR's own master, loaded by every VR game.
-constexpr const char* cVrOwn[] = {"SkyrimVR.esm"};
-
-// The free Creation Club files every flat Skyrim has had since 1.6.640 (the Anniversary update); none exists for VR.
-constexpr const char* cFlatOwn[] = {
-    "_ResourcePack.esl", "ccBGSSSE001-Fish.esm", "ccBGSSSE025-AdvDSGS.esm", "ccBGSSSE037-Curios.esl", "ccQDRSSE001-SurvivalMode.esl",
-};
-
-bool SameName(const TiltedPhoques::String& acPlugin, const char* acpName) noexcept
+TiltedPhoques::Vector<TiltedPhoques::String> RemoveExempt(
+    TiltedPhoques::Vector<TiltedPhoques::String>& aPlugins, const TiltedPhoques::Vector<TiltedPhoques::String>& acPersonal, ModContent::Edition aHere, ModContent::Edition aThere)
 {
-    return acPlugin.size() == std::strlen(acpName) &&
-           std::equal(acPlugin.begin(), acPlugin.end(), acpName, [](const char aLeft, const char aRight) { return std::tolower(static_cast<unsigned char>(aLeft)) == std::tolower(static_cast<unsigned char>(aRight)); });
-}
-
-template <size_t N> bool InList(const TiltedPhoques::String& acPlugin, const char* const (&acNames)[N]) noexcept
-{
-    return std::any_of(std::begin(acNames), std::end(acNames), [&acPlugin](const char* acpName) { return SameName(acPlugin, acpName); });
-}
-} // namespace
-
-bool IsGameOwn(const TiltedPhoques::String& acPlugin, const bool aFlat) noexcept
-{
-    return aFlat ? InList(acPlugin, cFlatOwn) : InList(acPlugin, cVrOwn);
-}
-
-TiltedPhoques::Vector<TiltedPhoques::String> RemoveGameOwn(TiltedPhoques::Vector<TiltedPhoques::String>& aOnlyThisPlayer, const bool aFlat) noexcept
-{
-    TiltedPhoques::Vector<TiltedPhoques::String> removed;
-    TiltedPhoques::Vector<TiltedPhoques::String> kept;
-    for (TiltedPhoques::String& plugin : aOnlyThisPlayer)
+    TiltedPhoques::Vector<TiltedPhoques::String> removed, kept;
+    for (auto& plugin : aPlugins)
     {
-        if (IsGameOwn(plugin, aFlat))
+        if (ModContent::IsPersonal(plugin, acPersonal) || ModContent::IsBundledSEOnly(plugin, aHere, aThere))
             removed.push_back(std::move(plugin));
         else
             kept.push_back(std::move(plugin));
     }
-    aOnlyThisPlayer = std::move(kept);
+    aPlugins = std::move(kept);
     return removed;
 }
+} // namespace
 
-LeftOut FilterForPair(TiltedPhoques::Vector<TiltedPhoques::String>& aOnlyHere, const bool aHereFlat, TiltedPhoques::Vector<TiltedPhoques::String>& aOnlyThere, const bool aThereFlat) noexcept
+LeftOut FilterForPair(
+    TiltedPhoques::Vector<TiltedPhoques::String>& aOnlyHere, bool aHereFlat, TiltedPhoques::Vector<TiltedPhoques::String>& aOnlyThere, bool aThereFlat,
+    const TiltedPhoques::Vector<TiltedPhoques::String>& acPersonal) noexcept
 {
-    LeftOut leftOut;
-    if (aHereFlat == aThereFlat)
-        return leftOut;
-    leftOut.Here = RemoveGameOwn(aOnlyHere, aHereFlat);
-    leftOut.There = RemoveGameOwn(aOnlyThere, aThereFlat);
-    return leftOut;
+    using ModContent::Edition;
+    const auto cHere = aHereFlat ? Edition::kSE : Edition::kVR;
+    const auto cThere = aThereFlat ? Edition::kSE : Edition::kVR;
+    return {RemoveExempt(aOnlyHere, acPersonal, cHere, cThere), RemoveExempt(aOnlyThere, acPersonal, cThere, cHere)};
 }
-} // namespace PluginRules
+}

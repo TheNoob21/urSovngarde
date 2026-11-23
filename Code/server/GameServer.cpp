@@ -3,6 +3,7 @@
 #include <BuildVersion.h>
 #include <steam/isteamnetworkingutils.h>
 #include <AdminKeys.h>
+#include <LoginGate.h>
 #include <openssl/evp.h>
 #include <Packet.hpp>
 
@@ -19,11 +20,15 @@
 #include <AdminMessages/AdminSessionOpen.h>
 #include <AdminMessages/ClientAdminMessageFactory.h>
 #include <Messages/AuthenticationResponse.h>
+#include <Messages/NotifyServerIdentity.h>
 #include <Messages/ClientMessageFactory.h>
 #include <Messages/NotifyPlayerJoined.h>
 #include <Messages/NotifyPlayerLeft.h>
+#include <ModContent.h>
 #include <Messages/NotifySettingsChange.h>
 #include <Services/CalendarService.h>
+#include <Services/QuestAliasService.h>
+#include <Services/ActorValueService.h>
 #include <console/ConsoleRegistry.h>
 #include <resources/ResourceCollection.h>
 
@@ -73,14 +78,26 @@ Console::Setting bAnnounceServer{"LiveServices:bAnnounceServer", "Whether to lis
 Console::Setting uDifficulty{"Gameplay:uDifficulty", "In game difficulty (0 to 5)", 4u};
 Console::Setting bEnableGreetings{"Gameplay:bEnableGreetings", "Enables NPC greetings (disabled by default since they can be spammy with dialogue sync)", false};
 Console::Setting bEnablePvp{"Gameplay:bEnablePvp", "Enables pvp", false};
+Console::Setting bValidateClientReports{
+    "Gameplay:bValidateClientReports",
+    "Refuses what a game reports that the server can prove wrong: damage to a player with PvP off, a cast or shot from an actor the game does not run, a jump beyond the game's "
+    "speeds",
+    true};
 Console::Setting bSyncPlayerHomes{"Gameplay:bSyncPlayerHomes", "Sync chests and displays in player homes and other NoResetZones", false};
 Console::Setting bEnableDeathSystem{"Gameplay:bEnableDeathSystem", "Enables the custom multiplayer death system", true};
 Console::Setting uTimeScale{"Gameplay:uTimeScale", "How many seconds pass ingame for every real second (0 to 1000). Changing this can make the game unstable", 20u};
-Console::Setting bSyncPlayerCalendar{"Gameplay:bSyncPlayerCalendar", "Syncs up all player calendars to be the same day, month, and year. This uses the date of the player with the furthest ahead date at connection.", false};
+Console::Setting bSyncPlayerCalendar{
+    "Gameplay:bSyncPlayerCalendar",
+    "Syncs up all player calendars to be the same day, month, and year. This uses the date of the player with the furthest ahead date at connection.", true};
 Console::Setting bAutoPartyJoin{"Gameplay:bAutoPartyJoin", "Join parties automatically, as long as there is only one party in the server", true};
 Console::Setting bUnpausedMenus{"Gameplay:bUnpausedMenus", "VR: the skills and map menus do not pause the game while connected. Inventory, magic and the other menus never do", false};
+Console::Setting bEnableKillMoves{
+    "Gameplay:bEnableKillMoves", "Allows killmoves (off by default: they are paired animations, which are not synced, so each game turns them off while connected)", false};
+Console::Setting bEnableProjectileKillCam{"Gameplay:bEnableProjectileKillCam", "Allows the local projectile kill camera while connected", false};
 // ModPolicy Stuff
-Console::Setting bEnableModCheck{"ModPolicy:bEnableModCheck", "Bypass the checking of mods on the server", false, Console::SettingsFlags::kLocked};
+Console::Setting bRequireMatchingContent{
+    "ModPolicy:bRequireMatchingContent", "Require shared content plugins to match the host. False only warns about differences.", true, Console::SettingsFlags::kLocked};
+Console::StringSetting sPersonalPlugins{"ModPolicy:sPersonalPlugins", "Additional personal plugin file names, separated by commas.", "", Console::SettingsFlags::kLocked};
 Console::Setting bAllowSKSE{"ModPolicy:bAllowSKSE", "Allow clients with SKSE active to join", true, Console::SettingsFlags::kLocked};
 Console::Setting bAllowMO2{"ModPolicy:bAllowMO2", "Allow clients running Mod Organizer 2 to join", true, Console::SettingsFlags::kLocked};
 
@@ -143,30 +160,18 @@ Console::Command<> ShowMoPoStatus(
             return aToggle ? "yes" : "no";
         };
 
-        spdlog::get("ConOut")->info("Modcheck enabled: {}\nSKSE allowed: {}\nMO2 allowed: {}", formatStatus(bEnableModCheck), formatStatus(bAllowSKSE), formatStatus(bAllowMO2));
+        spdlog::get("ConOut")->info(
+            "Require matching shared content: {}\nSKSE allowed: {}\nMO2 allowed: {}", formatStatus(bRequireMatchingContent), formatStatus(bAllowSKSE), formatStatus(bAllowMO2));
     });
 
 // -- Constants --
-constexpr char kBypassMoPoWarning[]{"ModCheck is disabled. This can lead to desync and other oddities. Make sure you know what you are doing. We "
-                                    "may not be able to assist you if ModCheck was disabled."};
-
-constexpr char kMopoRecordsMissing[]{"Failed to start: ModPolicy's ModCheck is enabled, but no mods are installed. Players won't be able "
-                                     "to join! Please create a Data/ directory, and put a \"loadorder.txt\" file in there."
-                                     "Check the wiki, which can be found on skyrim-together.com, for more details."};
-
-constexpr char kCalendarSyncWarning[]{"Calendar sync is enabled. We generally do not recommend that you use this feature."
-                                      "Calendar sync can cause the calendar to jump ahead or behind, which might mess up the timing of quests."
-                                      "If you disable this feature again (which is the default setting), the days will still progress, but the"
-                                      "exact date will differ slightly between clients (which has no impact on gameplay)."};
+constexpr char kCalendarSyncNote[]{"Calendar sync is on (Gameplay:bSyncPlayerCalendar). It can make a calendar jump ahead or behind, which might mess up the "
+                                   "timing of quests. With it off, the days still progress, but the exact date differs slightly between clients (which has no "
+                                   "impact on gameplay)."};
 
 static uint16_t GetUserTickRate()
 {
     return bPremiumTickrate ? 60 : 30;
-}
-
-static bool IsMoPoActive()
-{
-    return bEnableModCheck;
 }
 
 ServerSettings GetSettings()
@@ -181,6 +186,10 @@ ServerSettings GetSettings()
     settings.AutoPartyJoin = bAutoPartyJoin;
     settings.SleepEnabled = CalendarService::IsSleepAvailable();
     settings.UnpausedMenus = bUnpausedMenus;
+    settings.QuestAliasSync = QuestAliasService::IsEnabled();
+    settings.DragonSouls = ActorValueService::IsDragonSoulsOn();
+    settings.KillMoves = bEnableKillMoves;
+    settings.ProjectileKillCam = bEnableProjectileKillCam;
     return settings;
 }
 
@@ -255,6 +264,16 @@ bool GameServer::IsPublicServer() const noexcept
     return bAnnounceServer;
 }
 
+bool GameServer::IsPvpEnabled() const noexcept
+{
+    return bEnablePvp;
+}
+
+bool GameServer::ValidatesClientReports() const noexcept
+{
+    return bValidateClientReports;
+}
+
 bool GameServer::AllowsAutoPartyJoin() const noexcept
 {
     // On a public server anyone could join a stranger's party.
@@ -263,11 +282,8 @@ bool GameServer::AllowsAutoPartyJoin() const noexcept
 
 void GameServer::Initialize()
 {
-    if (!CheckMoPo())
-        return;
-
     if (bSyncPlayerCalendar)
-        spdlog::warn(kCalendarSyncWarning);
+        spdlog::info(kCalendarSyncNote);
 
     BindServerCommands();
     m_pWorld->GetScriptService().Initialize(*m_pResources);
@@ -280,25 +296,6 @@ void GameServer::Kill()
 {
     spdlog::info("Server shutdown requested");
     m_requestStop = true;
-}
-
-bool GameServer::CheckMoPo()
-{
-    if (!bEnableModCheck)
-    {
-        // TODO: re-enable this warning when mopo has good ui and the line endings problem is fixed
-        // spdlog::warn(kBypassMoPoWarning);
-    }
-    // Server is not aware of any installed mods.
-    else if (!m_pWorld->GetRecordCollection())
-    {
-        spdlog::error(kMopoRecordsMissing);
-        Kill();
-        return false;
-    }
-    else
-        spdlog::info("ModPolicy is active");
-    return true;
 }
 
 void GameServer::BindMessageHandlers()
@@ -585,7 +582,8 @@ void GameServer::UpdateInfo()
 
     m_info.desc = "";
     m_info.icon_url = "";
-    m_info.tagList = "";
+    // The public list is shared with other builds; this marks the servers a client of this protocol can join.
+    m_info.tagList = "urs:" BUILD_PROTOCOL;
     m_info.tick_rate = GetUserTickRate();
 }
 
@@ -623,6 +621,19 @@ void GameServer::OnConsume(const void* apData, const uint32_t aSize, const Conne
 {
     ViewBuffer buf((uint8_t*)apData, aSize);
     Buffer::Reader reader(&buf);
+
+    // A connection with no player is a stranger: only the login is read from it, so no other decoder runs before the player check.
+    if (!m_pWorld->GetPlayerManager().GetByConnectionId(aConnectionId))
+    {
+        Buffer::Reader peek(&buf);
+        uint64_t opcode = 0;
+        if (!peek.ReadBits(opcode, sizeof(ClientOpcode) * 8) || !LoginGate::IsReadBeforeLogin(opcode))
+        {
+            spdlog::error("Connection {:x} sent a message before logging in - Kicked.", aConnectionId);
+            Kick(aConnectionId);
+            return;
+        }
+    }
 
     // TODO: ClientAdminMessageFactory
     /*if (m_adminSessions.contains(aConnectionId)) [[unlikely]]
@@ -678,6 +689,10 @@ void GameServer::OnDisconnection(const ConnectionId_t aConnectionId, EDisconnect
 
         m_pWorld->GetDispatcher().trigger(PlayerLeaveEvent(pPlayer));
 
+        // The last player out ends the content baseline, as it ends the other session state. The leaver is still counted here.
+        if (m_pWorld->GetPlayerManager().Count() <= 1)
+            m_pHostContent.reset();
+
         NotifyPlayerLeft notify{};
         notify.PlayerId = pPlayer->GetId();
         notify.Username = pPlayer->GetUsername();
@@ -709,6 +724,7 @@ void GameServer::OnDisconnection(const ConnectionId_t aConnectionId, EDisconnect
         m_pWorld->GetDispatcher().update();
 
         m_pWorld->GetPlayerManager().Remove(pPlayer);
+        BroadcastServerIdentity();
     }
 
     UpdateTitle();
@@ -716,6 +732,16 @@ void GameServer::OnDisconnection(const ConnectionId_t aConnectionId, EDisconnect
 
 void GameServer::Send(const ConnectionId_t aConnectionId, const ServerMessage& acServerMessage, TiltedPhoques::EPacketFlags aFlags) const
 {
+    SendToConnections(&aConnectionId, 1, acServerMessage, aFlags);
+}
+
+// Written once for all of them. The packet layer compresses the packet in place on the first send and sends those bytes as they are
+// to the others, so the same packet is passed to each.
+void GameServer::SendToConnections(const ConnectionId_t* apConnectionIds, const size_t aCount, const ServerMessage& acServerMessage, TiltedPhoques::EPacketFlags aFlags) const
+{
+    if (aCount == 0)
+        return;
+
     static thread_local TiltedPhoques::ScratchAllocator s_allocator{1 << 18};
 
     Buffer buffer(1 << 20);
@@ -725,9 +751,15 @@ void GameServer::Send(const ConnectionId_t aConnectionId, const ServerMessage& a
     acServerMessage.Serialize(writer);
 
     TiltedPhoques::PacketView packet(reinterpret_cast<char*>(buffer.GetWriteData()), static_cast<uint32_t>(writer.Size()));
-    Server::Send(aConnectionId, &packet, aFlags);
+    for (size_t i = 0; i < aCount; ++i)
+        Server::Send(apConnectionIds[i], &packet, aFlags);
 
     s_allocator.Reset();
+}
+
+void GameServer::SendToConnections(const TiltedPhoques::Vector<ConnectionId_t>& acConnectionIds, const ServerMessage& acServerMessage) const
+{
+    SendToConnections(acConnectionIds.data(), acConnectionIds.size(), acServerMessage, TiltedPhoques::kReliable);
 }
 
 void GameServer::SendUnreliable(const ConnectionId_t aConnectionId, const ServerMessage& acServerMessage) const
@@ -760,20 +792,24 @@ void GameServer::Send(ConnectionId_t aConnectionId, const ServerAdminMessage& ac
 
 void GameServer::SendToLoaded(const ServerMessage& acServerMessage) const
 {
+    TiltedPhoques::Vector<ConnectionId_t> connections;
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (pPlayer->GetCellComponent())
-            pPlayer->Send(acServerMessage);
+            connections.push_back(pPlayer->GetConnectionId());
     }
+    SendToConnections(connections, acServerMessage);
 }
 
 void GameServer::SendToPlayers(const ServerMessage& acServerMessage, const Player* apExcludedPlayer) const
 {
+    TiltedPhoques::Vector<ConnectionId_t> connections;
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (pPlayer != apExcludedPlayer)
-            pPlayer->Send(acServerMessage);
+            connections.push_back(pPlayer->GetConnectionId());
     }
+    SendToConnections(connections, acServerMessage);
 }
 
 // NOTE: this doesn't check objects in range, only characters in range.
@@ -800,11 +836,13 @@ bool GameServer::SendToPlayersInRange(const ServerMessage& acServerMessage, cons
     if (const auto* characterComponent = m_pWorld->try_get<CharacterComponent>(acOrigin))
         isDragon = characterComponent->IsDragon();
 
+    TiltedPhoques::Vector<ConnectionId_t> connections;
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (cellComponent.IsInRange(pPlayer->GetCellComponent(), isDragon) && pPlayer != apExcludedPlayer)
-            pPlayer->Send(acServerMessage);
+            connections.push_back(pPlayer->GetConnectionId());
     }
+    SendToConnections(connections, acServerMessage);
 
     return true;
 }
@@ -817,6 +855,7 @@ void GameServer::SendToParty(const ServerMessage& acServerMessage, const PartyCo
         return;
     }
 
+    TiltedPhoques::Vector<ConnectionId_t> connections;
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (pPlayer == apExcludeSender)
@@ -824,10 +863,9 @@ void GameServer::SendToParty(const ServerMessage& acServerMessage, const PartyCo
 
         const auto& partyComponent = pPlayer->GetParty();
         if (partyComponent.JoinedPartyId == acPartyComponent.JoinedPartyId)
-        {
-            pPlayer->Send(acServerMessage);
-        }
+            connections.push_back(pPlayer->GetConnectionId());
     }
+    SendToConnections(connections, acServerMessage);
 }
 
 void GameServer::SendToPartyInRange(const ServerMessage& acServerMessage, const PartyComponent& acPartyComponent, const entt::entity acOrigin, const Player* apExcludeSender) const
@@ -849,6 +887,7 @@ void GameServer::SendToPartyInRange(const ServerMessage& acServerMessage, const 
 
     const auto& cellComponent = view.get<CellIdComponent>(*it);
 
+    TiltedPhoques::Vector<ConnectionId_t> connections;
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (pPlayer == apExcludeSender)
@@ -860,8 +899,9 @@ void GameServer::SendToPartyInRange(const ServerMessage& acServerMessage, const 
         if (pPlayer->GetParty().JoinedPartyId != acPartyComponent.JoinedPartyId)
             continue;
 
-        pPlayer->Send(acServerMessage);
+        connections.push_back(pPlayer->GetConnectionId());
     }
+    SendToConnections(connections, acServerMessage);
 }
 
 static String PrettyPrintModList(const Vector<Mods::Entry>& acMods)
@@ -877,6 +917,11 @@ static String PrettyPrintModList(const Vector<Mods::Entry>& acMods)
     return text;
 }
 
+TiltedPhoques::Vector<String> GameServer::GetPersonalPlugins() const
+{
+    return ModContent::ParsePersonalPlugins(sPersonalPlugins.c_str());
+}
+
 bool GameServer::ValidateAuthParams(ConnectionId_t aConnectionId, const UniquePtr<AuthenticationRequest>& acRequest)
 {
     return false;
@@ -888,6 +933,15 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
 
     char remoteAddress[48]{};
     info.m_addrRemote.ToString(remoteAddress, 48, false);
+
+    // A connection logs in once. A second login on one that is already in is not a real game: it would register its mod list again
+    // and find the player it already has.
+    if (m_pWorld->GetPlayerManager().GetByConnectionId(aConnectionId))
+    {
+        spdlog::warn("Connection {:x} '{}' sent a second login after it was admitted - Kicked.", aConnectionId, remoteAddress);
+        Kick(aConnectionId);
+        return;
+    }
 
     AuthenticationResponse serverResponse;
     serverResponse.Version = BuildVersion::Commit();
@@ -901,7 +955,7 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
         Kick(aConnectionId);
     };
 #if 1
-    // Compares the protocol (a digest of Code/encoding), not the version, so builds with the same messages connect.
+    // The protocol identifies the encoding and the active build profile.
     if (acRequest->Protocol != BUILD_PROTOCOL)
     {
         spdlog::info("New player {:x} '{}' tried to connect with client {} (protocol '{}'); this server speaks protocol {} - refused", aConnectionId, remoteAddress,
@@ -957,6 +1011,26 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
     // check if the proper server password was supplied.
     if (acRequest->Token == sPassword.value() || adminPasswordUsed)
     {
+        const auto cPersonal = GetPersonalPlugins();
+        auto content = ModContent::BuildManifest(acRequest->UserMods, acRequest->ContentSizes, cPersonal);
+        serverResponse.ContentDifference = ModContent::Compare(m_pHostContent.get(), content);
+        if (!serverResponse.ContentDifference.Empty())
+        {
+            spdlog::debug(
+                "Shared content for connection {:x} ({}). {}", aConnectionId, bRequireMatchingContent ? "refused" : "allowed",
+                ModContent::Describe(serverResponse.ContentDifference).c_str());
+            ModContent::LimitNotice(serverResponse.ContentDifference);
+            if (bRequireMatchingContent)
+                spdlog::info(
+                    "{:.64} (connection {:x}) refused for its shared content. {}", acRequest->Username.c_str(), aConnectionId,
+                    ModContent::Describe(serverResponse.ContentDifference).c_str());
+            if (bRequireMatchingContent)
+            {
+                sendKick(RT::kModsMismatch);
+                return;
+            }
+        }
+
         if (pAdminKey)
         {
             m_adminSessions.insert(aConnectionId);
@@ -970,54 +1044,6 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
 
         Mods& responseList = serverResponse.UserMods;
         auto& modsComponent = m_pWorld->ctx().at<ModsComponent>();
-
-        if (IsMoPoActive())
-        {
-            // mods that exist on the client, but not on the server
-            // modscomponent contains a list filled in by the recordcollection
-            Mods modsToRemove;
-
-            const auto& userMods = acRequest->UserMods.ModList;
-            for (const Mods::Entry& mod : userMods)
-            {
-                // if the client has more mods than the server..
-                if (!modsComponent.IsInstalled(mod.Filename))
-                {
-                    modsToRemove.ModList.push_back(mod);
-                }
-            }
-
-            // TODO(Vince): if you have a better to do this than two for loops
-            // let me know!
-            // Also, for the future, lets think about a mode that allows more than the server installed mods
-            // but requires essential mods?
-
-            // mods that may exist on the server, but not on the client
-            for (const auto& entry : modsComponent.GetServerMods())
-            {
-                const auto it = std::find_if(userMods.begin(), userMods.end(), [&](const Mods::Entry& it) { return it.Filename == entry.first; });
-
-                if (it == userMods.end())
-                {
-                    Mods::Entry removeEntry;
-                    removeEntry.Filename = entry.first;
-                    removeEntry.Id = 0;
-                    modsToRemove.ModList.push_back(removeEntry);
-                }
-            }
-
-            if (modsToRemove.ModList.size() > 0)
-            {
-                String text = PrettyPrintModList(modsToRemove.ModList);
-                // "ModPolicy: refusing connection {:x} because essential mods are missing: {}"
-                // for future reference ^
-                spdlog::info("ModPolicy: refusing connection {:x} because the following mods are installed on the client: {}", aConnectionId, text.c_str());
-
-                serverResponse.UserMods.ModList = std::move(modsToRemove.ModList);
-                sendKick(RT::kModsMismatch);
-                return;
-            }
-        }
 
         // Note: to lower traffic we only send the mod ids the user can fix in order as other ids will lead to a
         // null form id anyway
@@ -1040,6 +1066,12 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
         }
 
         Player* pPlayer = m_pWorld->GetPlayerManager().Create(aConnectionId);
+        if (!pPlayer)
+        {
+            spdlog::error("Connection {:x} '{}' could not be given a player - Kicked.", aConnectionId, remoteAddress);
+            sendKick(RT::kServerFull);
+            return;
+        }
         pPlayer->SetEndpoint(remoteAddress);
         pPlayer->SetDiscordId(acRequest->DiscordId);
         pPlayer->SetUsername(std::move(acRequest->Username));
@@ -1047,7 +1079,7 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
         pPlayer->SetModIds(playerModsIds);
         pPlayer->SetLevel(acRequest->Level);
         pPlayer->SetHiddenFromPublicPage(acRequest->HideFromPublicPage);
-        pPlayer->SetFlat(acRequest->IsFlat);
+        pPlayer->SetFlat(acRequest->ContentSizes.GameEdition == ModContentSizes::Edition::kSE);
 
         // this event is shit, needs to be fixed, i know
         auto [canceled, reason] = m_pWorld->GetScriptService().HandlePlayerJoin(aConnectionId);
@@ -1059,16 +1091,23 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
             return;
         }
 
+        // The first accepted game sets the content baseline for this server run.
+        if (!m_pHostContent && serverResponse.ContentDifference.Empty())
+            m_pHostContent = MakeUnique<ModContent::Manifest>(std::move(content));
+
         serverResponse.PlayerId = pPlayer->GetId();
 
         auto modList = PrettyPrintModList(acRequest->UserMods.ModList);
-        spdlog::info("New player '{}' [{:x}] connected with {} mods, playing {}\n\t: {}", pPlayer->GetUsername().c_str(), aConnectionId, acRequest->UserMods.ModList.size(),
-                     acRequest->IsFlat ? "flat Skyrim" : "Skyrim VR", modList.c_str());
+        spdlog::info(
+            "New player '{}' [{:x}] connected with {} mods, playing {}\n\t: {}", pPlayer->GetUsername().c_str(), aConnectionId, acRequest->UserMods.ModList.size(),
+            pPlayer->IsFlat() ? "flat Skyrim" : "Skyrim VR", modList.c_str());
 
         serverResponse.Settings = GetSettings();
 
         serverResponse.Type = AuthenticationResponse::ResponseType::kAccepted;
         Send(aConnectionId, serverResponse);
+
+        BroadcastServerIdentity();
 
         uint32_t startId = 0;
         auto initStringCache = StringCache::Get().Serialize(startId);
@@ -1081,31 +1120,6 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
         {
             if (pOtherPlayer == pPlayer)
                 continue;
-
-            // Forms from a plugin one player lacks cannot sync, so list the difference once, where both lists are known.
-            const auto listMissing = [](const Vector<String>& acFrom, const Vector<String>& acIn)
-            {
-                String missing;
-                size_t count = 0;
-                for (const auto& mod : acFrom)
-                {
-                    if (std::find(acIn.begin(), acIn.end(), mod) != acIn.end())
-                        continue;
-                    if (count++ < 40)
-                        missing += (missing.empty() ? "" : ", ") + mod;
-                }
-                if (count > 40)
-                    missing += fmt::format(" and {} more", count - 40).c_str();
-                return std::make_pair(count, missing);
-            };
-            const auto [missingOnNew, missingOnNewList] = listMissing(pOtherPlayer->GetMods(), pPlayer->GetMods());
-            const auto [missingOnOther, missingOnOtherList] = listMissing(pPlayer->GetMods(), pOtherPlayer->GetMods());
-            if (missingOnNew || missingOnOther)
-            {
-                spdlog::warn("Plugins differ between '{}' and '{}': {} missing for '{}' ({}); {} missing for '{}' ({})", pPlayer->GetUsername().c_str(),
-                             pOtherPlayer->GetUsername().c_str(), missingOnNew, pPlayer->GetUsername().c_str(), missingOnNewList.c_str(), missingOnOther,
-                             pOtherPlayer->GetUsername().c_str(), missingOnOtherList.c_str());
-            }
 
             NotifyPlayerJoined notify{};
             notify.PlayerId = pOtherPlayer->GetId();
@@ -1139,6 +1153,18 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
     }
 }
 
+// A game whose copy of the settings is behind them, as one that reported a hit with PvP off.
+void GameServer::SendSettingsTo(Player* apPlayer) const
+{
+    if (!apPlayer)
+        return;
+
+    NotifySettingsChange notify{};
+    notify.Settings = GetSettings();
+
+    apPlayer->Send(notify);
+}
+
 void GameServer::UpdateSettings()
 {
     NotifySettingsChange notify{};
@@ -1158,6 +1184,14 @@ GameServer::Uptime GameServer::GetUptime() const noexcept
     duration -= hours;
     auto minutes = std::chrono::duration_cast<std::chrono::minutes>(duration);
     return {weeks.count(), days.count(), hours.count(), minutes.count()};
+}
+
+void GameServer::BroadcastServerIdentity() const
+{
+    NotifyServerIdentity identity;
+    identity.Name = m_info.name.empty() ? "Private server" : m_info.name;
+    identity.Players = static_cast<uint32_t>(m_pWorld->GetPlayerManager().Count());
+    SendToPlayers(identity);
 }
 
 void GameServer::UpdateTitle() const

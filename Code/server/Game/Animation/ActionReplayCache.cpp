@@ -1,5 +1,6 @@
 #include "ActionReplayCache.h"
 #include <Game/Animation/AnimationEventLists.h>
+#include <PlayerGraphEvents.h>
 #include <optional>
 
 ActionReplayChain ActionReplayCache::FormRefinedReplayChain() noexcept
@@ -43,6 +44,8 @@ bool ActionReplayCache::RefineReplayCache() noexcept
             action.TargetEventName = String{*instantAnimName};
             action.ActionId = 0;
             action.IdleId = 0;
+            action.ModActionId = {};
+            action.ModIdleId = {};
         }
 
         if (IsExitAction(action))
@@ -78,6 +81,10 @@ bool ActionReplayCache::IsExitAction(const ActionEvent& acAction) noexcept
 
 bool ActionReplayCache::ShouldIgnoreAction(const ActionEvent& acAction) noexcept
 {
+    // A player's graph event with no action behind it is over by the time anyone joins, and one that ends an idle would reset the
+    // graph of a joiner's copy and drop the actions before it (RefineReplayCache).
+    if (PlayerGraphEvents::IsGraphEvent(acAction.Type, acAction.ActionId))
+        return true;
     return AnimationEventLists::kIgnore.contains(acAction.EventName);
 }
 

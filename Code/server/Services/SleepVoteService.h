@@ -15,6 +15,7 @@ struct PlayerLeaveEvent;
 /**
  * Runs the shared time skip vote: when every connected player has confirmed the Sleep/Wait menu, the clock moves by the shortest length.
  * Every change is told to every connected player, one player's changes of length at most every 5 s; a vote nobody completes runs out after a minute.
+ * A player loading or at the main menu for 15 s or more is not waited for.
  * A player who withdrew, or whose vote ran out, waits half a minute before confirming again.
  * With Gameplay:bEnableSleep off, each confirmation is refused and the clock never moves here.
  */
@@ -66,6 +67,20 @@ private:
      * @param acEvent The server's tick.
      */
     void OnUpdate(const UpdateEvent& acEvent) noexcept;
+
+    /**
+     * Note that a player's game is back in the world, and show them the open vote when it had stopped waiting for them.
+     *
+     * @param aPlayer The player whose game finished loading or left the main menu.
+     */
+    void ReturnToVote(const Player& acPlayer) noexcept;
+
+    /**
+     * List the connected players the vote waits for: all but those loading or at the main menu for long enough.
+     *
+     * @return Their server ids.
+     */
+    std::vector<uint32_t> ListVoters() const;
 
     /**
      * Record a player's confirmed length and tell everyone, or refuse it when sleep is switched off, the length is broken or the player still waits.

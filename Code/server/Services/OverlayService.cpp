@@ -15,8 +15,7 @@
 
 #include "Game/Player.h"
 
-#include <regex>
-
+#include <ChatText.h>
 
 OverlayService::OverlayService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
@@ -31,10 +30,10 @@ void sendPlayerMessage(const ChatMessageType acType, const String acContent, Pla
 {
     NotifyChatMessageBroadcast notifyMessage{};
 
-    std::regex escapeHtml{"<[^>]+>\\s+(?=<)|<[^>]+>"};
+    // The line is cut to a real length before anything reads it: it comes from the network and may be up to 64 KiB.
     notifyMessage.MessageType = acType;
-    notifyMessage.PlayerName = std::regex_replace(aSendingPlayer->GetUsername(), escapeHtml, "");
-    notifyMessage.ChatMessage = std::regex_replace(acContent, escapeHtml, "");
+    notifyMessage.PlayerName = ChatText::StripTags(aSendingPlayer->GetUsername(), ChatText::kMaxName);
+    notifyMessage.ChatMessage = ChatText::StripTags(acContent, ChatText::kMaxLine);
 
     auto character = aSendingPlayer->GetCharacter();
 
@@ -61,7 +60,12 @@ void sendPlayerMessage(const ChatMessageType acType, const String acContent, Pla
 
 void OverlayService::HandleChatMessage(const PacketEvent<SendChatMessageRequest>& acMessage) const noexcept
 {
-    auto [canceled, reason] = m_world.GetScriptService().HandleChatMessage(*acMessage.pPlayer->GetCharacter(), acMessage.Packet.ChatMessage);
+    // A player still loading has no character for the chat scripts to see yet.
+    const auto character = acMessage.pPlayer->GetCharacter();
+    if (!character)
+        return;
+
+    auto [canceled, reason] = m_world.GetScriptService().HandleChatMessage(*character, acMessage.Packet.ChatMessage);
     if (canceled)
         return;
 

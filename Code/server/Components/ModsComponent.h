@@ -4,6 +4,8 @@
 #error Include Components.h instead
 #endif
 
+#include <Structs/ModIdTable.h>
+
 namespace ESLoader
 {
 struct PluginData;
@@ -11,11 +13,7 @@ struct PluginData;
 
 struct ModsComponent
 {
-    struct Entry
-    {
-        uint32_t id;
-        uint32_t refCount;
-    };
+    using Entry = ModIdTable::Entry;
 
     uint32_t AddStandard(const String& acpFilename) noexcept;
     uint32_t AddLite(const String& acpFilename) noexcept;
@@ -28,7 +26,7 @@ struct ModsComponent
 
     bool IsInstalled(const String& acpFileName) const noexcept;
 
-    using TModList = TiltedPhoques::Map<String, Entry>;
+    using TModList = ModIdTable::TModList;
 
 private:
     uint32_t m_seed = 0;

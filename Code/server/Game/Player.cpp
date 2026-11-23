@@ -95,6 +95,11 @@ void Player::SetModIds(Vector<uint16_t> aModIds) noexcept
     m_modIds = std::move(aModIds);
 }
 
+bool Player::HasModId(const uint32_t aModId) const noexcept
+{
+    return std::find(m_modIds.begin(), m_modIds.end(), aModId) != m_modIds.end();
+}
+
 void Player::SetCharacter(entt::entity aCharacter) noexcept
 {
     m_character = aCharacter;

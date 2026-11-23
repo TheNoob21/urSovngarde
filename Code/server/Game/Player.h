@@ -39,6 +39,7 @@ struct Player
     void SetNpcPlugins(Vector<String> aPlugins) noexcept { m_npcPlugins = std::move(aPlugins); }
     [[nodiscard]] const Vector<String>& GetNpcPlugins() const noexcept { return m_npcPlugins; }
     void SetModIds(Vector<uint16_t> aModIds) noexcept;
+    [[nodiscard]] bool HasModId(uint32_t aModId) const noexcept;
     void SetCharacter(entt::entity aCharacter) noexcept;
     void SetStringCacheId(uint32_t aStringCacheId) noexcept;
     // TODO(cosideci): update on level up

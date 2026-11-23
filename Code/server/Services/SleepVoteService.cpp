@@ -49,7 +49,7 @@ void SleepVoteService::OnTimeSkipRequest(const PacketEvent<RequestTimeSkip>& acM
 {
     Player& player = *acMessage.pPlayer;
     const RequestTimeSkip& cRequest = acMessage.Packet;
-    const auto cConnectedIds = m_world.GetPlayerManager().ListIds();
+    const auto cConnectedIds = ListVoters();
 
     switch (cRequest.SkipStep)
     {
@@ -61,6 +61,13 @@ void SleepVoteService::OnTimeSkipRequest(const PacketEvent<RequestTimeSkip>& acM
         m_rests.Wake(player.GetId());
         spdlog::info("SleepVote: player {:X} '{}' awake", player.GetId(), player.GetUsername().c_str());
         break;
+    case RequestTimeSkip::Step::kAway:
+        if (m_vote.MarkAway(player.GetId(), GameServer::Get()->GetTick()))
+            spdlog::info(
+                "SleepVote: player {:X} '{}' is loading or at the main menu; a vote stops waiting for them in {} s", player.GetId(), player.GetUsername().c_str(),
+                ToWholeSeconds(SleepVote::kAwayGraceMs));
+        break;
+    case RequestTimeSkip::Step::kBack: ReturnToVote(player); break;
     default: spdlog::warn("SleepVote: player {:X} '{}' sent an unknown step, ignored", player.GetId(), player.GetUsername().c_str()); break;
     }
 }
@@ -75,7 +82,7 @@ void SleepVoteService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
     if (!m_vote.IsOpen())
         return;
 
-    SettleVote(nullptr, NotifyTimeSkip::Change::kNone, m_world.GetPlayerManager().ListIds());
+    SettleVote(nullptr, NotifyTimeSkip::Change::kNone, ListVoters());
 }
 
 /**
@@ -93,7 +100,7 @@ void SleepVoteService::OnPlayerLeave(const PlayerLeaveEvent& acEvent) noexcept
         return;
     }
 
-    const auto cConnectedIds = m_world.GetPlayerManager().ListIds(&cLeaving);
+    const auto cConnectedIds = m_vote.ListVoters(m_world.GetPlayerManager().ListIds(&cLeaving), GameServer::Get()->GetTick());
     m_vote.Forget(cLeaving.GetId());
 
     spdlog::info("SleepVote: player {:X} '{}' left, {}/{} ready", cLeaving.GetId(), cLeaving.GetUsername().c_str(), m_vote.CountReady(cConnectedIds), cConnectedIds.size());
@@ -111,8 +118,21 @@ void SleepVoteService::OnUpdate(const UpdateEvent& acEvent) noexcept
         return;
 
     const uint64_t cNowMs = GameServer::Get()->GetTick();
-    const auto cConnectedIds = m_world.GetPlayerManager().ListIds();
-    if (m_vote.GetStanding(cConnectedIds, cNowMs) == SleepVote::Standing::kTimedOut)
+    const auto cConnectedIds = ListVoters();
+
+    // A player loading or at the main menu for long enough no longer holds the vote: it may be agreed without them now.
+    if (const auto cNewlyAway = m_vote.TakeNewlyAway(cNowMs); !cNewlyAway.empty())
+    {
+        spdlog::info(
+            "SleepVote: {} player(s) loading or at the main menu for {} s, the vote no longer waits for them, {}/{} ready", cNewlyAway.size(),
+            ToWholeSeconds(SleepVote::kAwayGraceMs), m_vote.CountReady(cConnectedIds), cConnectedIds.size());
+        SettleVote(nullptr, NotifyTimeSkip::Change::kNone, cConnectedIds);
+        if (!m_vote.IsOpen())
+            return;
+    }
+
+    // Run out against every connected player, so a vote whose every voter is away still ends.
+    if (m_vote.GetStanding(m_world.GetPlayerManager().ListIds(), cNowMs) == SleepVote::Standing::kTimedOut)
     {
         RunOutVote(cConnectedIds);
         return;
@@ -124,6 +144,31 @@ void SleepVoteService::OnUpdate(const UpdateEvent& acEvent) noexcept
         if (const Player* pChanged = m_world.GetPlayerManager().GetById(cId))
             SettleVote(pChanged, NotifyTimeSkip::Change::kConfirmed, cConnectedIds);
     }
+}
+
+/**
+ * Note that a player's game is back in the world, and show them the open vote when it had stopped waiting for them.
+ *
+ * @param aPlayer The player whose game finished loading or left the main menu.
+ */
+void SleepVoteService::ReturnToVote(const Player& acPlayer) noexcept
+{
+    if (!m_vote.MarkBack(acPlayer.GetId()))
+        return;
+
+    spdlog::info("SleepVote: player {:X} '{}' is back in the world; a vote waits for them again", acPlayer.GetId(), acPlayer.GetUsername().c_str());
+    if (m_vote.IsOpen())
+        SettleVote(nullptr, NotifyTimeSkip::Change::kNone, ListVoters());
+}
+
+/**
+ * List the connected players the vote waits for: all but those loading or at the main menu for long enough.
+ *
+ * @return Their server ids.
+ */
+std::vector<uint32_t> SleepVoteService::ListVoters() const
+{
+    return m_vote.ListVoters(m_world.GetPlayerManager().ListIds(), GameServer::Get()->GetTick());
 }
 
 /**

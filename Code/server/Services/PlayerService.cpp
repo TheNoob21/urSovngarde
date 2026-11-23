@@ -1,9 +1,11 @@
 #include "Events/CharacterInteriorCellChangeEvent.h"
 #include "Events/CharacterExteriorCellChangeEvent.h"
 #include "Events/PlayerLeaveCellEvent.h"
+#include <Events/PlayerLeaveEvent.h>
 
 #include <Services/PlayerService.h>
 #include <Structs/PluginList.h>
+#include <Structs/ModIdTable.h>
 #include <Services/CharacterService.h>
 #include <GameServer.h>
 
@@ -46,7 +48,14 @@ PlayerService::PlayerService(World& aWorld, entt::dispatcher& aDispatcher) noexc
     , m_playerRespawnConnection(aDispatcher.sink<PacketEvent<PlayerRespawnRequest>>().connect<&PlayerService::OnPlayerRespawnRequest>(this))
     , m_playerLevelConnection(aDispatcher.sink<PacketEvent<PlayerLevelRequest>>().connect<&PlayerService::OnPlayerLevelRequest>(this))
     , m_npcPluginsConnection(aDispatcher.sink<PacketEvent<RequestNpcPlugins>>().connect<&PlayerService::OnNpcPlugins>(this))
+    , m_playerLeaveConnection(aDispatcher.sink<PlayerLeaveEvent>().connect<&PlayerService::OnPlayerLeave>(this))
 {
+}
+
+void PlayerService::OnPlayerLeave(const PlayerLeaveEvent& acEvent) const noexcept
+{
+    if (acEvent.pPlayer)
+        m_spawnsSent.erase(acEvent.pPlayer->GetId());
 }
 
 // An arrival (a load, a door, a fast travel) comes from nowhere yet, from indoors, another worldspace or further than one cell.
@@ -91,6 +100,17 @@ void PlayerService::HandleGridCellShift(const PacketEvent<ShiftGridCellRequest>&
 
     m_world.GetDispatcher().trigger(PlayerLeaveCellEvent(oldCell));
 
+    // A character this player has had since before the shift, unchanged, is not sent again (ViewerResends).
+    // The same centre again is its game announcing its cells again, having lost a copy: it is sent everything in range.
+    if (ViewerResends::IsReannounce(previous.WorldSpaceId, previous.CenterCoords, message.WorldSpaceId, message.CenterCoords))
+    {
+        m_spawnsSent.erase(pPlayer->GetId());
+        spdlog::debug("'{}' announced its cells again; every character in range is sent", pPlayer->GetUsername().c_str());
+    }
+    const auto cNow = std::chrono::steady_clock::now();
+    auto& sent = m_spawnsSent[pPlayer->GetId()];
+    TiltedPhoques::Map<uint32_t, ViewerResends::Record> stillSent;
+
     auto characterView = m_world.view<CellIdComponent, CharacterComponent, OwnerComponent>();
     for (auto character : characterView)
     {
@@ -110,11 +130,35 @@ void PlayerService::HandleGridCellShift(const PacketEvent<ShiftGridCellRequest>&
             continue;
         }
 
+        // What the copy's game takes from a spawn it already has: the epoch, whose it is, whether it lived again, and roughly where it is.
+        const Player* pOwner = ownedComponent.GetOwner();
+        const uint32_t cFollowerOf =
+            ownedComponent.FollowerOfPlayerId && m_world.GetPlayerManager().GetById(ownedComponent.FollowerOfPlayerId) ? ownedComponent.FollowerOfPlayerId : 0;
+        uint64_t stamp = ViewerResends::Mix(ownedComponent.OwnershipEpoch, pOwner ? pOwner->GetId() : 0);
+        stamp = ViewerResends::Mix(stamp, cFollowerOf);
+        stamp = ViewerResends::Mix(stamp, characterComponent.SpawnGeneration);
+        stamp = ViewerResends::Mix(stamp, characterComponent.IsRevivedSinceDeath());
+        if (const auto* pMovement = m_world.try_get<MovementComponent>(character))
+            stamp = ViewerResends::MixPlace(stamp, pMovement->Position.x, pMovement->Position.y, pMovement->Position.z);
+
+        const uint32_t cServerId = World::ToInteger(character);
+        const auto cRecord = sent.find(cServerId);
+        const ViewerResends::Record* pRecord = cRecord != sent.end() ? &cRecord->second : nullptr;
+        const bool cWasInRange = previous.IsInRange(characterCellComponent, characterComponent.IsDragon());
+        // A dead body always goes: its spawn carries the pose it came to rest in.
+        if (!characterComponent.IsDead() && !ViewerResends::IsNeeded(pRecord, stamp, cWasInRange, true, 1, cNow, ViewerResends::kCharacterRefreshAfter))
+        {
+            stillSent[cServerId] = *pRecord;
+            continue;
+        }
+
         CharacterSpawnRequest spawnMessage;
         CharacterService::Serialize(m_world, character, &spawnMessage);
 
-        pPlayer->Send(spawnMessage);
+        CharacterService::SendSpawn(m_world, pPlayer, character, spawnMessage);
+        stillSent[cServerId] = ViewerResends::AfterSend(pRecord, stamp, cWasInRange, true, cNow);
     }
+    sent = std::move(stillSent);
 
     RemoveWhatLeftRange(pPlayer, previous);
 }
@@ -179,6 +223,7 @@ void PlayerService::HandleExteriorCellEnter(const PacketEvent<EnterExteriorCellR
         if (cSameWorld)
             return;
 
+        m_spawnsSent.erase(pPlayer->GetId());
         RemoveWhatLeftRange(pPlayer, previous);
 
         // Sends this player every character in range of where they now are, as the other two cell handlers do.
@@ -200,7 +245,7 @@ void PlayerService::HandleExteriorCellEnter(const PacketEvent<EnterExteriorCellR
             CharacterSpawnRequest spawnMessage;
             CharacterService::Serialize(m_world, character, &spawnMessage);
 
-            pPlayer->Send(spawnMessage);
+            CharacterService::SendSpawn(m_world, pPlayer, character, spawnMessage);
         }
     }
 }
@@ -215,6 +260,7 @@ void PlayerService::HandleInteriorCellEnter(const PacketEvent<EnterInteriorCellR
 
     // Into an interior is always an arrival (see HandleExteriorCellEnter).
     pPlayer->MarkCellEnter();
+    m_spawnsSent.erase(pPlayer->GetId());
     auto cell = CellIdComponent{message.CellId, {}, {}};
     pPlayer->SetCellComponent(cell);
 
@@ -244,7 +290,7 @@ void PlayerService::HandleInteriorCellEnter(const PacketEvent<EnterInteriorCellR
         CharacterSpawnRequest spawnMessage;
         CharacterService::Serialize(m_world, character, &spawnMessage);
 
-        pPlayer->Send(spawnMessage);
+        CharacterService::SendSpawn(m_world, pPlayer, character, spawnMessage);
     }
 
     SendPlayerCellChanged(pPlayer);
@@ -351,25 +397,6 @@ void PlayerService::OnPlayerLevelRequest(const PacketEvent<PlayerLevelRequest>& 
     GameServer::Get()->SendToPlayers(notify, acMessage.pPlayer);
 }
 
-namespace
-{
-bool SamePlugin(const String& acLeft, const String& acRight) noexcept
-{
-    return acLeft.size() == acRight.size() &&
-           std::equal(acLeft.begin(), acLeft.end(), acRight.begin(), [](const char aLeft, const char aRight) { return std::tolower(static_cast<unsigned char>(aLeft)) == std::tolower(static_cast<unsigned char>(aRight)); });
-}
-
-Vector<String> OnlyIn(const Vector<String>& acFrom, const Vector<String>& acNotIn) noexcept
-{
-    Vector<String> only;
-    for (const String& plugin : acFrom)
-        if (std::none_of(acNotIn.begin(), acNotIn.end(), [&plugin](const String& acOther) { return SamePlugin(plugin, acOther); }))
-            only.push_back(plugin);
-    return only;
-}
-
-} // namespace
-
 // A game says which of its plugins add or change NPCs, once connected.
 // Each other player whose list differs is told, and so is this one: their games roll other people and creatures in the same places.
 // A pair is told once per server run for the same difference, so a reconnect does not tell them again.
@@ -388,11 +415,11 @@ void PlayerService::OnNpcPlugins(const PacketEvent<RequestNpcPlugins>& acMessage
         if (pOther == pPlayer || pOther->GetNpcPlugins().empty())
             continue;
 
-        Vector<String> onlyHere = OnlyIn(pPlayer->GetNpcPlugins(), pOther->GetNpcPlugins());
-        Vector<String> onlyThere = OnlyIn(pOther->GetNpcPlugins(), pPlayer->GetNpcPlugins());
+        Vector<String> onlyHere = ModIdTable::OnlyIn(pPlayer->GetNpcPlugins(), pOther->GetNpcPlugins());
+        Vector<String> onlyThere = ModIdTable::OnlyIn(pOther->GetNpcPlugins(), pPlayer->GetNpcPlugins());
 
-        // Between a flat and a VR player, each game's own plugins are no mod difference: the other game cannot have them.
-        const PluginRules::LeftOut leftOut = PluginRules::FilterForPair(onlyHere, pPlayer->IsFlat(), onlyThere, pOther->IsFlat());
+        // Apply the admission policy before warning about differing NPC plugins.
+        const PluginRules::LeftOut leftOut = PluginRules::FilterForPair(onlyHere, pPlayer->IsFlat(), onlyThere, pOther->IsFlat(), GameServer::Get()->GetPersonalPlugins());
         if (onlyHere.empty() && onlyThere.empty())
             continue;
 
@@ -410,8 +437,9 @@ void PlayerService::OnNpcPlugins(const PacketEvent<RequestNpcPlugins>& acMessage
         if (!leftOut.Here.empty() || !leftOut.There.empty())
         {
             const auto names = [](const Vector<String>& acList) { return acList.empty() ? std::string("none") : std::string(PluginList::Joined(acList).c_str()); };
-            spdlog::info("NpcPlugins: '{}' and '{}' play different games; left out as their games' own plugins: {} for '{}', {} for '{}'", pPlayer->GetUsername().c_str(),
-                         pOther->GetUsername().c_str(), names(leftOut.Here), pPlayer->GetUsername().c_str(), names(leftOut.There), pOther->GetUsername().c_str());
+            spdlog::debug(
+                "NpcPlugins: '{}' and '{}' have exempt plugins left out: {} for '{}', {} for '{}'", pPlayer->GetUsername().c_str(), pOther->GetUsername().c_str(),
+                names(leftOut.Here), pPlayer->GetUsername().c_str(), names(leftOut.There), pOther->GetUsername().c_str());
         }
 
         NotifyNpcPluginsDiffer toPlayer{};

@@ -8,6 +8,7 @@
 #include <Components/OwnerComponent.h>
 #include <Components/CellIdComponent.h>
 #include <Components/CharacterComponent.h>
+#include <Components/RideComponent.h>
 #include <Components/MovementComponent.h>
 #include <Components/AnimationComponent.h>
 #include <Components/InventoryComponent.h>
@@ -16,5 +17,8 @@
 #include <Components/ActorValuesComponent.h>
 #include <Components/ObjectComponent.h>
 #include <Components/PresenceComponent.h>
+#include <Components/ScriptSpawnComponent.h>
+#include <Components/SeatComponent.h>
+#include <Components/HeadTrackComponent.h>
 
 #undef TP_INTERNAL_COMPONENTS_GUARD

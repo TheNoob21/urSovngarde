@@ -68,7 +68,6 @@ struct LogInstance
         auto globalOut = std::make_shared<logger>("", sinks_init_list{serverOut, fileOut});
         globalOut->set_pattern("%^[%Y-%m-%d %H:%M:%S.%e] [%l] [tid %t] %$ %v");
 
-        globalOut->set_level(level::from_str(sLogLevel.value()));
         spdlog::flush_every(std::chrono::seconds(2));
 
         // as the library is compiled into the client + server we have to do this twice
@@ -221,6 +220,7 @@ int main(int argc, char** argv)
 
     // Keep stack free.
     const auto cpRunner{std::make_unique<DediRunner>(argc, argv)};
+    spdlog::default_logger()->set_level(spdlog::level::from_str(sLogLevel.value()));
     if (bConsole)
     {
         cpRunner->StartTerminalIO();

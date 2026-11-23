@@ -19,7 +19,9 @@ struct CharacterComponent
         kIsMount = 1 << 5,
         kIsPlayerSummon = 1 << 6,
         //! Its owner's game revived it since its last death: from that game's own report, cleared by the next death.
-        kRevivedSinceDeath = 1 << 7
+        kRevivedSinceDeath = 1 << 7,
+        //! Its soul was given to its owner's party (DragonSoul.h); kept across hand-offs, as the entity is.
+        kSoulGranted = 1 << 8
     };
 
     [[nodiscard]] bool IsDirtyFactions() const { return Flags & kIsDirtyFactions; }
@@ -30,6 +32,7 @@ struct CharacterComponent
     [[nodiscard]] bool IsMount() const { return Flags & kIsMount; }
     [[nodiscard]] bool IsPlayerSummon() const { return Flags & kIsPlayerSummon; }
     [[nodiscard]] bool IsRevivedSinceDeath() const { return Flags & kRevivedSinceDeath; }
+    [[nodiscard]] bool IsSoulGranted() const { return Flags & kSoulGranted; }
 
     void SetDirtyFactions(bool aSet)
     {
@@ -43,7 +46,11 @@ struct CharacterComponent
         if (aSet)
             Flags |= kIsDead;
         else
+        {
+            // Alive again, by a revive or a respawn: its limbs are back.
             Flags &= ~kIsDead;
+            DismemberedLimbs = 0;
+        }
     }
     void SetPlayer(bool aSet)
     {
@@ -87,6 +94,13 @@ struct CharacterComponent
         else
             Flags &= ~kRevivedSinceDeath;
     }
+    void SetSoulGranted(bool aSet)
+    {
+        if (aSet)
+            Flags |= kSoulGranted;
+        else
+            Flags &= ~kSoulGranted;
+    }
 
     uint32_t ChangeFlags{0};
     String SaveBuffer{};
@@ -96,4 +110,8 @@ struct CharacterComponent
     Factions FactionsContent{};
     uint16_t Flags{};
     int32_t PlayerId{};
+    //! The limbs cut off it in any game (LimbMask.h): sent with it to a game that gets it later, cleared whenever it is set alive.
+    uint16_t DismemberedLimbs{};
+    //! The order a player's character was made in, over all players, so a game can tell an older one from a newer (0: not a player).
+    uint32_t SpawnGeneration{};
 };

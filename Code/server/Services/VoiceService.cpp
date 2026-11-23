@@ -1,6 +1,8 @@
 #include <Services/VoiceService.h>
 
 #include <GameServer.h>
+#include <VoiceRelayRules.h>
+#include <Events/PlayerLeaveEvent.h>
 #include <World.h>
 #include <Components.h>
 
@@ -12,20 +14,27 @@ namespace
 {
 // A little past the 30 m where the client fades a voice out, so it fades rather than cuts off.
 constexpr float kHearingRange = 2400.f;
-constexpr uint32_t kMaxPacketsPerSecond = 60;
 } // namespace
 
 VoiceService::VoiceService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
     : m_world(aWorld)
     , m_voiceStateConnection(aDispatcher.sink<PacketEvent<VoiceStateRequest>>().connect<&VoiceService::OnVoiceState>(this))
     , m_voiceDataConnection(aDispatcher.sink<PacketEvent<VoiceDataRequest>>().connect<&VoiceService::OnVoiceData>(this))
+    , m_leaveConnection(aDispatcher.sink<PlayerLeaveEvent>().connect<&VoiceService::OnPlayerLeave>(this))
 {
 }
 
 void VoiceService::OnVoiceState(const PacketEvent<VoiceStateRequest>& acMessage) const noexcept
 {
     acMessage.pPlayer->SetVoiceEnabled(acMessage.Packet.Enabled);
-    spdlog::info("Voice: {} turned voice {}", acMessage.pPlayer->GetUsername().c_str(), acMessage.Packet.Enabled ? "on" : "off");
+    // Debug: a game can send this as often as it likes, so it must not fill the log.
+    spdlog::debug("Voice: {} turned voice {}", acMessage.pPlayer->GetUsername().c_str(), acMessage.Packet.Enabled ? "on" : "off");
+}
+
+void VoiceService::OnPlayerLeave(const PlayerLeaveEvent& acEvent) noexcept
+{
+    if (acEvent.pPlayer)
+        m_budgets.erase(acEvent.pPlayer->GetId());
 }
 
 void VoiceService::OnVoiceData(const PacketEvent<VoiceDataRequest>& acMessage) noexcept
@@ -35,14 +44,8 @@ void VoiceService::OnVoiceData(const PacketEvent<VoiceDataRequest>& acMessage) n
     if (!pSpeaker->IsVoiceEnabled() || packet.Data.empty())
         return;
 
-    const auto cNow = std::chrono::steady_clock::now();
-    Budget& budget = m_budgets[pSpeaker->GetId()];
-    if (cNow - budget.Since >= std::chrono::seconds(1))
-    {
-        budget.Since = cNow;
-        budget.Packets = 0;
-    }
-    if (++budget.Packets > kMaxPacketsPerSecond)
+    // Pieces of a size Steam makes, and as many a second as it makes (VoiceRelayRules): each goes to every listener.
+    if (!m_budgets[pSpeaker->GetId()].Allow(std::chrono::steady_clock::now(), packet.Data.size()))
         return;
 
     NotifyVoiceData notify{};

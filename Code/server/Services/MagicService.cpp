@@ -1,5 +1,7 @@
 #include <Services/MagicService.h>
 
+#include <ClientTrust.h>
+#include <ClientTrustFacts.h>
 #include <GameServer.h>
 #include <World.h>
 
@@ -11,6 +13,18 @@
 #include <Messages/NotifyInterruptCast.h>
 #include <Messages/NotifyAddTarget.h>
 #include <Messages/NotifyRemoveSpell.h>
+
+namespace
+{
+// Whether the server relays a report about this caster or target; a refusal is logged at debug.
+bool Takes(const ClientTrust::Refusal aRefusal, const char* apWhat, const uint32_t aActorId, const Player* apSender) noexcept
+{
+    if (aRefusal == ClientTrust::Refusal::kNone || !GameServer::Get()->ValidatesClientReports())
+        return true;
+    spdlog::debug("Refused {} on {:X} from player {}: {}", apWhat, aActorId, apSender ? apSender->GetId() : 0, ClientTrust::RefusalName(aRefusal));
+    return false;
+}
+} // namespace
 
 MagicService::MagicService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
     : m_world(aWorld)
@@ -24,6 +38,10 @@ MagicService::MagicService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
 void MagicService::OnSpellCastRequest(const PacketEvent<SpellCastRequest>& acMessage) const noexcept
 {
     auto& message = acMessage.Packet;
+
+    const auto cCaster = ClientTrust::FactsOf(m_world, message.CasterId, acMessage.pPlayer);
+    if (!Takes(ClientTrust::JudgeOwnedActor(cCaster.Known, cCaster.SenderOwns), "a spell cast", message.CasterId, acMessage.pPlayer))
+        return;
 
     NotifySpellCast notify;
     notify.CasterId = message.CasterId;
@@ -41,6 +59,10 @@ void MagicService::OnInterruptCastRequest(const PacketEvent<InterruptCastRequest
 {
     auto& message = acMessage.Packet;
 
+    const auto cCaster = ClientTrust::FactsOf(m_world, message.CasterId, acMessage.pPlayer);
+    if (!Takes(ClientTrust::JudgeOwnedActor(cCaster.Known, cCaster.SenderOwns), "a cast interruption", message.CasterId, acMessage.pPlayer))
+        return;
+
     NotifyInterruptCast notify;
     notify.CasterId = message.CasterId;
     notify.CastingSource = message.CastingSource;
@@ -53,6 +75,14 @@ void MagicService::OnInterruptCastRequest(const PacketEvent<InterruptCastRequest
 void MagicService::OnAddTargetRequest(const PacketEvent<AddTargetRequest>& acMessage) const noexcept
 {
     auto& message = acMessage.Packet;
+
+    // From the game that runs the caster, or the one that runs the target.
+    const auto cTarget = ClientTrust::FactsOf(m_world, message.TargetId, acMessage.pPlayer);
+    const auto cCaster = ClientTrust::FactsOf(m_world, message.CasterId, acMessage.pPlayer);
+    if (!Takes(
+            ClientTrust::JudgeEffect(cTarget.Known, cTarget.SenderOwns, cCaster.SenderOwns && message.CasterId, message.Magnitude), "a spell effect", message.TargetId,
+            acMessage.pPlayer))
+        return;
 
     NotifyAddTarget notify;
     notify.TargetId = message.TargetId;
@@ -72,7 +102,11 @@ void MagicService::OnAddTargetRequest(const PacketEvent<AddTargetRequest>& acMes
 void MagicService::OnRemoveSpellRequest(const PacketEvent<RemoveSpellRequest>& acMessage) const noexcept
 {
     const auto& message = acMessage.Packet;
-    
+
+    const auto cTarget = ClientTrust::FactsOf(m_world, message.TargetId, acMessage.pPlayer);
+    if (!Takes(ClientTrust::JudgeOwnedActor(cTarget.Known, cTarget.SenderOwns), "a spell removal", message.TargetId, acMessage.pPlayer))
+        return;
+
     NotifyRemoveSpell notify;
     notify.TargetId = message.TargetId;
     notify.SpellId = message.SpellId;

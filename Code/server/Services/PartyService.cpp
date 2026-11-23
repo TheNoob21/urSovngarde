@@ -1,6 +1,7 @@
 #include <Services/PartyService.h>
 #include <Components.h>
 #include <GameServer.h>
+#include <Services/QuestService.h>
 
 #include <Events/PlayerJoinEvent.h>
 #include <Events/PlayerLeaveEvent.h>
@@ -18,12 +19,22 @@
 #include <Messages/PartyLeaveRequest.h>
 #include <Messages/NotifyPartyJoined.h>
 #include <Messages/NotifyReferenceEnable.h>
+#include <Messages/NotifyQuestCatchUp.h>
+#include <Messages/NotifyQuestAliases.h>
+#include <Services/QuestAliasService.h>
+#include <Messages/NotifyWordLearned.h>
+#include <Messages/NotifyMapDiscovery.h>
 #include <Messages/NotifyPartyLeft.h>
 #include <Messages/PartyCreateRequest.h>
 #include <Messages/PartyChangeLeaderRequest.h>
 #include <Messages/PartyKickRequest.h>
 #include <Messages/NotifyPlayerJoined.h>
+#include <Messages/RequestPartyFastTravel.h>
+#include <Messages/RequestPartyFollow.h>
+#include <Messages/NotifyPartyFastTravel.h>
+#include <Messages/NotifyTeleport.h>
 
+#include <PartyRules.h>
 #include <Setting.h>
 
 #include <cmath>
@@ -31,6 +42,14 @@
 namespace
 {
 Console::Setting bAutoPartyCreate{"Gameplay:bAutoPartyCreate", "Create a party for the first player to join, so players are grouped without a party menu (VR has none)", true};
+Console::Setting bEnablePartyFastTravel{
+    "Gameplay:bEnablePartyFastTravel",
+    "(Experimental) When the party leader fast-travels, the members away from the leader may follow. The leader's game tells the server of each fast travel either way; while this "
+    "is off the server drops it",
+    true};
+
+// How long a member may take the leader's fast travel offer: 30 s to open the Wait menu, then as long as it stays open, within reason.
+constexpr auto cFollowOfferFor = std::chrono::minutes(5);
 }
 
 PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
@@ -46,6 +65,8 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     , m_partyKickConnection(aDispatcher.sink<PacketEvent<PartyKickRequest>>().connect<&PartyService::OnPartyKick>(this))
     , m_partyPluginConnection(aDispatcher.sink<PacketEvent<RequestPartyPlugin>>().connect<&PartyService::OnPartyPlugin>(this))
     , m_partyValueConnection(aDispatcher.sink<PacketEvent<RequestPartyValue>>().connect<&PartyService::OnPartyValue>(this))
+    , m_partyFastTravelConnection(aDispatcher.sink<PacketEvent<RequestPartyFastTravel>>().connect<&PartyService::OnPartyFastTravel>(this))
+    , m_partyFollowConnection(aDispatcher.sink<PacketEvent<RequestPartyFollow>>().connect<&PartyService::OnPartyFollow>(this))
 {
 }
 
@@ -179,6 +200,7 @@ void PartyService::OnPartyChangeLeader(const PacketEvent<PartyChangeLeaderReques
                 if (pPlayer->GetId() == pNewLeader->GetId())
                 {
                     party.LeaderPlayerId = pPlayer->GetId();
+                    party.FollowOffers.clear();
                     spdlog::debug("[PartyService]: Changed party leader to {}, updating party members.", party.LeaderPlayerId);
                     BroadcastPartyInfo(*inviterPartyComponent.JoinedPartyId);
                     break;
@@ -241,6 +263,63 @@ void PartyService::OnPartyValue(const PacketEvent<RequestPartyValue>& acPacket) 
             pMember->Send(notify);
 }
 
+void PartyService::OnPartyFastTravel(const PacketEvent<RequestPartyFastTravel>& acPacket) noexcept
+{
+    Player* pLeader = acPacket.pPlayer;
+    Party* pParty = GetPlayerParty(pLeader);
+    if (!bEnablePartyFastTravel || !pParty || pParty->LeaderPlayerId != pLeader->GetId())
+        return;
+
+    const auto& cLeaderCell = pLeader->GetCellComponent();
+    NotifyPartyFastTravel notify{};
+    notify.LeaderId = pLeader->GetId();
+    notify.CellId = cLeaderCell.Cell;
+    notify.WorldSpaceId = cLeaderCell.WorldSpaceId;
+
+    const auto cNow = std::chrono::steady_clock::now();
+    for (Player* pMember : pParty->Members)
+    {
+        // A member who arrived with the leader, or stands near where it arrived, has nothing to follow.
+        if (pMember == pLeader || pMember->GetCellComponent().IsInRange(cLeaderCell, false))
+            continue;
+
+        pParty->FollowOffers[pMember->GetId()] = cNow;
+        pMember->Send(notify);
+        spdlog::debug("[PartyService]: leader {} fast-travelled to cell {:X}; player {} may follow", pLeader->GetId(), cLeaderCell.Cell.LogFormat(), pMember->GetId());
+    }
+}
+
+void PartyService::OnPartyFollow(const PacketEvent<RequestPartyFollow>& acPacket) noexcept
+{
+    Player* pMember = acPacket.pPlayer;
+    Party* pParty = GetPlayerParty(pMember);
+    if (!bEnablePartyFastTravel || !pParty)
+        return;
+
+    const auto cOffer = pParty->FollowOffers.find(pMember->GetId());
+    if (cOffer == pParty->FollowOffers.end())
+        return;
+    const bool cInTime = std::chrono::steady_clock::now() - cOffer->second < cFollowOfferFor;
+    pParty->FollowOffers.erase(cOffer);
+    if (!cInTime)
+        return;
+
+    Player* pLeader = m_world.GetPlayerManager().GetById(pParty->LeaderPlayerId);
+    if (!pLeader || pLeader == pMember || !pLeader->GetCharacter())
+        return;
+    const auto* pMovement = m_world.try_get<MovementComponent>(*pLeader->GetCharacter());
+    if (!pMovement)
+        return;
+
+    // Where the leader is now, not where it arrived: it may have walked on.
+    NotifyTeleport teleport{};
+    teleport.CellId = pLeader->GetCellComponent().Cell;
+    teleport.WorldSpaceId = pLeader->GetCellComponent().WorldSpaceId;
+    teleport.Position = pMovement->Position;
+    pMember->Send(teleport);
+    spdlog::debug("[PartyService]: player {} follows leader {} to cell {:X}", pMember->GetId(), pLeader->GetId(), teleport.CellId.LogFormat());
+}
+
 void PartyService::OnPartyKick(const PacketEvent<PartyKickRequest>& acPacket) noexcept
 {
     auto& message = acPacket.Packet;
@@ -255,17 +334,14 @@ void PartyService::OnPartyKick(const PacketEvent<PartyKickRequest>& acPacket) no
         return;
     }
 
-    auto& inviterPartyComponent = player->GetParty();
-    if (inviterPartyComponent.JoinedPartyId) // Ensure not in party
+    // Only a member of the leader's own party: with two parties, one leader could kick the other's members.
+    const auto& cKickerParty = player->GetParty().JoinedPartyId;
+    if (PartyRules::MayKick(cKickerParty, IsPlayerLeader(player), pKick->GetParty().JoinedPartyId))
     {
-        Party& party = m_parties[*inviterPartyComponent.JoinedPartyId];
-        if (party.LeaderPlayerId == player->GetId())
-        {
-            spdlog::debug("[PartyService]: Kicking player {} from party", pKick->GetId());
-            RemovePlayerFromParty(pKick);
-            // The kicked player is still on the server, so everyone's list keeps them, with the game they play.
-            BroadcastPlayerList();
-        }
+        spdlog::debug("[PartyService]: Kicking player {} from party", pKick->GetId());
+        RemovePlayerFromParty(pKick);
+        // The kicked player is still on the server, so everyone's list keeps them, with the game they play.
+        BroadcastPlayerList();
     }
 }
 
@@ -286,26 +362,22 @@ void PartyService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
 
     GameServer::Get()->SendToPlayers(notify, acEvent.pPlayer);
 
-    if (m_parties.size() == 1 && GameServer::Get()->AllowsAutoPartyJoin())
+    if (!m_parties.empty() && GameServer::Get()->AllowsAutoPartyJoin() && !IsPlayerInParty(acEvent.pPlayer))
     {
-        for (Player* player : m_world.GetPlayerManager())
+        std::vector<PartyRules::Party> parties;
+        for (const auto& [cId, cParty] : m_parties)
+            parties.push_back({cId, cParty.Members.size()});
+
+        if (const auto cPartyId = PartyRules::PartyToJoin(parties))
         {
-            if (IsPlayerInParty(player))
-            {
-                auto& playerPartyComponent = player->GetParty();
-                Party& party = m_parties[*playerPartyComponent.JoinedPartyId];
+            Party& party = m_parties[*cPartyId];
+            party.Members.push_back(acEvent.pPlayer);
+            acEvent.pPlayer->GetParty().JoinedPartyId = *cPartyId;
 
-                party.Members.push_back(acEvent.pPlayer);
-                acEvent.pPlayer->GetParty().JoinedPartyId = *playerPartyComponent.JoinedPartyId;
-
-                SendPartyJoinedEvent(party, acEvent.pPlayer);
-
-                BroadcastPartyInfo(*playerPartyComponent.JoinedPartyId);
-
-                break;
-            }
+            spdlog::debug("[PartyService]: Player {} joins party {} of {}", acEvent.pPlayer->GetId(), *cPartyId, m_parties.size());
+            SendPartyJoinedEvent(party, acEvent.pPlayer);
+            BroadcastPartyInfo(*cPartyId);
         }
-        
     }
 
     if (m_parties.empty() && bAutoPartyCreate && !GameServer::Get()->IsPublicServer() && !IsPlayerInParty(acEvent.pPlayer))
@@ -437,16 +509,21 @@ void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
         auto& members = party.Members;
 
         members.erase(std::find(std::begin(members), std::end(members), apPlayer));
+        party.FollowOffers.erase(apPlayer->GetId());
 
         if (members.empty())
         {
             m_parties.erase(id);
+            m_world.GetQuestService().ForgetPartyWords(id);
+            if (auto* pAliases = m_world.ctx().find<QuestAliasService>())
+                pAliases->ForgetParty(id);
         }
         else
         {
             if (party.LeaderPlayerId == apPlayer->GetId())
             {
                 party.LeaderPlayerId = members.at(0)->GetId(); // Reassign party leader
+                party.FollowOffers.clear();                    // a new leader's fast travels only
                 spdlog::debug("[PartyService]: Leader left, reassigned party leader to {}", party.LeaderPlayerId);
             }
             spdlog::debug("[PartyService]: Updating other party players of removal.");
@@ -523,24 +600,25 @@ void PartyService::SendPartyJoinedEvent(Party& aParty, Player* aPlayer) noexcept
     spdlog::debug("[PartyService]: Sending party join event to player");
     aPlayer->Send(joinedMessage);
 
-    // A member who joins gets the references the leader's scripts have switched so far.
+    // A member who joins gets the references the party's scripts have switched so far.
     // Sent in parts, each well under what one message may hold (ReferenceEnableStates::kMax).
-    if (!joinedMessage.IsLeader && !aParty.ReferenceEnabled.empty())
+    if (!joinedMessage.IsLeader && !aParty.ReferenceEnabled.Empty())
     {
         constexpr size_t cPart = 4096;
         NotifyReferenceEnable states{};
-        for (const auto& [id, enabled] : aParty.ReferenceEnabled)
-        {
-            states.Changes.push_back({id, enabled});
-            if (states.Changes.size() == cPart)
+        aParty.ReferenceEnabled.ForEach(
+            [&](const GameId& acId, const bool aEnabled)
             {
-                aPlayer->Send(states);
-                states.Changes.clear();
-            }
-        }
+                states.Changes.push_back({acId, aEnabled});
+                if (states.Changes.size() == cPart)
+                {
+                    aPlayer->Send(states);
+                    states.Changes.clear();
+                }
+            });
         if (!states.Changes.empty())
             aPlayer->Send(states);
-        spdlog::info("ReferenceEnable: {} reference(s) the leader switched sent to joining player {}", aParty.ReferenceEnabled.size(), aPlayer->GetId());
+        spdlog::info("ReferenceEnable: {} reference(s) the party switched sent to joining player {}", aParty.ReferenceEnabled.Size(), aPlayer->GetId());
     }
 
     // And the numbers the leader's plugins set for the party.
@@ -554,5 +632,52 @@ void PartyService::SendPartyJoinedEvent(Party& aParty, Player* aPlayer) noexcept
             aPlayer->Send(value);
         }
         spdlog::info("PartyValue: {} value(s) sent to joining player {}", aParty.PluginValues.size(), aPlayer->GetId());
+    }
+
+    // And the words of power the party was taught, which this player's game teaches as it does one taught live.
+    if (!joinedMessage.IsLeader && aPlayer->GetParty().JoinedPartyId)
+    {
+        const auto cWords = m_world.GetQuestService().GetPartyWords().Of(*aPlayer->GetParty().JoinedPartyId);
+        if (!cWords.empty())
+        {
+            NotifyWordLearned words{};
+            for (const uint64_t cWord : cWords)
+                words.Words.push_back(GameId(static_cast<uint32_t>(cWord >> 32), static_cast<uint32_t>(cWord)));
+            aPlayer->Send(words);
+            spdlog::debug("WordLearned: {} word(s) the party was taught sent to joining player {}", cWords.size(), aPlayer->GetId());
+        }
+    }
+
+    // And the map markers its members discovered.
+    if (!joinedMessage.IsLeader && aParty.Discoveries.Size() != 0)
+    {
+        NotifyMapDiscovery discoveries{};
+        for (const auto& [cKey, cCanTravel] : aParty.Discoveries.All())
+            discoveries.Discoveries.push_back({GameId(static_cast<uint32_t>(cKey >> 32), static_cast<uint32_t>(cKey)), cCanTravel});
+        aPlayer->Send(discoveries);
+        spdlog::debug("MapDiscovery: {} marker(s) the party discovered sent to joining player {}", discoveries.Discoveries.size(), aPlayer->GetId());
+    }
+
+    // And the quest starts, stages and stops the party was sent before, which this player missed.
+    // Only while the switch is on: a list kept before it was turned off is not sent.
+    if (QuestHistory::MaySendCatchUp(joinedMessage.IsLeader, QuestService::IsCatchUpOn(), !aParty.Quests.GetSteps().empty()))
+    {
+        NotifyQuestCatchUp catchUp{};
+        catchUp.Steps = aParty.Quests.GetSteps();
+        aPlayer->Send(catchUp);
+        spdlog::debug("QuestCatchUp: {} quest step(s) sent to joining player {}", catchUp.Steps.size(), aPlayer->GetId());
+    }
+
+    if (aParty.Waypoint)
+        aPlayer->Send(*aParty.Waypoint);
+
+    if (QuestAliasService::IsEnabled())
+    {
+        for (const auto& [_, aliases] : aParty.QuestAliasFills.GetQuests())
+        {
+            NotifyQuestAliases notify{};
+            notify.Aliases = aliases;
+            aPlayer->Send(notify);
+        }
     }
 }
