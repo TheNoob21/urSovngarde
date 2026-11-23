@@ -15,7 +15,7 @@ Git history has the full investigation notes behind each item.
 | **SKSE VR** loaded by the launcher | No SKSE plugins, including Skyrim VR ESL Support. More than 255 plugins overflow VR's plugin array and crash in `OpenTES`. | `ScriptExtender.cpp`: loads `sksevr_*.dll`, whose `DllMain` starts it (no `StartSKSE` export). |
 | EngineFixesVR loaded **by SKSE**, not by the `d3dx9_42` plugin preloader | Crash at startup, before any log. | `stubs/FileMapping.cpp` refuses the DLL until SKSE starts. |
 | Free address space within ±2GB of the game for plugin trampolines | DynDOLOD shows an invisible "failed to create trampoline" popup at data load, and the game hangs or closes. | 80MB game buffer (`TargetConfig.h`), plus a reserved pool in `memory/NearImageReserve.cpp`. |
-| `uGridsToLoad = 5` | The server refuses the connection. | Checked on connect. |
+| `uGridsToLoad = 5` | The client refuses to connect. | Checked on connect. |
 | The **VR Address Library file that matches Community Shaders**: Emma's combined file (0.275.0 with every 0.158.0 id at its old address; section on it below) | Crash a second into the first load, before connecting, in shadow rendering: `SkyrimVR.exe+0x1354e5a`, which the crash logger names `100997+0x13A`. A plain newer library moves id 100997 to 0x1354D20 and the installed Community Shaders 0.8.7 patches there. Seen, twice on 2026-10-06 (19:41, 19:43), after installing Engine Fixes 7.10. | Not by the mod: give everyone the same library file. |
 
 - **SteamVR would not start** (2026-10-18): `bind: 10013` on 127.0.0.1:27062, SteamVR's web port, inside a range Windows reserved
@@ -121,21 +121,28 @@ entries below are under `#ifdef SKYRIMVR` with `static_assert`s.
 
 | Feature | State on VR | Why |
 | --- | --- | --- |
-| Skyrim Together UI (connect dialog, chat, party) | **SteamVR dashboard tab** "Skyrim Together" (`Systems/VRDashboard.cpp`). F6 and `connect.txt` still work, and status also shows as HUD messages. | No game window to draw into. CEF renders offscreen into a texture on our own D3D11 device; the laser pointer and SteamVR keyboard are forwarded to the page. |
+| Skyrim Together UI (connect dialog, chat, party) | **SteamVR dashboard tab** "urSovngarde" (`UI/Menu/VRDashboard.cpp`). F6 and `connect.txt` still work, and status also shows as HUD messages. | No game window to draw into. CEF renders offscreen into a texture on our own D3D11 device; the laser pointer and SteamVR keyboard are forwarded to the page. |
 | Menu patches (menus don't pause the game while connected, favorites numbering, intro movie skip) | **On** since 2026-09-14 | Addresses from TiltedEvolutionVR, patch points checked in the VR code. Message boxes still pause: unpaused, they are invisible in the headset. |
-| Skills / level up menu unpaused | **On** since 2026-09-16, untested | Unpaused, the menu sets `kFreezeFrameBackground` and waits for a freeze frame VR never renders, which is why it was black. SE 51638 (`StatsMenu::ProcessMessage`, VR 0x8ec3e0) writes that flag at +0xBB6 (`or dword ptr [rsi+0x1C], 0x20`; AE has it at +0xA10), and the four bytes are NOP-ed after a byte check. The other three AE patches have no VR address: "menu not appearing" (+0x84E), "keep the menu updated" (+0x1040), and the controls fix (AE 52518), so in-menu input may not respond. |
+| Skills / level up menu unpaused | Patch **on** since 2026-09-16, untested; it only matters when `Gameplay:bUnpausedMenus` is on, which the shipped server configuration turns off | Unpaused, the menu sets `kFreezeFrameBackground` and waits for a freeze frame VR never renders, which is why it was black. SE 51638 (`StatsMenu::ProcessMessage`, VR 0x8ec3e0) writes that flag at +0xBB6 (`or dword ptr [rsi+0x1C], 0x20`; AE has it at +0xA10), and the four bytes are NOP-ed after a byte check. The other three AE patches have no VR address: "menu not appearing" (+0x84E), "keep the menu updated" (+0x1040), and the controls fix (AE 52518), so in-menu input may not respond. |
 | Projectile null-handle patch | **On** since 2026-09-16 | SE 33672 is in the VR address library (0x554980). The VR frame differs, so the patch point is +0x397 (`mov rbx, [rsp+0x58]`) with a 0x158 frame, checked in the VR code. |
 | Renderer and input byte patches | **Off** | Addresses unverified; a wrong patch silently corrupts code. |
 | Naked-NPC re-equip workaround | **Off** | `GetArmorInSlot` doesn't exist on VR. |
 | Projectile metadata (spell, weapon, ammo, cell) | **Sent** | Each id is sent only when it maps back to its pointer (`ValidFormId`), so a wrong `Projectile::LaunchData` layout would cost an unsynced projectile, not a crash. A remote shooter's projectile is launched and then deleted, because VR's `LaunchSpell` doesn't null-check. A spell or projectile a mod makes at run time (NPC Spell Variance on MGO) has an id only its own game knows, so other games cannot show it (`Remote projectile from X not launched`). |
 | First-person checks and camera switching | Always third person, no switching | VR has no first-person graph (same as CommonLibVR). |
 | `Actor::Kill`, `Respawn` | Called by address | Chosen before the vtable was fully checked; works. |
-| Mount sync | **Partial**, parked 2026-10-12 | `InitiateMountPackage` (SE 36881, VR 0x60e300) checked in the VR code: the rider takes ownership of the horse, and the other client gives the rider's copy the mount package, which it accepts, but the copy never gets on: copies run no AI of their own (VR_TODO.md, "Mounts"). |
+| Mount sync | **On** since rc6; seen by two real players in rc7.1, the fixes since then checked only by tests | The rider's copy is seated by the game's own quick mount (flat AE 37904, VR 0x60e130) and taken off by its instant exit (AE 38705, VR 0x637e10); it runs its own update only for the moment it gets on or off, and a dismount message takes it off with its owner (`MountService`). On VR a re-seat can leave the copy on the horse in a standing pose. Since rc6 the seated copy is placed at its horse's playback moment, a rider who just got on or off is shown climbing (whether a copy's graph plays the climb is not yet seen, it falls back to the instant seat after 2.5 s), a player who loads the pair later is told at once by the server, and the copies are taken off their horses on a disconnect; all of this needs two real players to judge. Before rc6 the copy took the mount package but never got on, since copies run no AI of their own. Seen by the owner in rc7.1 (2026-11-18): the VR rider seen on flat was very smooth but popped on with no climb; the flat rider seen in VR climbed from the horse's head, then snapped to the middle and drifted in the saddle (the rider has been pinned to its horse since, not seen live); and a horse the VR player rode could not be ridden by the flat player afterwards. Since rc7.26 a horse handed over for a player's ride first lets the other game's rider copy off it (one still climbing off, or left seated by a lost dismount), a seat try the game refused no longer leaves the horse named on the copy, a player's use of a horse is no longer done again by its copy in the other games (that gave the copy a mount package it never runs, which barred the horse), and a copy climbs on at a later try while its rider is still getting on. A rider who connects, comes back or loads a save while already on a horse (a player, or an NPC that loads again on its horse) is found on it within about 2 s and shown seated, with no climb; before, the others saw them beside the horse (checked only by tests). Riding a horse another game runs needs both players in one party (party horses). Not known yet: whether the VR rider's copy pops because its graph refuses the climb after the quick mount, or because the VR player gets on without a climb in their own game; the flat log's debug line "its graph took / did not take the climb" tells. |
 
 ## 5. VR-specific sync added in this port
 
 - **VR body sync** (`VRBodySync.cpp`, `VRPose`):
   - 12 upper-body bone rotations relative to the root, read from the skeleton VRIK drives.
+  - Without VRIK the body is not fitted to the headset and controllers. The game keeps its empty hands near the
+    controllers, so the pose is sent as usual while nothing is drawn, but from the moment a weapon or spell is drawn (the game's
+    own weapon state, until it is sheathed again) its animation raises both arms by the head. So without VRIK nothing of the pose
+    but the held spell's aim is sent while a weapon or spell is out, and the copy shows its own drawn stance, which follows the
+    VR player's draw with a delay of up to about 1.3 s (the state is sent the frame it changes; the copy is drawn after showing the
+    other state for 1 s, when no replayed draw came); the arrow in the hand is not sent then either, so a nock shows
+    once the attack state has it.
   - Sent with movement (32-bit quaternions) and relayed by the server.
   - Applied once per frame at the renderer's frame end (`StopTimer` call in SE 75461, +0x15), on one
     thread. It used to be applied from the animation job threads (hook on SE 36372), and the renderer read
@@ -178,19 +185,99 @@ entries below are under `#ifdef SKYRIMVR` with `static_assert`s.
   game's own callers show). Passing five made the game store stack garbage as the callback and crash when
   the fade-in after a respawn finished.
 - **Respawn** finishes once started. On VR the player left bleedout early, which left the screen black.
-- **Stutter report:** `Perf spike: ...` in the log when a frame is over 25 ms, naming the slowest mod
-  section.
+- **Stutter report:** removed; the log no longer prints `Perf spike` lines.
 - **Dropped items** are kept by the server (`DroppedItemService`, `dropped_items.bin`) with where they lie, and moves
-  of them are relayed while they happen. Two known gaps: an item this save already has, which somebody else moved more
-  than 200 units while this player was offline, is not recognised on reconnecting and is placed a second time; and
-  an item's turn is read from its reference, which may lag behind its 3D while it is carried.
+  of them are relayed while they happen. The server also keeps where an item rested before it was moved more than 200
+  units (where it was dropped and up to three later places, in the file's own trailer), and sends them with it: a game
+  whose save still has the item at such a place, from before somebody moved it while that player was offline, finds
+  its copy there and moves it to where the item lies now instead of placing a second one. An item's turn is read from
+  its 3D, which the reference's own angles lag behind while it is carried. The server adds or removes a dropped item only
+  at the request of a player near it, and keeps at most 16384: nothing else ends a dropped item, so when the list is full
+  the oldest is forgotten (a warning in the server log) instead of a new drop being refused. A game that still has a
+  forgotten item keeps it where it lies, but the server no longer relays its moves or sends it to a late joiner.
 
 ## 6. Open bugs
 
-- **A game that goes on from an older save misses the quest stages the party passed meanwhile** (`QuestService`, client and server). Stages are relayed as they happen, and the server keeps them only
-  to drop duplicates, so nothing replays them to a game that is behind, and a skipped stage's script never runs there. Seen on 2026-11-22: player 2's Helgen intro had skipped MQ101's stage 255,
-  the only one that switches waiting back on (the game's `SetInChargen`, kept in the save), so every wait and bed was refused with "You cannot wait in this location." `IntroWaitRepair` repairs
-  that one case after each load and after another game's intro stage; any other skipped stage stays skipped.
+- **Carriage and ship travel** is not offered to the party (only a load started from the map menu is), and followers and a horse stay behind on a follow; whether vanilla carriages use the map is not checked.
+- **The "Public servers" page lists only urSovngarde servers** a client of this build can join (same protocol): a server announces `urs:` and its protocol in its tags, and the page hides every other entry, so servers of other Skyrim Together builds and urSovngarde servers on another protocol do not show. A server that is not updated to the build, or one that does not announce (`LiveServices:bAnnounceServer` is off by default), is not listed; a player joins it by typing its address. [U] Whether the upstream list keeps the tags text unchanged has not been checked against the live list; if it drops it, the page shows no servers.
+- **When the party leader disconnects,** the first remaining member becomes the leader. The old leader, when they come back and join the party again, is a member, and the party follows the new leader's world: the civil war, the journal, radiant quest picks and fast travel (the fast-travel offers of the old leader are dropped).
+  Quest progress is not lost: the server keeps the party's quest starts, stages and stops (up to 2048, the oldest go first) and sends them to a player who joins or comes back, forward only, so a game already past a stage is not taken back. This needs `Gameplay:bEnableQuestCatchUp`, which the release configuration turns on and which is still marked experimental. The kept steps live in the server's memory only: a server restart loses them, and so does the party emptying (everyone leaving), after which a new party starts with none.
+
+### Release7 (Vanilla): what is only partly shared
+
+Release7's protocol is `c4750892`: every player and the server need it, and an older build is refused at connect.
+A re-check of 140 kinds of sync found 31 partly shared and 2 missing. The ones a player is most likely to notice:
+
+- **Armor:** a piece put on or taken off is shown, also one changed out of range (the next equipment snapshot takes off
+  what its owner wore before and wears no more). A piece changed for one from a plugin the other game lacks leaves that
+  slot empty there; an NPC's own outfit piece its owner was never seen wearing stays.
+- **Eating and drinking, crossbows, summons, shouts:** a crossbow's reload shows only as its effect, with no animation.
+  A potion, poison or food eaten or drunk plays its sound at the other games' copy (as in the game, no animation), except a potion or poison the player made at an alchemy table, which plays nothing when drunk and logs an error line each time; an
+  ingredient eaten plays the food eating sound there (an ingredient has no sound of its own). A potion or poison made at
+  an alchemy table plays the menu's making sound at the copy, for players within about 1500 units (it is a UI sound with no
+  fall-off); it is told from the made item and the ingredients used up arriving together, so dropping, selling or putting an ingredient in a chest
+  and taking a made potion out within 1.5 s plays it once too. None of these is heard in a game yet. Another player's summon now comes out
+  of its portal on its copy (rc7.28; the cast is still never replayed, which would make a second creature). A VR player's
+  shout is sent as the voice actions a flat player's game performs (rc7.28), so its copies shout. Neither is seen in a game yet.
+- **Sprint and run follow the speed shown:** a character's walk and run play at the pace it is shown moving, on flat and in VR
+  (roomscale steps included). A sprint shows at a sprint's pace; a VR sprint that moves the body slower than 370 units a second
+  (roomscale-assisted) shows as a run at that pace, so its feet never run ahead of it, and a sprint cut by a turn comes back at
+  450 or faster. Not yet seen in a game.
+- **Swimming:** the swim state is shared; a dive's angle comes from height only.
+- **Falls and landings:** a character still in its jump once its player is on the ground is sent the fall it missed and
+  the game's own landing. Whether a hard landing from a height shows its heavier animation is not yet seen in a game.
+- **Talking:** talking to a living NPC another party member's game runs asks that game for it first (the server's hold claim, as for a grab; `DialogueClaim`):
+  the conversation opens a moment later in the talker's game, which runs the NPC until it ends, then hands it back. Not in a party, `Gameplay:bGrabHolds` off,
+  no answer within 1.5 s, or the NPC fighting, in a scene here, another player's follower, placed at run time, a dragon in flight, or back from a talk that ran out under 10 s ago: the copy is talked to as before (at once, with no wait, except when the server's answer is awaited), and that conversation stays in the
+  talker's game. A hold lasts at most 120 s: a longer conversation (a shop, a long quest talk) goes on with the copy once the NPC goes back, as before this
+  change. Not yet seen in a game. A flat player's character is shown
+  facing the NPC it talks to (within 1500 units) while the conversation is open; a VR player's faces where they look.
+- **Followers:** only wait and follow are shared.
+- **Seats placed at run time** (by a script or a mod) are shared only where the other game has the same furniture at the
+  same spot (the same script or mod placed it there): it is found by its base form within 50 units. Where it has none, the
+  copy stands, and so it does when two there are about as near. Two players count as on one such chair when their games
+  have it within 16 units; one placed farther apart in the two games can seat both. Not yet seen in a game.
+- **References a quest switches on or off** are shared from any player's game: the leader's always, a member's for 10 s after its player used a lever or button, or after its own quest reached a step the party had not had in this run (a member behind the party reaching an older stage does not take the world back). That needs the party's kept quest steps (`Gameplay:bEnableQuestCatchUp`, on by default); with it off a member's quest steps share nothing, and a misc quest's steps need `Gameplay:bEnableMiscQuestSync`. The server keeps the last switch of each reference. A quest each player keeps (radiant, `IsNonSyncableQuest`) sends no steps, so its switches stay in that game. Not yet seen in a game: a member's own quest switching a reference for the party.
+- **Werewolf and vampire lord:** feeding is not shown. A vampire lord's hover plays from its animations and its
+  levitation switch; a flight state, if the game gives it one, is set on its copy the way a dragon's is (not yet seen in a game).
+- **Arrows stuck in walls:** every arrow is replayed as a real arrow in the other games, so it sticks where it lands
+  there too. A player taking one out of a wall or the ground now removes the other games' copy of the same arrow
+  nearest that place, within 30 units (rc7.28; outdoors also in the neighbouring cells; the server takes it only
+  within 512 units of that player and in their cell indoors or the cells around them outdoors, at most 8 a second;
+  only a copy that has landed counts, never one still flying). Arrows shot before a player arrived stay per game, a copy that
+  flew more than 30 units off is left, and so is an arrow lying within an NPC's or a body's reach (64 units). Players never
+  count for this, so the player taking the arrow, standing right at it, does not keep it in the other games.
+  Arrows in bodies and cut-off heads are shared (see below). None of this is seen in a game yet.
+- **World details kept per game:** decals and impacts, falling rocks after a trap, and a dragon's skeleton. A chest's
+  lid opens in the other games when a player opens it, and closes there once that player walks away from it (300
+  units) or after 3 minutes, not when their menu closes.
+- **VR mod extras** (VRIK holsters, HIGGS, PLANCK swings counted as attacks, finger poses, the physical flinch of a
+  hit NPC) need the Essentials add-on, which comes later. Without it a PLANCK hit with no swing behind it is not
+  counted as an attack, and a holstered weapon's draw can show up to about 1.3 s late. Blades stopping each other
+  physically is Full's (PLANCK); Vanilla has only the VR blade stop, where a VR player's blade rests on another
+  player's.
+- **A standing character twitches** slightly when an NPC bumps into it: it is held at its owner's last place and
+  pushed back each update.
+- **Memory** can grow while the inventory menu stays open and players move. An idle game with only the HUD open does
+  not grow; this is being looked into.
+
+- **The party's quest progress wins over an older save** (`QuestService`, client and server). Stages are relayed as they happen. The quest
+  catch-up (`Gameplay:bEnableQuestCatchUp`) replays the party's stages to a player who joins the party later, comes back after losing the connection, or loads a save while connected,
+  the party leader too (the game asks again with `RequestQuestCatchUp`; `QuestCatchUp: a save was loaded while connected`; the party's progress wins over an older save, so a leader catches up like a member). It only moves
+  that game forward (`QuestCatchUpStep`): it skips the stages it has already reached, and a quest's start and stop where it runs or is done there, so loading an older save cannot undo
+  the party's progress, for the leader either. A game that catches up shares none of the references its caught-up stages switch, the leader's either, while the catch-up runs and for 2 s after (`SharedHomes::CatchUpHoldsSwitches`): the other games already have the party's past, and a lever or a later stage may have changed those references since. A caught-up stage is never held behind the leader's playing scene; while the leader catches up (or waits up to 5 s for the answer) its war and tracked quests are not sent, and a radiant quest that runs only in the members' games is left out of the leader's catch-up (the leader picks the party's targets, and a caught-up start would pick new ones). Seen on 2026-11-22, before the ask after a load: player 2's Helgen intro
+  had skipped MQ101's stage 255, the only one that switches waiting back on (the game's `SetInChargen`, kept in the save), so every wait and bed was refused with "You cannot wait in this
+  location." `IntroWaitRepair` still repairs that one case after each load and after another game's intro stage. Not yet seen in a game: a member or the leader loading an older save while connected.
+- **A crime the other game's NPCs saw is only partly theirs** (`CrimeService`, `CrimeReports.h`). The bounty is the offender's own, in the offender's game, where
+  the other game's NPCs are copies that count as witnesses; the other game only shows its NPCs reacting to the offender's copy. An assault runs that game's own alarm,
+  with the copy as the offender. A theft's alarm refuses a copy, so a civilian witness calls it out (the game's "Steal" line, as a civilian does in the base game)
+  and does not fight; since rc7.28 that includes a theft from a shelf or a table, whose item is already gone in the other game. The murder alarm works only for that
+  game's own player, so a murder runs the assault alarm on the dead victim: the witnesses turn on the copy, but nobody there "reports a murder". The pickpocket alarm
+  asks its witnesses about that game's own player only, so a pickpocketing just turns the civilian witnesses that saw it on the copy.
+  Guards: a guard the other game runs who saw the crime is handed to the offender's game (`Gameplay:bCrimeGuardHandoff`, on), which then runs the base game's arrest
+  for the bounty it holds. One the server does not hand over within 10 s leaves the crime to the offender's game: after a replayed alarm it is put back to
+  what it was fighting before, and fights the copy only when the copy attacked it. A copy cannot be arrested.
+- **A trap that switches on and off** (swinging blades, some levers toggle each time they are fired) is fired once per step in every game since rc7.28 (`TrapSync::Ledger`): the other player's copy setting it off here and that player's word for the step are paired within 10 s, in either order, and the second is dropped (a copy's firing in the Activate hook, before the game runs it). Not yet seen in a game. A word that comes more than 10 s from the copy's step still fires a second time.
 - **PvP limits of the one damage rule** (`PvpProjectiles.h`, `HookDamageActor`, `OnHealthChangeBroadcast`). An arrow takes its shooter's number, so a raised shield in the target's game no
   longer lowers it: the copy in the shooter's game does not block, and the hook does not see the block. Three rarer cases cost at most one arrow's number: a second arrow's report within
   500 ms of the first arrow's hit counts as more of the first; a replayed hit higher than the report stays higher; a report after the flight window (a hitch over 300 ms) is held as a plain hit, on top of the replay's.
@@ -206,9 +293,10 @@ entries below are under `#ifdef SKYRIMVR` with `static_assert`s.
   game lacks, with its base present, gets a copy of the owner's base in its place (`Stand-in:`).
 - **Followers** (`CharacterService`, client and server): a follower is the teammate flag plus `CurrentFollowerFaction`.
   - Another player's is shown on a temporary copy, and this game's own reference is only disabled while loaded nearby (`s_ghosts`, `HideGhost`). The copy's writes are all it takes: nothing reaches the reference, and copies skip saves (`SetSkipSaveFlag`).
-  - A disable is saved with a reference, so `kHiddenHere` makes the save hook (Character's vtable, slot 0xE) write a hidden one as enabled: `SaveGuard:`. The rig's control in `live-follower-save` shows that a plain disable does stay in a save.
-  - The game's disable lands a little after it is asked for. A release in between would be undone by it, hence `s_pendingGhostEnables`; a hook on the disable to catch scripts was tried and taken out, as it took our own second disable for a script's and left her disabled in saves.
-  - In both saves only the party leader's exists. **Known limits:** a quest disabling a reference hidden here is undone when it comes back, and written to a save as enabled; a quest NPC with the follower faction is hidden for the other player too; a framework's follower without that faction stays an ordinary NPC; `kHiddenHere` is not cleared by a load.
+  - A disable is saved with a reference, so `kHiddenHere` makes the save hook (Character's vtable, slot 0xE) write a hidden one as enabled: `SaveGuard:`. The rig's control in `live-follower-save` shows that a plain disable does stay in a save. The flat game has the same hook (Character's vtable AE 207886, slot 0xE), so it shows another player's follower on a copy too (`Actor::IsSaveGuarded`); before, it left her on its own reference.
+  - The game's disable lands a little after it is asked for. A release in between would be undone by it, hence `s_pendingGhostEnables`; a hook on the disable that acted on scripts was tried and taken out, as it took our own second disable for a script's and left her disabled in saves. Since rc7.28 the disable hook only logs a switch-off by someone else (`HiddenSwitchOff:`, at most one line a second) and changes nothing, to gather evidence for a later fix.
+  - In both saves only the party leader's exists. **Known limits:** a quest disabling a reference hidden here is undone when it comes back, and written to a save as enabled (such a switch-off is now logged, `HiddenSwitchOff:`, and nothing acts on it yet: a two-player session has to show first that it never catches this game's own hide); a quest NPC with the follower faction is hidden for the other player too; a framework's follower without that faction stays an ordinary NPC in Vanilla; an add-on can recognise such followers and carry out another player's word for them (`UrGameFollowerPolicy`, registered with `RegisterFollowerPolicy`; the Full add-on is to use it for the follower mods of its list). (A load does clear `kHiddenHere`: `CharacterService::OnGameLoaded` drops it from every ghost, a reference hidden for another player's copy, and `RunGhostChecks` hides one again within 2 s.)
+  - Another player's follower can be told to wait here or to follow her player, and traded with (`FollowerCommands`, needs `urSovngardeCoopMenu.esp` to choose; in her player's game an add-on's follower policy can carry the word out without it); her player's game carries the word out. **Known limit:** you cannot talk to her (as your housecarl, say) while she follows them: activating her gives only that choice, on flat as on VR, so her dialogue never runs in a game that does not run her. Dismissing or recruiting her stays her player's.
 - **Intermittent crash in the script engine on a freed temporary form -- a game/modlist crash, not ours.**
   Fingerprint: top frame `SkyrimVR.exe+0x93CE17` (`SkyrimScript::HandlePolicy`, turning a script handle into an
   object), `RDI = 0x3D`, `R15 = SkyrimVM*`, an access violation *executing* a heap-like address -- very often exactly
@@ -364,6 +452,14 @@ entries below are under `#ifdef SKYRIMVR` with `static_assert`s.
     twice on e20c11e and once on 474ec2b, `live-spawn-burst` once on e20c11e, copies gone from the game on arrival, no crash.
     Too few runs to call it gone; on 10-03 it crashed every time. The hub has none of these addresses on any version, and one
     crash of its kin (#30).
+  - Hardening since, not a fix (still open): while a loading screen is up and for half a second after, the client's own passes no
+    longer make or move copies or free the ones waiting to be freed, a copy removal the server or the client orders then is kept and
+    done once the load is over, and a copy the game lets go of then waits to be freed after it. On VR, standing bodies are not laid
+    down then, a dead or knocked copy's ragdoll is not moved, and no copy's body is read while a loading screen is up. A reference
+    hidden behind a copy is switched off at the start of a frame on the main thread, never during a load. Copies the server sends
+    during a load are still made at once, as before. Each step in a copy's life logs a `CopyLife` line with the thread, the loading
+    state and whether it had its 3D, so the next crash can be placed against its load.
+    It stays open until `live-copies-left-3` and `live-spawn-burst` pass with these in place and a session log shows it.
 
 - **The game grows with every loading screen, in Emma's modlist -- found 2026-10-03, not ours.** (2026-10-10: DynDOLOD
   DLL NG **Alpha-43** ends the thread leak: over four round trips threads stayed at about 193, against 222 to 296 on
@@ -392,6 +488,154 @@ entries below are under `#ifdef SKYRIMVR` with `static_assert`s.
   loading screens is where this would show; the modlist is Emma's.
   To name a frame of our own exe in a debugger, use the linker map (`build/.../SkyrimTogetherVR.map`): the exe has
   no debug directory, so cdb finds no pdb. Game frames show as `game_seg+X`, which is `SkyrimVR.exe+(X+0x101000)`.
+
+### Features still waiting for two-player checks
+
+These ship on with no client switch to turn them off (a server can turn off dragon souls), so a two-player test has to cover
+each one; until it does, read each as built and tested by unit tests only, not seen in a real game.
+
+- A flat (SE) player sees every remote VR player's body posed (head, arms, hands), not only the first: up to eight copies
+  through the native body commit, one slot each, and any copy beyond that, or one whose commit guards miss, through the
+  frame-end poser, as upstream does. The copies' commits run one at a time; one that waits more than 1 ms for another
+  falls back to the frame-end poser for a while. A copy the commit stops posing is posed at frame end in that same frame.
+  Never seen with two VR players at once.
+- The SE main loop's Main::Update call is swapped only when it is that call or another plugin's swap; on any other
+  executable layout the between-frames work (add-ons, queued mounts and seats, raises) does not run, with one error line.
+- Levers, puzzle pillars and claw rings that stay where they are put catch up for a late joiner by their end state: the
+  game that used one sends the resting pose of its 3D once it has come to rest, and the joiner's game uses its own copy
+  (at most three times) until the pose is the same, so turns already in the joiner's save are not added again. It leaves
+  a mechanism as it is when it cannot get there (another mesh, it does not move, or it comes back round). Controls that
+  spring back (pull chains, pull bars, buttons, valves) keep their state in what they work, so their uses are still
+  replayed on top of the joiner's save, and a gate that save already opened can end up shut. Traps are never fired again.
+  Try it: solve a puzzle part-way solo, then join a host who solved it; and pull a chain-worked gate both ways.
+- `URSOVNGARDE_NO_CEF` and `URSOVNGARDE_NO_VR_OVERLAY` are read from the environment only; a `switches.txt` file is no
+  longer read, and an old one is ignored without a message. On a Quest set them as environment variables.
+- Stuck arrows and cut-off heads are on: the arrow is placed on the other player's copy of the actor, which has not been seen working in a real game yet.
+- A body that falls over on one player's game is moved, out of view, to where its owner's body lies on the other player's flat game. Ragdolls and hanging props another player moves are set body by body on flat too.
+- A late joiner, or a player who comes back into range, now sees a dead body in the pose it came to rest in at its owner's,
+  not as their own ragdoll drops it: the server keeps each dead NPC's last pose at rest (a creature's ragdoll bodies too) and
+  sends it once with the body, and the copy is laid out in it once its ragdoll is there. Built and tested by unit tests only;
+  not seen in a game yet. A body that came to rest more than 600 units from its owner's player was never posed there, so
+  it still lies in the joiner's own ragdoll's pose.
+- Loose objects (rc7.25): clutter that a shout, an explosion or a blast throws around is now sent, a few objects a pass
+  and at most 96 moves a second, nearest first, by the game whose player stands clearly nearer (the lower player id
+  when it is close, and the other game after about a second if neither sent it); a cell settling as it loads is still
+  not sent. The objects watched are the nearest 128 to any player, in the player's cell and the loaded cells next to it.
+  Object and hanging-prop moves go unreliable between their start and rest, which stay reliable, so a lost packet no
+  longer holds up the rest. A moved placed object's resting place survives a server restart (kept in dropped_items.bin,
+  which an older server still reads for its items). The server takes at most 128 object moves a second from each player.
+  Built and tested by unit tests only; not seen in a game yet.
+- A VR game now draws an object another VR player carries from their copy's hand, as a flat game already did: the hands
+  its frame-end poser put on the owner's this frame or the last count (`PosedHands`). A flat player's copy has no posed
+  hands, only its animation's, and a flat player's grabbed object floats in front of them rather than in a hand, so in VR it
+  still follows the path their game sends. On every screen, an object let go from a copy's hand now leaves at the speed
+  the hand carried it (at most 2000 units a second, as a throw) as it blends onto the thrower's updates, instead of stopping for a
+  moment. Built and tested by unit tests only; not seen in a game yet.
+- Thrown items and objects (rc7.26): once a hand lets go of a moving item or placed object, its moves go out as thrown with
+  the speed and spin its body has (or, when that cannot be read, from its last two polls; at most 2000 units and 30 radians a
+  second). Flat: what the grab key held. VR: an object carried by a hand, one that moved with the hand for two polls in a row
+  within 40 units of it, and let go once it is more than 60 units from the hand for two polls, within 300 ms of the last held
+  poll. The other game hands it to its own physics with them once the let-go is shown there, so it flies its own arc instead
+  of being drawn update by update, and the thrower's rest place settles it as before; a hand taking it again holds it again
+  from where it flew. A flight there that lasts over 3 seconds or goes over 2500 units from the let-go without a rest goes
+  back to the thrower's updates. A player who catches it in the other game moves it from then on, and the thrower's later
+  moves are not followed while it stays in their hand; the server still passes on one mover, so the thrower's game shows its
+  own flight until it puts the object down. An object at rest or never carried (pushed, knocked, a blast) and a flat
+  telekinesis throw the game does not report as grabbed are still drawn from the updates. The two flights can land a little
+  apart, which the rest place eases out. Protocol change (appended fields).
+  A VR hand carrying a living NPC or creature that lies in its ragdoll (knocked down, paralysed) another player owns now asks
+  for it, as the grab key does on flat, so its ragdoll pose stream reaches the other game. It asks only once the hand has
+  stayed within 40 units of the body and moved with it for 300 ms over three samples; one that is only hit or pushed, or is
+  in knock state 7, stays with its owner. Built and tested by unit tests only; not seen in a game yet.
+- A downed player's copy now kneels on the other player's screen, VR included: the game refuses its owner's `bleedOutStart`
+  on a copy (kept at 25 health), so its graph is sent the event, as an NPC copy's already was on flat. It gets up on its
+  owner's replayed `bleedOutStop`, or, should that be lost, once a later word of its owner's has had them on their feet for
+  2 s or they have moved 128 units from where it knelt (revived, or respawned elsewhere); a player's copy is never just
+  forgotten kneeling. Its life state stays its own, so nothing here takes it for down. Not seen in a game yet; the copy
+  seen below the floor while down on 2026-10-30 (`VR_TODO.md`) is a separate open item.
+- On VR a dragon's copy now takes its owner's flight state through the game's own setter, as on flat, and a dragon taken over
+  in the air there is set flying again through it. This needs the VR address of `Actor::SetFlyState` (VR 0x1406110F0),
+  merged from its own branch; until then the setter does nothing on VR and the copy rests on its own flight handlers as
+  before. A VR player's own dragon is still run by their game's handlers. Not seen in a game yet.
+- A VR player who crouches for real, with the sneak toggle off and no leg trackers, is shown in the sneak stance on the
+  other player's screen: once their hips stay below three quarters of their standing height for a quarter second, and
+  standing again once above 85 percent of it. Worked out on the receiving game from the hips already sent; nothing new is
+  sent, and the copy is not made to sneak for detection. With leg trackers or Essentials' lower body the legs show the
+  crouch as before. The stance is started with the graph events `SneakStart` and `SneakStop` (`CrouchStance:` debug
+  lines say whether the copy's graph took them). Built and tested by unit tests only; not seen in a game yet.
+- A VR player's steps around their room (no stick) are shown on the copy's legs by the way the copy moves against its
+  body's facing, so a sidestep plays a strafe and a step back walks backwards instead of a walk forward. Worked out on the
+  receiving game from where it draws the copy; stick walking reads the same. The turn-in-place rate (`TurnDelta`) is
+  still the owner's graph's, which follows the headset, so a head turn alone can still play a turn on the copy.
+  Built and tested by unit tests only; not seen in a game yet.
+- A VR game no longer measures every remote player's body in one pass every five minutes (the `CopyDiag` line, 20 to 30 ms
+  a copy, about 150 ms with six copies); the copies' invisibility is still cleared every 2 s. `session-report.py` finds
+  no `CopyDiag` lines any more. Not seen in a game yet.
+- rc7.26, built and tested by unit tests only, not seen in a game yet:
+  - VR has the game's flight state setter now (`Actor::SetFlyState`, SE 36922, VR 0x1406110F0, read from the running
+    game: the six graph flight handlers call it). The calls that set a dragon copy's flight state from its owner's, and fly
+    a dragon on when it is taken over in the air, are still flat only, so on VR nothing changes until they are opened up.
+  - A revive stays on the downed player the hand is on when a second downed player comes into reach, instead of starting
+    the 4 s hold again on the other one.
+  - A magic effect waiting for a copy that is not there yet no longer holds back the other players' effects for up to 4 s;
+    a target still takes its own effects in order.
+  - Work furniture (crafting stations, mining, woodchopping, leaning) has no sit state of its own: the game settles an
+    actor in furniture only as sitting (3) or sleeping (7), so it goes through the same seat sync as chairs and beds. Which
+    stations show the copy at work is still to be seen; shrines and the bards' instruments may not be furniture at all.
+- Three or more players (rc7.26), all on the server but the last, which needs a new client too:
+  - A joining player goes to the largest party, the oldest on a tie; it went to none once a second party existed. A
+    leader can kick only a member of its own party.
+  - NPCs are spread over the party's games: a leaving or silent owner's go to the game running the fewest, and an NPC the
+    leader's game runs goes to the nearest member whose game has it loaded once the leader is 8000 units from it and the
+    member within 6000. The leader's game is no longer given one it registers farther than 6000 units from its player
+    while a member is that near. In an interior every NPC counts as near the players inside.
+  - Players farther than about 40 m from an actor get about every second of its movement updates, beyond about 100 m every
+    fourth; nearer players get all. Fingers, scale, weapons and the hand check always go. A message to several players is
+    written and compressed once.
+  - At a crossing of loaded cells a player is sent only the characters, dropped items and moved objects new to its range,
+    changed, or last sent 30 s ago or more; a dead body always goes. **Known limit:** a copy a game loses while it stays in
+    range comes back at the first crossing 30 s after it was last sent, not at the next one.
+  - The references a leader switched, kept for joiners, are capped at 16384, the longest unchanged going first. The
+    party's weather is kept for each worldspace.
+  - The moves of a carried item or object name their mover, and the other games draw it from that player's hand, or from
+    the nearest hand when that player's copy is not there. This changes the protocol.
+  Built and tested by unit tests only; never run with three players.
+- World states (rc7.25): a plant or a nirnroot one player picks shows picked for the others, an ore vein one player
+  empties shows depleted (and is set destroyed, as the game leaves it), a bear trap sprung or armed matches, and a dungeon
+  rune trap set off is gone. The item or the ore stays with the player who took it. Other destructibles share their damage
+  stage only when the masters give them no script and no harmful explosion (webs, windmills, a few quest displays): setting a
+  stage in another game would run its quest scripts and explosions there, so oil pools, gas traps, siege barricades, quest
+  urns and any plugin's destructibles stay each game's own. A stage set for another game can end one stage further on when
+  two stages lie close together (never on an ore vein, whose one stage caps the damage). A nirnroot is set picked by
+  switching it off: its glow stays until the cell loads again, and its picked stalk is not shown.
+  A player who comes later gets the picked, broken and spent ones only while the game would not have reset the cell by
+  then: the hours since no player had it loaded must be under 240, Skyrim's iHoursToRespawnCell (a game setting this does
+  not read, so a plugin that changes it is not followed; a cleared dungeon's longer time is not weighed either, so those
+  end sooner). A game whose cell reset brings one back reports it, which ends it for everyone who comes later, unless
+  another player has that place loaded then. A player who loads a save while connected (a death reload too) is sent the
+  kept states of their place again, so an older save's plants and veins are set as the party left them; the server takes
+  this at most once every 5 s per player. Bear traps are shared only between players who have them loaded, as the game
+  arms one again whenever it loads, so a player who arrives later can see one armed that the others see sprung until
+  someone springs or arms it. Not yet seen in a game: that a vein set destroyed takes no more mining, and that a rune trap
+  that went off reads as disabled or deleted (if not, runes are simply not shared). Built and tested by unit tests only.
+- A flat player's held flame or beam goes where they aim on the other player's screen. Not yet checked on a headset.
+- Traps one player sets off and dragon souls given to the whole party are on (a server turns the souls off with `bEnableDragonSouls` in its `[Gameplay]` settings). Their effect on a Quest headset has not been checked. A player without `urSovngardeCoopMenu.esp` keeps the game's own soul absorb and gets no shared souls.
+- The other player's bar on the game's enemy meter (above their head on VR, at the top of the screen on SE, when you look at them or they are hurt) and their icon on the world map (also on the compass when they are near but out of sight) are on. Neither has been seen in a real game yet.
+- Also on since rc6 and checked only by tests: a VR player's smoothed body and their swings, power attacks and bashes on the flat copy, another player's Healing Hands beam, carried objects drawn from the hand, NPCs sitting and sleeping in their furniture on every screen, the notice when two players' plugin lists differ and creature copies matched by race. The server now shares misc quests, quest catch-up, radiant quest targets, party fast travel and the calendar by default; the shipped `STServer.default.ini` also turns on the shared sleep and wait (`Gameplay:bEnableSleep`, off in the server code as upstream has it).
+- Taken from upstream on 2026-11-22 (Dosylia/urSovngarde f6963ad0) and merged with ours, each checked by upstream's rig and by unit tests, not yet in a two-player game of ours:
+  - Sleeping and waiting together replace the party sleep: time moves once every connected player has confirmed the Sleep/Wait menu, by the shortest length picked; a vote nobody
+    completes runs out after a minute, and backing out means 30 s before confirming again. A player loading or at the main menu for 15 s or more is no longer waited for (a door's
+    loading screen is shorter); they are waited for again once back in the world, and their clock follows the skip. So time can skip for a player whose loading takes more than 15 s: they arrive to find the hours have passed. The menu that answers the party leader's fast travel is no vote (`PartyService::HasFollowOffer`): its OK now follows the leader and closes the menu, with no wait (`FollowMenuOk`; before, it ran the game's own wait in that game only). A Sleep/Wait menu that was already open when the leader travelled is an ordinary vote. Try a member pressing OK there.
+  - Raising another game's dead body: this player's game still asks for the body and raises it here once it is handed over (`RaiseClaim`), so this game's AI leads it. A body not
+    handed over within 3 s now has the raise sent to the game that runs it (upstream's path) instead of raised on the copy, so that game's AI leads it and its copy here may read as
+    hostile, as upstream still lists. A raised body no longer turns to ash when a revival or BodyStand reaches it.
+  - A downed player is held down from the down's first frame, and health from a level-up, a potion or a spell is taken back while down. A player's copy elsewhere is kept at 25 health:
+    check that a level-up while down neither kills nor stands up the copy on the other screen.
+  - Another VR player's posed copy is placed at the frame end, right before its pose is written, against the flicker. On flat, a copy the native body commit draws is still placed by the
+    interpolation, as before; check the flat view of a VR player.
+  - A dead copy whose ragdoll falls away under the ground is switched off (`FallStop`); its owner's game keeps the body and it is asked for again with the cell.
+  - On OpenComposite the death card, the down and revive messages and the siege meter are drawn into the game's eye images; `URSOVNGARDE_NO_VR_OVERLAY` still turns the SteamVR overlays off.
+- Smoothness work in the same build, also checked only by tests: an NPC taken over or first seen mid-walk is started walking instead of sliding, a copy that changes hands glides to its new owner's place and its legs blend between updates, late actions play up to three a frame, an essential NPC's copy gets up from bleedout when its owner's does, NPCs turn their heads where they look in their owner's game, the other player's health bar eases between reports, thrown objects follow their thrower's timing and map icons move four times a second while the map is open.
 
 ## 7. Debugging
 - **Who may connect to whom is decided by the protocol id, not the version (2026-10-02).** `BUILD_PROTOCOL` is a
@@ -536,10 +780,12 @@ entries below are under `#ifdef SKYRIMVR` with `static_assert`s.
 - **Read `logs/tp_client.log` first.** On a crash it contains the faulting access, the registers and a
   raw stack scan. A real stack walk is impossible, because the custom-loaded game image has no
   unwind info.
-- **Small crash dumps** (`logs\crash_UTC_*.small.dmp`, since 2026-10-07): stacks, registers and the objects the
-  crashing registers point at, a few hundred KB, the newest three kept. The one a player's report carries; open it
-  with `cdb -z <dump> -c ".ecxr; kn 30; q"` like the big one (no game code to disassemble in it).
-- **Crash dumps** (`crash_UTC_*.dmp` in the game folder) are about 1GB, but they are the only place
+- **Small crash dumps** (`logs\crash-run-*\crash_UTC_*.small.dmp`, since 2026-10-07; each launch has its own `crash-run-*`
+  folder): stacks, registers and the objects the crashing registers point at, a few hundred KB. The newest three of a launch
+  are kept, and at the next launch those of the newest three launches that had any (`CrashDumpPrune`). The one a player's report
+  carries; open it with `cdb -z <dump> -c ".ecxr; kn 30; q"` like the big one (no game code to disassemble in it).
+- **Crash dumps** (`logs\crash-run-*\crash_UTC_*.dmp`; only the newest launch's that has one is kept, and empty run folders
+  are removed at the next launch) are about 1GB, but they are the only place
   the game code can be disassembled: `SkyrimVR.exe` on disk is SteamStub-encrypted. Use `cdb`, not
   the WinDbg GUI:
   `cdb -z <dump> -c ".ecxr; kn 30; u @rip-40 L20; q"`

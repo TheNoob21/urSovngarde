@@ -22,12 +22,35 @@ repos' `TODO.md`: `C:\dev\urSovngarde-launcher` and `C:\dev\urSovngarde-hub`.
 
 ### Next play session
 
+Release7 Vanilla (protocol `c4750892`, server included): check these first.
+
+- **Sleeping and waiting together:** both players open Sleep/Wait and confirm; time moves once, by the shorter time. A member's OK in the menu that follows the leader's fast travel now follows and closes the menu, with no wait (`SleepVote: OK in the menu that follows`): say what it did.
+- **Coming back from an older save:** pick a plant and mine a vein, then the other player quits without saving and rejoins: the plant and the vein are gone in their game too.
+- **A spell charging in a hand** glows on that player's character in the other game, and keeps glowing while it charges.
+- **A standing character bumped by an NPC:** say whether it twitches, and how much.
+
 All of this needs build dd9f756 or later, on both players and the server (a protocol change: an older client cannot join). Do what you can, in any order. Each line says what
 to do, what you should see, and what to read in the log if you don't. "It looked fine" is a result too: say so.
 
 Before you start: don't play the vanilla Helgen intro together. Player 2 stays tied, because Ralof is a copy in that game and
 his scene never finishes. Use an alternate start, or connect after the intro.
 
+- **A theft the other game's NPCs saw makes them react there too (a protocol change, RequestCrimeReport and NotifyCrimeReport).** Two players in one party, in a shop.
+  Player B arrives first, so B's game runs the shopkeeper. Player A steals from a chest in plain view of the shopkeeper: A gets the bounty in A's game, as before,
+  and now in B's game the shopkeeper calls the theft out (the game's "Steal" line, as a civilian does when you steal in front of them) and does not fight. B's bounty stays 0 (`player.getcrimegold`).
+  Unseen: nothing in either game. A guard B's game runs says nothing: its game leaves it to A's game.
+  Logs: A's `Crime: this player's theft ... sent to it`; B's `Crime: player N's theft, seen by N NPC(s) of ours, ...`.
+  An assault is the game's own assault alarm with the other player's character as the attacker. A murder runs the same alarm, since its own is player-only.
+  The other game's NPCs that saw it turn on that player's character; a civilian may flee instead. A pickpocketing makes its witnesses fight or flee. Bounties stay each player's own.
+  Not yet: an item taken off a shelf or table (only containers for now). A guard the other game runs may attack instead of arresting: say what it did.
+- **NPCs the other game runs see you (a protocol change, RequestDetectionLevels and NotifyDetectionLevels).** Two players in one party, in a town: flat and flat, and flat and VR.
+  Player A steals something in plain view of an NPC that player B's game runs (B arrived first, or the NPC follows B): A gets a bounty, in A's game only.
+  Then A sneaks and steals with that NPC looking away: no bounty. A weapon kill of such an NPC in view of a witness gives A a murder bounty; unseen, none.
+  Each game runs its own NPCs' eyes and tells the other player's game every 2 s and on each change. Not proven yet: whether a sneak attack's bonus and the stealth eye follow it too (watch both, and say).
+  Known limit: an NPC the other game runs that no word has reached for 5 s counts as not seeing you, so a sneak attack on it may still get the full bonus, as today.
+  Your character in the other game sneaks the moment you toggle sneak (it used to wait for your next action, which in VR could be long). Not covered: a sneak that does not go through the game's sneak toggle (ActionSneak), if VR has one.
+  VR: the same, both ways (its address for the game's detection query was matched against flat's on 2026-11-16, not yet seen in play). Steal in front of an NPC the flat game runs while in VR, and the other way round.
+  Bounties stay each player's own (2026-11-16).
 - **NPC presence report, step 1 (a protocol change: every player and the server need the same new build).** Nothing to do in play: fight NPCs as usual, ideally three or four players at a bandit camp.
   Each game tells the server every 2 s which NPCs it has loaded, as its own, a copy or a stand-in; nothing about ownership changes yet. Afterwards read the server log:
   `Presence: removing actor X after ... while another game still has it loaded` is a drop that step 2 (server only: never remove an NPC a game still has, hand it only to a game that has it) would have prevented;
@@ -100,6 +123,9 @@ his scene never finishes. Use an alternate start, or connect after the intro.
   Rig, two real games, a Sungard battle of 50 a side, twice: no freeze, no `kept item` line, about 115 copies' items set; 138 of 163 soldiers held the same item kinds in both games, against 97 of 167 on the first try.
   The freeze itself did not come on the rig, on the old build either (a fresh battle; in play it came at a second battle), so the fix is checked by its own bound, not by a reproduced freeze.
   Two copies still held 7 more item kinds than their owners (their own gear and the owner's); cause not known.
+  Changed 2026-11-17, not built or seen yet: a copy's items are read again 2 s, 6 s and 10 s after they are set; one holding other kinds than its owner is logged
+  (`CopyLoot: copy X holds kinds its owner does not (...; N of the game's outfit) and lacks ...`) and set again, at most twice (`... kept` after that).
+  The outfit count tells whether the game's own outfit is the cause.
   To see: no freeze in a battle with player 2 near. In the log: `RemoveAllItems: X kept item Y` names an item a removal left; `counted 1 so that it can be removed` is a broken list mended.
 - **Another player's copy flickering between their pose and the game's own stance (client only).** A bug report's video (2026-11-07) shows a copy, a mage holding a spell, jump between the player's real pose and the plain spell stance, standing farther back, several times a second.
   On the rig the sending game's body is now and then in another state for one update: an arm turned about 175 degrees, or the hips at the root instead of where VRIK stands them; the other game played those updates, and its copy jumped there and back.
@@ -201,6 +227,12 @@ If there is time:
   Save and reload once in each case, connected and after leaving. Read `Follower:`, `Ghost: reference`, `SaveGuard:`, and that nobody's follower is missing after leaving. A granted sleep's OK button and a door with a follower are worth a look too.
 - **Look at the other player:** stand in front of them while they hold their hands out, palms up, then have them run past you with
   smooth locomotion. Hands and palms are as they hold them, the legs run, and the face looks like theirs. Only a headset can tell.
+- **A merchant's wares and gold (client and server, same protocol).** Both stand at a stall whose goods are kept under it (Carlotta or Anoriath in Whiterun, Alvor's forge in Riverwood, or Ri'saad's caravan).
+  Player 1 sells something and buys something; player 2 then opens the same merchant: same wares, same gold, player 1's sale among them. Then the other way round.
+  Come back two game days later and both open the merchant again: after the restock both see the same new wares.
+  If not: `VendorChest: merchant chest X shared while this player trades` at each trade, `changed here as its barter menu opened (a restock)` and `set as another game sent it whole` around a restock.
+  A merchant with goods in its shop (Belethor) was shared before this change; it tells nothing.
+  Rig: `live-vendor-chest` (one game and a bot at Carlotta's, chest ABB41: an item and then the whole chest from the bot reach the game). The restock itself needs two real games.
 
 After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:`, `Connection:`, `VRBodySync: actor X body --`, and
 `logs/process-end.log` if a game vanishes.
@@ -296,7 +328,7 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
       - Open, cause unknown, not a menu: the copy's hand can jump 12 to 18 units at any time on the rig, menu shut or held (2 and 5 of about 22 samples shut on two runs of the fixed build, 1 of 22 unfixed).
         `ReachHands` corrects at most 15 units, so a body that sways across that limit may flip between corrected and not. Not seen in play as such.
 - [!] **An NPC taken over while it walks** (play session 2026-10-31 07:55 on c382599; again 2026-11-15 15:55, Ahlam 1A6A5 on player 1)
-      - 2026-11-15/16, two real games on player 2's PC (toolbox `tools/two-games-takeover.py`, measured by legs against travel): about 1 in 5 NPCs
+      - 2026-11-15/16, two real games on player 2's PC (measured by legs against travel): about 1 in 5 NPCs
         gained mid-walk whose new AI walks them on slides on the new owner's screen; NPCs a game ran from the start never slid (about 25).
         The engine sends the walk start only once (`ActionMoveStart` from the movement message handler at SkyrimVR.exe+0x60B7C0), so a start
         refused while the NPC was a copy never comes again. Kinds seen in the action trails: the copy's last replay a stop; a frozen turn-to-walk
@@ -306,6 +338,14 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
         A copy-side `moveStart` while the owner walks seemed to help (0 of 5) but the rig game crashed twice in the AI movement code with it
         (SkyrimVR.exe+0x115bc08 and +0x115dc27, `MovementControllerAI`), so it is not used. The next build carries only the TEMPORARY action
         trails, for a play session (see the next-session item "An NPC handed over mid-walk").
+      - rc6: for 6 s after a gain the new owner reads the NPC's feet against its travel 8 times a second. Travel of 20 units or more in
+        0.75 s with neither foot moving 4 units from the pelvis is a slide: the game's own `ActionMoveStart` is performed on it through
+        `ActorMediator`, as its AI would (on the NPC this game now runs, not a copy, so it goes out to the other copies too); if it still
+        slides 0.75 s later, `IdleForceDefaultState` then `ActionMoveStart` once more, then it is left alone.
+      - rc6, new copies (about 1 in 10 slid): a copy that gets its 3D while its owner walks never saw its owner's start, and its first replays can reach
+        its graph before it takes them. It is watched the same way for 6 s from its 3D. While its owner's reports move it more than 20 units a second
+        on still legs, its graph is sent `moveStart` (a copy's own actions are refused), then `IdleForceDefaultState` and `moveStart` once more
+        On VR it runs while the copy's AI is skipped, because a copy-side start crashed the AI's movement code when that AI ran.
       Players saw NPCs frozen, sliding, and swimming on snow. All three reports were on player 1, just after that game gained the NPC:
       claims at 08:08:28 and 08:08:53, a leader assignment at 08:11:38. That session had 117 gains in 22 min, against 43 in 25 on
       10-30. Nothing in c382599 was found that causes it: `VR_HISTORY.md` has the same symptom around 10-04. Nothing resets a graph
@@ -462,6 +502,8 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
 - [!] **Followers: each player's is known to the server, and shown to the others on a copy** (uncommitted build on 26f2792c, protocol 7b2006a6, not seen in play; every player needs it). Replaces a follower left in your interior, one follower bouncing between two saves, and most of a follower's effect on the other player's save.
       A follower is the game's teammate flag plus `CurrentFollowerFaction`; the flag alone is a quest's and stays an ordinary NPC. A living one is run only by her player's game while they are connected. Other players show her on a temporary copy, and their own reference is not moved or rewritten, only disabled while loaded nearby, and written to a save as enabled.
       In both saves, only the party leader's exists. The other player has no follower while connected, cannot dismiss her or recruit another, and gets theirs back with their items.
+      Since feat/follower-commands (not seen in play, needs urSovngardeCoopMenu.esp): the other player activating her gets a choice, Wait here / Follow her player / Trade / Cancel. The word goes to her player's game (`RequestFollowerCommand`, `NotifyFollowerCommand`, PROTOCOL CHANGE), only from her player's party and in range, four a second at most, and is carried out there by the game's own follower script (`FollowerWait`, `FollowerFollow`, or the animal ones), so a follower left waiting is still dismissed after three days. She refuses while fighting, bleeding out, talking, or riding, and a follower outside the game's follower quest takes no word; the asker is told (`Follower: X waits here, told by player N`). Trade (owner's yes, 2026-11-16 18:45Z) is the game's own follower trade on her copy, as a teammate while the menu is open so taking is not stealing; the items moved reach her player's game as any change of an NPC's inventory, and her gear stays her player's game's (an item equipped there is not sent). Not in it: dismissing or recruiting her, "do something". On flat, where no copy is made (no save guard), she is still another player's follower on this game's own reference (`IsOthersFollower`), so the choice, the trade and the follower report treat her the same. Rig 2 on pt6e (2026-11-16): another player's word to the flat game's follower ok both words; the flat game as the asker was not possible before this.
+      The message box cannot be pressed on the rig: play-test only.
       Rig on FUS: `live-follower-copy`, `-save`, `-teammate-only`, `-shared`, `-shared-leader`, `-far-hidden`, `live-follower`, `-left`, `-stays-in`, `live-gone-here`, `live-teleport-far`, `live-teleport-far-loaded`, `live-npc-grace-outdoors`, `live-copy-through-door` ok; see below for the rest. MGO: the game starts, loads and connects; `live-follower-copy` could not run there, as Lydia is disabled in that save (INVALID).
       Open, from the rig:
       - One crash loading a save while connected, in 5 runs of `live-follower-save` that got that far (`SkyrimVR.exe+0x93f0f9`, 2026-11-01 18:52, just after `FormGuard: script handle FFFFFF0011D6`). The handle is not the copy's and nothing had been deleted; it looks like KNOWN_ISSUES' script engine crash on a freed temporary form, but that is not proven. A sixth run ended 30 s after the load with status 0 and no crash block, cause unknown.
@@ -474,6 +516,13 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
 - [!] **An Ice Wraith's copy** (the sliding of 2026-10-24 19:27: a game with no descriptor for its graph sends empty animation variables). Decided
       2026-10-31: a replacer from the capture, `GameFiles/.../SkyrimTogetherRebornBehaviors/IceWraith`, goes out with the release, and both
       players need it. `live-creature-icewraith`: 324 of 324 updates with variables; the bot reads what is sent, no copy's look. To see: "An Ice Wraith".
+- [!] **Other players on the world map** (the owner's request, 2026-10-23). The markers follow the players and go on the map's list
+      (`Player markers: X put on the world map's list`, in play), and nobody has seen an icon. The map gathers markers only when its camera
+      height crosses 10000 upward, so opening it alone never gathers. To see: "Map icons". If zooming shows the icon, make the client force
+      the regather. 2026-11-18 (feat/rc6-flat-ui): MapMenu::ProcessMessage gathers again on an update with no data (VR +0x916D10 case 0,
+      AE 53102); the client now sends one as the map opens and when our markers change while it is open, and puts markers on the list on
+      SE too (AE list +0x508, lock 404255). Not seen in play yet. Not yet checked: the icon type VR's map shows for type 11, whether the list goes into saves, fast travel between
+      worldspaces. A marker for a far player loads that exterior cell from disk; left as it is.
 - [!] **Crash at a fast travel from the map** (`SkyrimVR.exe+0x13085EE`, player 1 on d40cc8b, 2026-10-31 15:05; cause and fix in KNOWN_ISSUES,
       "Crash after closing the unpaused map"). Build a114d97 runs the unpaused map's close on the main thread at the start of a frame.
       Rig: `live-map-close` red on d40cc8b (the hide on a worker), green on a114d97 (Cancel, message box, a hit, a load), and `live-map-pointer` ok on b493cbb.
@@ -562,6 +611,19 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
 ## Open work
 
 ### Reported or changed from 2026-11-02
+- [!] **A word wall teaches the word to the whole party.** Built, not run in the game, not seen in play.
+      A script's `Game.TeachWord` (a word wall's, a quest's) is caught where the game registers it, and the word goes to the party (`RequestWordLearned`, PROTOCOL CHANGE). The server tells the party each word once, since a quest teaches it in every member's game.
+      A member is taught it through the game's own function, so it is not sent back. Unlocking a word still takes a dragon soul in each player's own game: every member gets one from a dragon.
+      Not covered: that the game's static native takes (VM, stack, tag, word) as the hook declares was not checked in the game. A player joining later does not get the words taught before. To see: player 1 reads a wall, and player 2 has its shout in the Magic menu, locked.
+- [!] **A trap one player sets off fires in the other players' games.** Built, not run in the game, not seen in play.
+      A pressure plate, tripwire or trap linker fires its trap from its script, with itself as the activator, so no activation of it was ever sent. Now the game whose own actor stepped on, left or used the trigger within the last second sends the trap (`RequestTrapFire`, PROTOCOL CHANGE). The other games with its cell loaded fire their own copy of it, unless it fired there in the last 2 s, as when the other player's copy set it off there too.
+      The triggers are Skyrim.esm's eleven (`TrapSync::kTriggerBases`, by the scripts on them; the DLCs add none), not the Dwemer button, whose press is shared already. Each game's trap hits only its own actors (`HookDamageActor`, `HookApplyActorEffect`), so nobody is hurt twice.
+      Not covered: whether a copy already sets off a plate here, and which damage path a magic trap takes, were not checked in the game. To see: player 1 steps on a plate, and player 2 sees the trap fire and takes its hit only if standing in it.
+- [!] **The journal follows the quests the party leader follows** (the old `OnConnected` TODO, the same in upstream). Built, not run in the game, not seen in play.
+      The leader's game sends the shared quests its journal follows (tracks) when they change, and every 10 s for whoever joined since (`RequestTrackedQuests`, PROTOCOL CHANGE). The server relays the leader's only, misc and untyped quests only with `bEnableMiscQuestSync`.
+      A member's journal follows them through Papyrus `SetActive`, so the compass and the map show their markers; a quest that does not run there yet is followed once it does. The first time it follows a leader, the member's other shared quests stop being followed; after that a quest the member picks stays until the leader changes its own. Quests each player keeps (`QuestFamilies`) are left alone.
+      Not covered: whether `SetActive` from Papyrus moves the compass markers at once was not checked in the game.
+      To see: the leader follows a quest in its journal, and the member's journal and compass follow it within a second or two.
 - [ ] **Shared sleep and wait: time moves when every player confirms** (the owner's go, 2026-11-21; upstream PR #953's design, rewritten into ours). Stages 1 to 6 and the anti-spam wait built and rig-tested (last 4190b25), not seen in play. PROTOCOL CHANGE: client and server go out together.
       Rules: every connected player confirms the Sleep/Wait menu, those loading or in the main menu included; the shortest length wins; the vote runs out after 60 s and names who did not confirm; closing the menu, combat or leaving withdraws, and the others are told. Each game keeps its own player's choice of sleeping or waiting; only the hours are shared. `Gameplay:bEnableSleep` stays the switch, off by default until play shows it holds; the plugin hour move keeps today's rules. Replaces the unpaused menu, so it should end the stutter entry below too.
       A bot counts as a connected player and never confirms, so a player sleeping beside a bot waits for it and the vote runs out: any bot test of sleep needs the bot to confirm first.
@@ -926,11 +988,51 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
       Now on the unpaused menu list (VR only, connected only): the pause is cleared as it opens, and while it is open the player's controls and melee swings are held. Alone, it pauses.
       Build v1.9.8-8-g65b14ee7-dirty.da89bed (client, FUS and MGO), TPTests 114 pass; the siege session tests it on the two-game rig. Not yet seen in play.
       To see: in a battle with the page open, the fight goes on, the laser clicks the page, and a swing while pointing does not hit. In the log: `Menu opened while connected: urSS_Battle (runs unpaused)`.
+- [ ] **A body lies elsewhere, and otherwise, than its owner's.** Each game drops a body with its own ragdoll, and the copy gets no blast.
+      On flat nothing moved a dead copy's ragdoll (`PlaceCorpse` was VR only), and on neither build did a dead copy lie in its owner's pose (one offset kept its own fallen pose).
+      Sync audit: corpses 68 to 220 units apart after landing; rig 69 to 108; an Imperial Archer 5406 units apart (VR). No flat log has a `CorpseDiag` line.
+      Fixed in this build (not yet seen in play):
+      - Flat moves a copy's ragdoll too, out of view, at the start of the next frame, through each body's own `bhkRigidBody` virtual (slot 0x37, checked on SkyrimSE.exe 1.7.104).
+        On since rc7.11. The AE ids used, checked on SkyrimSE.exe 1.7.104: world scale 188105, write lock 68234 and 68240, `hkpEntity::activate` 60849.
+        A body is moved only when its Havok world wakes a body it sets (`shouldActivateOnRigidBodyTransformChange`, +0x156), or it says so once and leaves it.
+      - A queued move carries the copy's session, owner, ids and generation, and is looked at again just before it runs: the same copy, still another game's, the same cells,
+        no load, still dead (or still lying, for a knocked one), its owner's bones not back, out of view, not held, no loot menu; otherwise canceled (`CorpseDiag: ... canceled`).
+        A copy forgotten (removed, run here now, handed to another owner), a disconnect and a save loaded cancel its moves and clear what was known of it, on both builds.
+      - The settle into the owner's pose and the move to where a knocked copy's owner fell count only once one did it (a translation is not a pose), tried 3 times at most.
+      - Once the owner's bones of a dead body stop coming, the copy's ragdoll is laid out once in the owner's last pose (both builds). The owner now sends a body's bones at least once
+        after it reported the death, even if the body came to rest before it read dead.
+      - A knocked NPC copy whose ragdoll came to rest while its owner's still lies more than 64 units away is put there once, so its get-up starts where the owner's does.
+      - Never while dying or bleeding out, while the owner's bones arrive, in view, under the player's hand or grab, or near an open container or loot menu.
+      Rig, three runs each on flat and VR: `live-copy-death-pose` (calibrate first, see its header), `live-copy-knockdown-place` and `live-copy-knockdown`'s `up` must be RED before and ok after;
+      the other `live-copy-*` checks must stay ok. To see in play: a corpse lies where the owner's lies, in the same pose, after looking away once.
+      In the log: `CorpseDiag: ... moved there (n bodies, in its owner's last pose)`, then `now lies N units`.
+      - rc7 (corpse rest pose): F1 stayed 2/3 on rc5 (pose means 22, 5, 8, then 11). In the failing run the copy's legs lay straight while the
+        original's were drawn up (pelvis to feet 61-68 units against 35-36). Two causes in the code. (1) The owner stopped sending a dead body's bones 2 s after
+        its 3D root came to rest, though its limbs can still settle. (2) The copy was laid in the owner's pose 20 units above "where the owner has the body". But for a
+        dead NPC that is the owner's 3D root (AnimationSystem sends it), which follows its ragdoll's root, not the ground: the settle's target z matched the original's pelvis z in all four runs (-94/-94, -122/-126,
+        -103/-108, -107/-111). So every settle dropped the pose 20 units (t1: pelvis -74 to -100), and the fall bent it out of the pose.
+        Now the owner sends a dead body's bones until every bone, legs too, has turned less than 2 degrees for 2 s, at most 6 s after its root came to rest. The
+        copy is laid where its owner's bodies lay, 2 units up, and raised further only so far as its lowest posed body would be below its own lowest body now
+        (never lowered, at most the old 20). When it is not lying still, the settle carries it more than 128 units, or the two are over 40 apart, it keeps the old
+        20-unit drop. Pure rules: `CopyBodyRules::KeepsSendingBones`, `BonesMoved` and `SettleLift`. Not yet run on the rig.
 - [ ] **An essential NPC copy stays down after its owner's NPC got up** (Lydia, player 2's game, 11-06 18:00-18:15).
       In the owner's game the battle kept dropping her into bleedout at -30 health. That health was copied onto her copy, and player 2's game put the copy into its own bleedout (life state 8, get-up queued, knock state 5).
       Copies run no AI, so the copy never gets up by itself. When the owner's Lydia got up, `bleedOutStop` was refused on the copy as an action and as a graph event. She lay or slid from 18:03.
-      From 18:11 the copy counted as dead or dying, so `moveStart` and `TurnRight` were refused too and she stood still. Not fixed. The fallback (`IdleForceDefaultState`) runs for player copies only.
-      Direction: an essential copy should not enter the game's own bleedout from a copied health, or should be taken out of it when its owner's life state is alive. `Tools/VR/bleedout-slide.py` holds an essential NPC in bleedout, a start for a red test.
+      From 18:11 the copy counted as dead or dying, so `moveStart` and `TurnRight` were refused too and she stood still. The fallback (`IdleForceDefaultState`) ran for player copies only.
+      Every get-up repair also skipped a copy that bleeds out (`InterpolationSystem.cpp`, the early return for dying and bleeding-out bodies).
+      Fixed in this build, both flat and VR (not yet seen in play): an NPC copy in its own bleedout whose owner's last action has its NPC up for 2 s is taken out:
+      its health raised to its full health (its owner's next correction sets the real one), its life and knock states cleared, `bleedOutStop` and `IdleForceDefaultState` sent.
+      Never when its owner says it is dead, never for a player's copy, once in 10 s at most; the stand-up move after refused get-ups then reaches it too. A refused `bleedOutStop`
+      now also gets `IdleForceDefaultState` on an NPC copy whose owner's word with it has the NPC up (`CopyBodyRules.h`, tests `copy_body_rules.cpp`).
+      Rig: `live-copy-essential-up` (the owner's `bleedOutStop` left out of the replay) must be RED before and ok after; `live-copy-essential-up-dead` must stay ok.
+      To see in play: a downed essential follower gets up in both games within a few seconds of her owner's. In the log: `KnockDown: NPC copy ... taken out of its bleedout`.
+      Not known: the game's own health line for leaving bleedout (full health is used); whether copies run their own AI.
+      Then still down on flat (rig, 4 tries, 2026-11-17): the copy read alive (`flags1 0x41`) and knelt on. The game ends a bleedout with `Actor::SetLifeState`
+      (AE 37612, SE 36604): it writes the actor alive, then performs `ActionBleedoutStop` through `ActorMediator::PerformAction`, which `HookPerformAction`
+      drops for every copy. So the copy's own end of its bleedout (its health raised, AE 38492 -> 38633, or its timer, AE 38632) left it alive and kneeling.
+      Now: that stop plays on an NPC copy once the game wrote it alive and its owner's word has its NPC up, and is held
+      back while its owner's is down; its owner's `bleedOutStop` ends a copy's own bleedout with `SetLifeState`; a copy kneeling in its graph only is
+      remembered and given the same stop when its owner's NPC is up. The graph events stay as the fallback. Not yet seen in play.
 - [ ] **A siege side does not show on player 2's copy in the leader's game** (11-06 17:51 and 17:56). The copy took its owner's factions 2 and 5 s before the leader's check (20 factions, the side one in them by the 19 and 20 counts), yet `IsInFaction` read no side.
       Rig, two real games on v1.9.8-4-g2200fbc6 (`two-games-switch.py sides`, 11-06 21:12): the second player joined, left and joined `urSS_SideImperial`, and the copy followed each time within 3 to 4 s at rank 0, -2, 0.
       So the faction travels; the play warnings stay unexplained. If they come back, log the copy's rank for each side at the leader's check.
@@ -947,6 +1049,7 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
         That fits copies running their own AI against the owner's replay. What started the fight was not logged; the only candidate is the host's PvP hit on player 2 at 21:33:34. Left as it is for now, by player 2's choice.
       - One check only: `ApplyAnimationVariables` (id 39004) reads a third argument in r8b, and the live `ForceAction` path passes none, so a copy may get the wrong variables after a forced action.
       - Confirmed, small: `InterruptCast` (SE 33630) is called without its bool, so a copy's magicka refund depends on a leftover register.
+      - VR copy AI: the actor update (SE 36365) skips an NPC copy's AI, and `Actor::StartCombat` (SE 37608) leaves an NPC copy out, so a copy is in a fight only as its owner's game runs it (a still bear no longer sits in combat 0.35 s after it spawns). Not seen in play yet.
       - Suspect: `CalculateRealDamage` applies the multiplier the game skips for a fall, so the health change sent for fall damage is too high. A hit by a player never takes that path.
       - Suspect: `fYAngle` at launch data +0x50 is a pointer in a public layout, and we send its low half as an angle (`Projectile.cpp`, `CombatService.cpp`). It is on every arrow and spell replay.
       - Suspect, not read: `UnEquipShout` (a shout may stay on a copy), subtitles (text may be a `BSString`, so garbage or a crash), `StatsMenu` +0xC0 (skills menu unpaused), `AddSkillExperience`'s arguments, `MoveTo`'s handle.
@@ -1065,6 +1168,8 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
       14:29, a guard dead for player 1 and standing for player 2: neither log has a death line from 14:28:00 to 14:29:40, and which guard it was is not known.
       14:52, Imperials getting up for player 1 while walking around, and an ice troll standing for player 2: no line says it, as nothing logs a body getting up.
       Next: an owner that gets a blow on an NPC already dead sends its death again. Find how the hound died with no line. Log a copy going from lying to standing, so the next session names the actor.
+        Done, not seen in play: another player's blow on an NPC already dead in the game that runs it sends its death again, at most every 5 s per NPC, with no killer (`ActorValueService::RepeatDeath`). No rig run yet.
+      A copy of a protected or essential NPC did not die on its owner's word on flat at all: the hook that lets it (`HookCanBeKilledBy`) was VR-only. Now on both, at AE 37229 (found from KillImpl, AE 37896, in the 1.7.104 exe). Not tested on the flat rig yet.
       Bandit CC591 of 10-26 (27 killing blows) may be the same thing; not checked.
 - [ ] **QuietStop misses a walking NPC copy whose own AI stands** (next item, left out of the takeover build on purpose)
       `InterpolationSystem::Update` reads `LegSpeed` before that tick's variables load, so it reads what this game's AI wrote on the
@@ -1092,6 +1197,10 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
       `CopyGone: FF0012F7 removed as remote; the actor is still there, no 3D`, then a new copy FF000C25 892 units away (`CharacterSpawnRequest, server id: 1`),
       which stood there until player 1's load ended (`Temporary Remote Held FF000C25`, 10 s later). It should go when the load starts. Open: `live-door-copy-replay`
       says the guard stops a replayed load door, yet this log has no `DoorCopy:` line for that copy. Which is it?
+      Answer, from the code (2026-11-17): the replay's `TESObjectREFR::Activate` calls the game's activation past `HookActivate`, so the guard
+      ran only when the game called it again (the rig's copy stood away from the door). The replay itself now leaves a load door alone for a
+      copy (`DoorCopy: load door X used by Y in its owner's game; not used here`).
+      Not built or seen yet. Still open: the copy stands at the door until its owner's load ends.
 - [ ] **A dead NPC doubled after a reconnect** (session 2026-10-31 08:15, the Old Orc). Not changed; the rule involved predates the commit of 2026-10-31. One of the two
       copies fell through the floor for player 2; player 1 sees both. Player 2's game made the temporary NPC (FF0012D4, server id 100073). At player 2's disconnect it
       went to player 1 (`Gained ownership of actor 100073`). On reconnect player 2's game announced its own again (`Temporary actor FF0012D4 was made by the game, not by
@@ -1140,6 +1249,10 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
       got the other's as copies: twice the enemies. Player 2 found no loot on them; the log does not show why. The Helgen keep door stayed locked
       for player 1 and opened for player 2, each game running its own scene.
       Again 2026-11-14 15:40: player 2's copy of the keep scene (4E1E2) stayed at phase 15, waiting on Ralof, a copy there; the door the host's scene opened never opened for player 2. A relayed stage does not move a scene's phase.
+      Changed 2026-11-17, not built or seen yet: the server pairs a game's new temporary actor with one another game of the party spawned
+      for the same event (same base and place, within 512 units of where it was made and 120 s), and that game's own actor stands for it;
+      a copy of it there goes. Server log `ScriptSpawn: ... stands for actor X` (paired) or `... is not paired with actor X ...: reason` (a near miss).
+      `Gameplay:bShareScriptSpawns=false` turns it off. The scenes themselves still run in each game.
 - [ ] **A lantern moved by hand showed nothing on the other side** (2026-10-24 19:28, outdoors east of Windhelm). Neither game logged a world-object
       move, and which lantern, and what kind of object, is not known. Other carried objects do show (`WorldObject: X was put down over there`).
       Not confirmed either way.
@@ -1270,7 +1383,16 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
       that refused would have NPCs it cannot see attacking its player. A design question, not a bug in that line.
 - [ ] **A load door locked here stays shut when the other player opened theirs** (the owner's call, 2026-10-21). A door that does not lead elsewhere
       now opens and unlocks here.
+- [ ] **A dragon's soul for every player of the party** (not seen in play; PROTOCOL CHANGE, `NotifyDragonSoul`; needs `urSovngardeCoopMenu.esp`).
+      The game's own absorb (`MQKillDragonScript.DeathSequence`) waits for its own player to come within `deathFXrange` (1000 when unset) and gives only them the soul, so a player far away got none, and a dead copy made again could give a second.
+      Now every game keeps every dragon it holds in `MQNoDragonAbsorb` (FACT 7A0DF), which the absorb checks first; the server gives the soul out at the first death any game reports, once per dragon (`kSoulGranted`, kept across hand-offs), to every player of the owner's party.
+      Each game: loaded here, it waits up to 30 s for its player to come that near and runs the game's own absorb (effects, soul, MQ104 90); otherwise the soul alone (`DragonSouls`, +1 and `MQDragonAbsorbCount`). Dragons in Solstheim and Apocrypha are left to the game's own story (Miraak). To see: `Dragon soul: dragon X died in player N's game; its soul given to M player(s)` on the server, `absorbed here` or `given here without the absorb` in each game, and each player's `DragonSouls` up by one.
 - [ ] **A flying dragon whose owner goes silent or out of range is still handed over and falls** (older code). Freezing it instead needs a decision.
+      Decided 2026-11-16: it flies on, as it would alone; never falls, never freezes. Why it fell: the game changes a flyer's flight state only through `Actor::SetFlyState` (SE 36922, AE 37947), which also switches the character controller to its flying state (no gravity) and does nothing when the bits already hold the new state. A copy was given its owner's flight bits raw with every action, so its own flight handlers did nothing and it kept the ground's controller; taken over in the air, it dropped.
+      Done, not seen in play: a copy keeps its own flight state (the game's flight handlers set it from the owner's flight animations); on flat it is also set from the owner's through `SetFlyState`, and a dragon taken over in the air is set flying again through it (`Gained dragon X (server id S), flight state N: in the air, it flies on here`). VR has no address for `SetFlyState` yet (none in the VR address library, executable encrypted on disk), so on VR it rests on the handlers. On VR a dragon copy never counts as on its feet for QuietStop. No rig run: to see, a dragon in the air when its owner pauses for over 15 s or leaves.
+- [ ] **Kill credit for the other player's killing blow** (not seen in play). The game that runs an NPC killed it with no killer when another player's blow ended it, so that player got no kill: no kill stats, no bounty, no `OnDeath` naming them for scripts.
+      Now its death goes to the server with that player (`KillerPlayerId`, PROTOCOL CHANGE), and their game kills its copy with its own player as the killer (`Death sync: remote actor X set dead by its owner, killed here by this player`). The owner's game still kills with no killer.
+      Not counted: the death-wins blow (two games brought to the same death), a blow on a body. To see: kill an NPC the other player's game runs; your game's kill stats go up, theirs do not; a witnessed murder is your bounty.
 - [!] **Handling a living NPC the other game runs: send the pull** (decided 2026-10-10: the grabber's game sends the
       pull to the game that runs the NPC, which applies it). Needs a safe way to tell when a HIGGS hand holds a copy:
       the `HandHold` diagnostic read Havok constraints under the world lock from a game thread, corrupted contacts
@@ -1377,6 +1499,9 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
         A version that looked for a reanimate effect on the body crashed the VR rig game on a just-killed skeever (a freed entry in its effect list) and was dropped.
         Not seen in play. Issue 7's own case (two VR games, a human corpse, Realm of Lorkhan) is still not reproduced; it has the same ingredients (the caster's game resurrecting its copy mid-raise on the owner's word), so the fix may cover it.
         Not covered: a copy raised in front of this game by a relayed Dead Thrall, then killed here only while its owner has it alive, stays a body until it is removed and made again.
+      Merged with ours on 2026-11-22 (release7, not built yet): this player's raise of a dead NPC another game runs still asks for the body first (`RaiseClaim`, the existing ownership request)
+        and raises it here once it is handed over within 3 s, so this game's AI leads it, friendly to its raiser; a body not handed over in time has the raise sent to its owner's game by the path above
+        (`MagicTarget::IsRaiseOnCopy`), no longer raised on the copy. To see: player 2 raises a body player 1's game runs; it should follow player 2 and not read hostile (`Raise: ... raised by this player here`).
 - [ ] **Mounts** (parked 2026-10-12). The rider's `MountRequest` crosses and the other game gives the rider's copy the
       mount package, which it accepts, but the copy never gets on: copies run no AI of their own. Tried in the rig and
       reverted: `Actor::PutActorOnMountQuick` (vtable 0xAE on VR) returns false; letting the copy's AI run with its
@@ -1432,7 +1557,7 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
       2026-11-17, build 01ee381 (with the flat/VR damage rule, a protocol change; client and server on FUS, flat client on the flat rig; rig only, not seen in play):
         - the game's own input is held while the menu is open, without a pause (`GameInputHold`, on the poll's call that hands the events to the game, VR +0x81, AE +0x7B): no press reaches the game, sticks reach it at rest, and a button pressed in the menu counts only once let go; HIGGS and PLANCK read the controllers themselves and are not held;
         - rig: `live-menu-hold.py --flat` red on ead49b5 (W walked the player 530 units with the menu open), green on 01ee381 (0 units open, 527 and 525 closed); in VR input passes through it (468 units), the menu itself waits for the panel;
-        - the flat test rig no longer takes the mouse and keyboard of the person at the PC: it connects by itself, hands the focus back when its game opens, and a game it starts (`URSOVNGARDE_TEST_RIG`) takes DevBench's keys in the background while the real keyboard and mouse are not read; a gamepad still is.
+        - the flat test rig no longer takes the mouse and keyboard of the person at the PC: it connects by itself, hands the focus back when its game opens, and a game it starts takes DevBench's keys in the background while the real keyboard and mouse are not read; a gamepad still is.
       2026-11-17, build d984bba (client and server on FUS, same protocol as 01ee381; rig only, not seen in play):
         - the page is one picture source (`VRPage`) shared by its presenters, with one input path (`PageInput`) and one place for the VR runtime's interfaces (`VRRuntime`); the SteamVR dashboard is now only its presenter, its behaviour unchanged by reading (it pauses the game, so the input hold is off for it); the rig cannot open the dashboard, so the headset is its test: open the tab, click, type, close;
         - the panel inside the game (`VRPanel`, `VREyeDraw`): the page drawn into the game's own eye images just before they go to the VR runtime, on the game's device, both eyes at the left eye's Submit, mipmapped; fixed to the head for now (1.4 m wide, 1.25 m ahead, a little below the eyes); shown only once everything was made on the game's device;
@@ -1492,6 +1617,13 @@ After the session the logs answer the rest: `Stall:`, `Silence:`, `ThreadOwners:
       VR is solid.
       2026-11-15: a flat rig, `Tools/Flat/flat-rig.ps1 up|down|status` and `Tools/Flat/deploy-flat-client.ps1`, a Mod Organizer instance of its own named by the `SKYRIM_FLAT_ROOT` user variable, Skyrim 1.7.104, DevBench on port 8922.
       The flat build starts, loads the world and connects to the test server, announcing its NPCs, at 60 fps (build 01b63b9). Its first connect crashed in `BSReadWriteLock` and its sound calls passed SE ids: both now take Anniversary Edition ids in the flat slot, the VR ids unchanged.
+      2026-11-17, (3) in source, not built: a flat block counts in the defender's rule (`BlockService`, `PvpBlock.h`).
+      A blow seen while the flat player's `IsBlocking` was up (100 ms before to 50 ms after) is weighed by the game's own block, the rest taken;
+      the one who struck is sent a `ClashRequest`, so a VR attacker hears it and feels it in the weapon hand.
+      It needs the hold in `ActorValueService::OnHealthChangeBroadcast` on flat too (today `#ifdef SKYRIMVR`). As in the game, the block lowers the blow:
+      the game's own `HitData::Populate` says whether it is blocked, how much (`percentBlocked`) and how hard it staggers. Still missing: a VR blade or shield meeting a flat player's weapon (VR makes weapon bodies only for copies
+      posed from a `VRPose`), and sparks on flat (`PlayClashSparks` passes the SE id 29218 in the flat slot). A flat strike enchantment on the other
+      player is now part of the strike, as in VR (`MagicService`), so with PvP on it no longer counts twice.
       Known on flat: the client reads keys only while its window is in front, and that now holds for DevBench's keys too.
       DevBench's keyboard was not ready because our focus hook took the input poll's first bytes before it; the hook now goes on at the first update, on top of DevBench's (build 6271913, rig: keys walk the flat player, refused on 01b63b9).
       Both rigs at once: `flat-rig.ps1 up` first, then `headless.ps1 up -AutoConnect`, which presses no F6 (the VR game takes F6 whatever window is in front).
