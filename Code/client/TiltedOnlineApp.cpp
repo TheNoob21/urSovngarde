@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/cfg/env.h>
 
 #include <Systems/RenderSystemD3D11.h>
 
@@ -23,6 +24,7 @@
 #include <Services/DiscordService.h>
 
 #include <NvidiaUtil.h>
+#include <LogPolicy.h>
 
 #include <tlhelp32.h>
 
@@ -63,7 +65,9 @@ std::shared_ptr<spdlog::sinks::rotating_file_sink_mt> CreateClientLogSink(const 
             filename = fmt::format("tp_client_instance_{}.log", instance);
         break;
     }
-    return std::make_shared<spdlog::sinks::rotating_file_sink_mt>(acLogPath / filename, 1048576 * 5, 3);
+    // A debug log fills 5 MB in seconds: SPDLOG_LEVEL decides, as it does for the level itself.
+    const auto cRotation = LogPolicy::RotationFor(std::getenv("SPDLOG_LEVEL"));
+    return std::make_shared<spdlog::sinks::rotating_file_sink_mt>(acLogPath / filename, cRotation.FileSize, cRotation.FileCount);
 }
 }
 
@@ -227,6 +231,8 @@ TiltedOnlineApp::TiltedOnlineApp()
     // A game that ends at once takes the last second of its log with it, unless what matters is already on disk.
     logger->flush_on(spdlog::level::warn);
     set_default_logger(logger);
+    // SPDLOG_LEVEL (spdlog's own setting, e.g. SPDLOG_LEVEL=debug) lets a test run read the debug lines.
+    spdlog::cfg::load_env_levels();
 
     spdlog::info("Skyrim Together client, build {}", BuildVersion::Tag());
 

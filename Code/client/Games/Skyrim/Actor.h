@@ -13,6 +13,7 @@
 #include <Structs/Inventory.h>
 #include <Structs/Factions.h>
 #include <Structs/ActorValues.h>
+#include <Systems/BeastFormRules.h>
 
 struct TESNPC;
 struct TESRace;
@@ -53,7 +54,7 @@ struct Actor : TESObjectREFR
     virtual void sub_A8();
     virtual void SetPosition(const NiPoint3& acPoint, bool aUpdateCharController = true);
     virtual void sub_AA();
-    virtual void Resurrect(bool aResetInventory);
+    virtual void Resurrect(bool aResetInventory, bool aAttach3D);
     virtual void sub_AC();
     virtual void sub_AD();
     virtual void sub_AE();
@@ -209,6 +210,13 @@ struct Actor : TESObjectREFR
     Factions GetFactions() const noexcept;
     ActorValues GetEssentialActorValues() const noexcept;
     [[nodiscard]] bool IsDead() const noexcept;
+    //! Whether the game lists the limb as cut off (ExtraDismemberedLimbs); the engine numbers the head 1.
+    [[nodiscard]] bool IsLimbGone(uint32_t aLimb) noexcept;
+    //! The game's own detection of apTarget by this actor, as Papyrus IsDetectedBy asks it: above 0 detected.
+    [[nodiscard]] int32_t RequestDetectionLevel(Actor* apTarget) noexcept;
+    //! The game's own assault alarm on this actor, attacked by apAttacker, another player's copy: this game's NPCs see it with their own eyes.
+    //! Returns whether the native call completed, not whether an NPC reacted.
+    [[nodiscard]] bool ReplayAssault(Actor* apAttacker) noexcept;
     [[nodiscard]] bool IsDragon() const noexcept;
     //! Whether a race is a person's, which all share the human skeletons and animation graph.
     [[nodiscard]] static bool IsPersonRace(const TESRace* apRace) noexcept;
@@ -224,6 +232,9 @@ struct Actor : TESObjectREFR
     [[nodiscard]] bool HasPerk(uint32_t aPerkFormId) const noexcept;
     [[nodiscard]] uint8_t GetPerkRank(uint32_t aPerkFormId) const noexcept;
     [[nodiscard]] bool IsVampireLord() const noexcept;
+    // Which beast form a race is, by where Dawnguard sits in this game's load order.
+    [[nodiscard]] static BeastForm::Kind GetBeastFormKind(uint32_t aRaceFormId) noexcept;
+    [[nodiscard]] static uint32_t GetDawnguardFormId(uint32_t aBaseId) noexcept;
 
     // Setters
     void SetSpeed(float aSpeed) noexcept;
@@ -241,6 +252,9 @@ struct Actor : TESObjectREFR
     void SetMagicEquipment(const MagicEquipment& acEquipment) noexcept;
     void SetEssentialEx(bool aSet) noexcept;
     void SetNoBleedoutRecovery(bool aSet) noexcept;
+    //! The game's own life state change (ACTOR_LIFE_STATE: 0 alive, 7 essential down, 8 bleedout): leaving a bleedout, it performs
+    //! ActionBleedoutStop, which stands the actor up.
+    void SetLifeState(uint32_t aLifeState) noexcept;
     void SetPlayerRespawnMode(bool aSet = true) noexcept;
     void SetPlayerTeammate(bool aSet) noexcept;
 
@@ -249,6 +263,19 @@ struct Actor : TESObjectREFR
     void RemoveFromAllFactions() noexcept;
     void QueueUpdate() noexcept;
     bool InitiateMountPackage(Actor* apMount) noexcept;
+    // Papyrus Actor.IsOnMount and SetVehicle. Called on the main thread.
+    [[nodiscard]] bool IsOnMount() const noexcept;
+    //! Whether the game registered Actor.IsOnMount, so that IsOnMount() means something.
+    [[nodiscard]] static bool CanReadMount() noexcept;
+    // Papyrus Actor.IsBeingRidden, on a horse; false when the game has no such native. Called on the main thread.
+    [[nodiscard]] bool IsBeingRidden() const noexcept;
+    // VR: the animation steps of copies whose AI is skipped, queued by the actor process jobs; on the main thread between frames.
+    static void RunQueuedCopyAnimations() noexcept;
+    void SetVehicle(TESObjectREFR* apVehicle) noexcept;
+    //! The game's quick mount: on the horse SetVehicle named, at once, with no package, if the game lets this actor ride it.
+    void MountVehicleQuick() noexcept;
+    //! The game's instant end of a ride: off the horse and standing, at once.
+    bool ExitMountQuick() noexcept;
     void GenerateMagicCasters() noexcept;
     void DispelAllSpells(bool aNow = false) noexcept;
     //! Kills it; a copy dies even when protected or essential, since its owner's game decided.
@@ -263,16 +290,26 @@ struct Actor : TESObjectREFR
      * A copy resurrected here is then watched until its revival lasts (ActorValueService::WatchCopyRevival).
      */
     void Respawn() noexcept;
+    //! Cuts the head off as the game's killmoves do; nothing when it is already off. Returns the game's answer.
+    bool Decapitate() noexcept;
+    //! The game's own change of flight state (FlyState.h): the bits, the character controller and the movement. Flat only.
+    void SetFlyState(uint32_t aState) noexcept;
     void PickUpObject(TESObjectREFR* apObject, int32_t aCount, bool aUnk1, float aUnk2) noexcept;
     void DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept;
     void DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apPoint, NiPoint3* apRotate) noexcept;
     // Returns what the game's speak function returns.
     //! apSoundHandle receives the game's BSSoundHandle, three words. Its first, the sound id, stays -1 when no sound started.
     float SpeakSound(const char* pFile, uint32_t* apSoundHandle = nullptr);
+    //! The line this actor has for seeing a theft, as the base game's witnesses speak it (the "Steal" topic, Skyrim.esm 0002A45B). No crime, no combat.
+    //! Returns false when the topic is not there; true means the game was asked, not that a line played.
+    [[nodiscard]] bool CallOutTheft() noexcept;
     void StartCombatEx(Actor* apTarget) noexcept;
     void SetCombatTargetEx(Actor* apTarget) noexcept;
     void StartCombat(Actor* apTarget) noexcept;
     void StopCombat() noexcept;
+    //! The script look-at: the head and eyes follow the reference until ClearLookAt.
+    void SetLookAt(TESObjectREFR* apTarget, bool aPathingLookAt = false) noexcept;
+    void ClearLookAt() noexcept;
     // The game's own answer, as its friendly-hit rule asks it.
     bool IsHostileToActor(Actor* apActor) noexcept;
     bool PlayIdle(TESIdleForm* apIdle) noexcept;
@@ -319,9 +356,14 @@ struct Actor : TESObjectREFR
     [[nodiscard]] bool IsBeingRaised() const noexcept;
     //! This game's player's follower (Actor::boolBits kPlayerTeammate, bit 26; flags1 is boolBits).
     bool IsPlayerTeammate() const noexcept { return (flags1 & (1u << 26)) != 0; }
+    //! The game's guard classification (Actor::boolBits kGuard), including guards from mods.
+    bool IsGuard() const noexcept { return (flags1 & (1u << 30)) != 0; }
     //! This player's follower: a teammate in the game's CurrentFollowerFaction, which is what the game's and the frameworks' follower quests give her.
     //! Quest scripts set the teammate flag alone on story NPCs, who are not hidden from another player whose quest may need them.
+    //! An add-on's follower policy (UrGameFollowerPolicy) may decide for a framework's own followers; without one, exactly that rule.
     [[nodiscard]] bool IsPlayerFollower() const noexcept;
+    //! Core's own follower mark: CurrentFollowerFaction at rank 0 or above (the teammate flag is checked by IsPlayerFollower).
+    [[nodiscard]] bool IsInCurrentFollowerFaction() const noexcept;
 
 public:
     enum ChangeFlags : uint32_t

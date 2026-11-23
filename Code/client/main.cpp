@@ -8,6 +8,7 @@
 #include <Windows.h>
 
 #include <base/dialogues/win/TaskDialog.h>
+#include <common/VRSupportedVersion.h>
 
 // 1 - Steam, 2 - GOG
 inline constexpr std::string_view kSupportedGameVersions[2] = {"1.7.104.0", "1.7.104.0"};
@@ -58,6 +59,19 @@ static void ShowIncompatibleVersionError(const char* apDetectedGameVersion, cons
     exit(4);
 }
 
+#ifdef SKYRIMVR
+static void ShowIncompatibleVRVersionError(const char* apDetectedGameVersion, const wchar_t* apGamePath)
+{
+    const auto message =
+        fmt::format("urSovngarde requires Skyrim VR 1.4.15.0, but your installed version is {}\n\nUpdate or downgrade to match, then relaunch", apDetectedGameVersion);
+    const std::wstring wideMessage(message.begin(), message.end());
+    const auto details = fmt::format(L"Installed here: {}", apGamePath);
+    Base::TaskDialog dia(g_SharedWindowIcon, L"Error", L"Incompatible game version", wideMessage.c_str(), details.c_str());
+    dia.Show();
+    exit(4);
+}
+#endif
+
 void RunTiltedInit(const std::filesystem::path& acGamePath, const String& aExeVersion)
 {
 #ifndef SKYRIMVR
@@ -66,15 +80,17 @@ void RunTiltedInit(const std::filesystem::path& acGamePath, const String& aExeVe
         ShowAddressLibraryError(acGamePath.c_str());
     }
 #else
-    if (!VersionDb::Get().LoadCSV(acGamePath))
+    if (!VRSupportedVersion::IsSupported(aExeVersion.c_str()))
+    {
+        ShowIncompatibleVRVersionError(aExeVersion.c_str(), acGamePath.c_str());
+    }
+    if (!VersionDb::Get().LoadCSV(acGamePath, aExeVersion.c_str()))
     {
         ShowAddressLibraryError(acGamePath.c_str());
     }
 #endif
 
 #ifndef SKYRIMVR
-    // The supported-version pair is the SE build's.
-    // VR is a single build with its own address library, so this check would refuse every VR install.
     auto [steamVer, gogVer] = kSupportedGameVersions;
     if (aExeVersion != steamVer && aExeVersion != gogVer)
     {
@@ -91,6 +107,12 @@ void RunTiltedInit(const std::filesystem::path& acGamePath, const String& aExeVe
     // SKSE VR initializes from its DllMain, so loading it here, in RunTiltedInit, would load plugins before the game has started.
     LoadScriptExtender();
 #endif
+}
+
+void LogLauncherNote(const char* apNote)
+{
+    spdlog::info("{}", apNote);
+    spdlog::default_logger()->flush();
 }
 
 void RunTiltedApp()

@@ -5,6 +5,7 @@
 
 #include <Actor.h>
 #include <Games/ActorExtension.h>
+#include <Systems/SeatPin.h>
 
 #include <atomic>
 #include <chrono>
@@ -23,6 +24,10 @@ struct KeptPlace
 {
     NiPoint3 Position{};
     NiPoint3 Angles{};
+    // A rider's horse, or 0; its seat as seen from the horse, and whether its heading is the horse's.
+    uint32_t HorseId{};
+    NiPoint3 Seat{};
+    bool HorseHeading{};
 };
 
 // Kept by the interpolation's threads; taken by the frame end when it starts.
@@ -50,8 +55,21 @@ int64_t NowTicks() noexcept
  */
 void PlaceCopy(Actor* apActor, const KeptPlace& acPlace) noexcept
 {
-    apActor->ForcePosition(acPlace.Position);
-    apActor->SetRotation(acPlace.Angles.x, acPlace.Angles.y, acPlace.Angles.z);
+    NiPoint3 position = acPlace.Position;
+    float heading = acPlace.Angles.z;
+    if (acPlace.HorseId)
+    {
+        // On its horse as the horse stands now: the horse may have been placed after the rider's step.
+        const Actor* pHorse = Cast<Actor>(TESForm::GetById(acPlace.HorseId));
+        const glm::vec3 cHorse = pHorse ? static_cast<glm::vec3>(pHorse->position) : glm::vec3{};
+        const float cHorseHeading = pHorse ? pHorse->rotation.z : 0.f;
+        const bool cHorseThere = pHorse && SeatPin::Holds(cHorse, cHorseHeading);
+        position = NiPoint3(SeatPin::FrameEndPlace(cHorseThere, cHorse, cHorseHeading, static_cast<glm::vec3>(acPlace.Seat), static_cast<glm::vec3>(acPlace.Position)));
+        if (cHorseThere && acPlace.HorseHeading)
+            heading = cHorseHeading;
+    }
+    apActor->ForcePosition(position);
+    apActor->SetRotation(acPlace.Angles.x, acPlace.Angles.y, heading);
     PoseKeepDiag::NoteGivenAtFrameEnd(apActor->formID);
 }
 
@@ -96,6 +114,13 @@ void KeepForFrameEnd(const uint32_t aFormId, const NiPoint3& acPosition, const N
 {
     std::scoped_lock lock(s_lock);
     s_kept[aFormId] = KeptPlace{acPosition, acAngles};
+}
+
+void KeepOnHorseForFrameEnd(
+    const uint32_t aFormId, const NiPoint3& acPosition, const NiPoint3& acAngles, const uint32_t aHorseId, const NiPoint3& acSeat, const bool aHorseHeading) noexcept
+{
+    std::scoped_lock lock(s_lock);
+    s_kept[aFormId] = KeptPlace{acPosition, acAngles, aHorseId, acSeat, aHorseHeading};
 }
 
 /**

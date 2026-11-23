@@ -1,3 +1,4 @@
+#include <Services/GameExtension.h>
 
 #include "Services/InputService.h"
 #include "Systems/RenderSystemD3D11.h"
@@ -6,10 +7,13 @@
 
 #include "BSGraphics/BSGraphicsRenderer.h"
 #include "BSRandom/BSRandom.h"
+#include <Helpers/PatchCheck.h>
+#include <dinput.h>
 
 #include <Games/Skyrim/VR/VRBodySync.h>
-#ifdef SKYRIMVR
-#include <Helpers/PatchCheck.h>
+#ifndef SKYRIMVR
+#include <Games/Skyrim/SEBodyPresentation.h>
+#else
 #include <Services/ConnectFile.h>
 #endif
 
@@ -79,7 +83,13 @@ void Hook_StopTimer(int type)
     if (g_sRs)
         g_sRs->OnRender();
 
-    // Remote VR players' poses, after the frame's animation: in VR builds and on flat screens.
+    GameExtension::OnFrameEnd();
+
+    // Remote VR players' poses, after the frame's animation: in VR builds and on flat screens. On flat screens the
+    // copies SEBodyPresentation commits natively are left to it.
+#ifndef SKYRIMVR
+    SEBodyPresentation::BeforePresent();
+#endif
     VRBodySync::OnFrameEnd();
 
     StopTimer(type);
@@ -117,11 +127,14 @@ static TiltedPhoques::Initializer s_viewportHooks(
         TiltedPhoques::Put(mem::pointer(initWindowLoc.GetPtr()) + 0x174 + 1, WS_OVERLAPPEDWINDOW);
 
         const VersionDbPtr<void> windowLoc(68781);
-        // TODO: move me to input patches.
-        // don't let the game steal the media keys in windowed mode
-        TiltedPhoques::Put(
-            mem::pointer(windowLoc.GetPtr()) + 0x55 + 2,
-            /*strip DISCL_EXCLUSIVE bits and append DISCL_NONEXCLUSIVE*/ 3);
+        // Keep foreground acquisition while allowing other applications to share the keyboard.
+        // SetCooperativeLevel requires exactly one flag from each access/focus pair.
+        // The old value 3 combined EXCLUSIVE and NONEXCLUSIVE and omitted both focus flags.
+        auto* pKeyboardFlags = PatchCheck::At(windowLoc.GetPtr(), 0x55);
+        if (PatchCheck::Is(pKeyboardFlags, {0x41, 0xB8, 0x15, 0x00, 0x00, 0x00}))
+            TiltedPhoques::Put<uint32_t>(pKeyboardFlags + 2, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+        else if (!PatchCheck::Is(pKeyboardFlags, {0x41, 0xB8, 0x06, 0x00, 0x00, 0x00}))
+            spdlog::warn("Keyboard: {} is not the expected cooperative-level instruction ({}), leaving it alone", fmt::ptr(pKeyboardFlags), PatchCheck::Bytes(pKeyboardFlags, 6));
 
         const VersionDbPtr<void> timerLoc(77246);
         const VersionDbPtr<void> renderInit(77226);

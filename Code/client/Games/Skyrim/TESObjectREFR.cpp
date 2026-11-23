@@ -1,17 +1,26 @@
 #include <TiltedOnlinePCH.h>
+#include <Services/GameExtension.h>
 
 #include <atomic>
 
 #include <Games/References.h>
 #include <Games/Overrides.h>
+#include <Games/HiddenSwitchOff.h>
+#include <Games/ActorExtension.h>
 
 #include <World.h>
 #include <Services/PapyrusService.h>
 #include <Events/ActivateEvent.h>
+#include <Events/TrapFireEvent.h>
+#include <Events/ArrowPickupEvent.h>
+#include <TrapSync.h>
+#include <Events/BearTrapEvent.h>
+#include <ReferenceStates.h>
 #include <Events/InventoryChangeEvent.h>
 #include <Events/DroppedItemEvents.h>
 #include <PlayerCharacter.h>
 #include <Copies/RecentModelChanges.h>
+#include <StuckArrows.h>
 #include <Events/ScriptAnimationEvent.h>
 #include <Events/LockChangeEvent.h>
 #include <Events/ReferenceEnableEvent.h>
@@ -28,6 +37,7 @@
 #include <ExtraData/ExtraWornLeft.h>
 #include <Forms/EnchantmentItem.h>
 #include <Forms/AlchemyItem.h>
+#include <ItemExtraData.h>
 #include <EquipManager.h>
 #include <DefaultObjectManager.h>
 #include <BSAnimationGraphManager.h>
@@ -44,6 +54,9 @@
 
 #include <Structs/AnimationGraphDescriptorManager.h>
 #include <Structs/AnimationVariables.h>
+#include <FollowerCommands.h>
+#include <Services/CharacterService.h>
+#include <DialogueClaim.h>
 
 extern const AnimationGraphDescriptor* BehaviorVarPatch(BSAnimationGraphManager* pManager, Actor* pActor);
 
@@ -51,10 +64,10 @@ namespace
 {
 void QueueReferenceInventoryChange(TESObjectREFR* apReference, InventoryChangeEvent aEvent, TESObjectREFR* apTransferReference)
 {
-    if (const auto* pActor = Cast<Actor>(apReference))
+    if (auto* pActor = Cast<Actor>(apReference))
     {
         auto ownershipToken = Utils::GetLocalOwnershipToken(pActor->formID);
-        if (!ownershipToken && apTransferReference == PlayerCharacter::Get())
+        if (!ownershipToken && (apTransferReference == PlayerCharacter::Get() || FollowerCommands::MayAddTradeItem(pActor, aEvent.Item.Count, apTransferReference != nullptr)))
             ownershipToken = Utils::GetRemoteOwnershipToken(pActor->formID);
 
         if (!ownershipToken)
@@ -424,6 +437,9 @@ static void NoteActorChange(const TESObjectREFR* apReference, const RecentModelC
 // Delete() should only be used on temporaries
 void TESObjectREFR::Delete() const noexcept
 {
+    if (formType == FormType::Character && IsTemporary() && GameExtension::BeforeDelete(formID))
+        return;
+
     using ObjectReference = TESObjectREFR;
 
     PAPYRUS_FUNCTION(void, ObjectReference, Delete);
@@ -1010,20 +1026,12 @@ void TESObjectREFR::GetItemFromExtraData(Inventory::Entry& arEntry, ExtraDataLis
         arEntry.ExtraSoulLevel = (int32_t)pExtraSoul->cSoul;
     }
 
-    /*
-    if (ExtraTextDisplayData* pExtraTextDisplayData = Cast<ExtraTextDisplayData>(apExtraDataList->GetByType(ExtraDataType::TextDisplayData)))
-    {
-        if (pExtraTextDisplayData->DisplayName)
-            arEntry.ExtraTextDisplayName = pExtraTextDisplayData->DisplayName;
-        else
-            arEntry.ExtraTextDisplayName = "";
-    }
-    */
-
     arEntry.ExtraWorn = apExtraDataList->Contains(ExtraDataType::Worn);
     arEntry.ExtraWornLeft = apExtraDataList->Contains(ExtraDataType::WornLeft);
 
     arEntry.IsQuestItem = apExtraDataList->HasQuestObjectAlias();
+
+    ItemExtraData::Read(arEntry, apExtraDataList);
 }
 
 ExtraDataList* TESObjectREFR::GetExtraDataFromItem(const Inventory::Entry& arEntry) noexcept
@@ -1063,18 +1071,9 @@ ExtraDataList* TESObjectREFR::GetExtraDataFromItem(const Inventory::Entry& arEnt
                           arEntry.ExtraEnchantId.ModId, arEntry.ExtraEnchantId.BaseId);
     }
 
-    if (arEntry.ExtraPoisonId != 0)
-    {
-        // TODO: does poison have the same temp problem as enchants?
-        // doesn't seem to be the case, there are only like 3 poisons, and no custom ones
-        TP_ASSERT(arEntry.ExtraPoisonId.ModId != 0xFFFFFFFF, "Poison is sent as temp!");
-
-        uint32_t poisonId = modSystem.GetGameId(arEntry.ExtraPoisonId);
-        if (AlchemyItem* pPoison = Cast<AlchemyItem>(TESForm::GetById(poisonId)))
-        {
-            pExtraDataList->SetPoison(pPoison, arEntry.ExtraPoisonCount);
-        }
-    }
+    // A player's own poison is made here from its effects.
+    if (AlchemyItem* pPoison = ItemExtraData::GetPoison(arEntry))
+        pExtraDataList->SetPoison(pPoison, arEntry.ExtraPoisonCount);
 
     if (arEntry.ExtraHealth > 0.f)
     {
@@ -1096,20 +1095,8 @@ ExtraDataList* TESObjectREFR::GetExtraDataFromItem(const Inventory::Entry& arEnt
         pExtraDataList->SetWorn(true);
     }
 
-    // TODO: this is causing crashes
-    /*
-    if (!arEntry.ExtraTextDisplayName.empty())
-    {
-        ExtraTextDisplayData* pExtraText = Memory::Allocate<ExtraTextDisplayData>();
-        *((uint64_t*)pExtraText) = 0x1416244D0;
-        pExtraText->next = nullptr;
-        pExtraText->DisplayName = arEntry.ExtraTextDisplayName.c_str();
-        pExtraText->usCustomNameLength = arEntry.ExtraTextDisplayName.length();
-        pExtraText->iOwnerInstance = -2;
-        pExtraText->fTemperFactor = 1.0F;
-        pExtraDataList->Add(ExtraDataType::TextDisplayData, pExtraText);
-    }
-    */
+    if (!arEntry.Data.DisplayName.empty())
+        ItemExtraData::SetName(pExtraDataList, arEntry.Data.DisplayName);
 
     if (pExtraDataList->data == nullptr)
     {
@@ -1128,7 +1115,6 @@ Inventory TESObjectREFR::GetInventory() const noexcept
 
 Inventory TESObjectREFR::GetInventory(std::function<bool(TESForm&)> aFilter) const noexcept
 {
-    auto& modSystem = World::Get().GetModSystem();
     Inventory inventory{};
 
     if (TESContainer* pBaseContainer = GetContainer())
@@ -1145,8 +1131,9 @@ Inventory TESObjectREFR::GetInventory(std::function<bool(TESForm&)> aFilter) con
             if (!aFilter(*pGameEntry->form))
                 continue;
 
-            Inventory::Entry entry;
-            modSystem.GetServerModId(pGameEntry->form->formID, entry.BaseId);
+            Inventory::Entry entry{};
+            if (!ItemExtraData::SetBase(entry, pGameEntry->form))
+                continue;
             entry.Count = pGameEntry->count;
 
             inventory.Entries.push_back(std::move(entry));
@@ -1165,7 +1152,8 @@ Inventory TESObjectREFR::GetInventory(std::function<bool(TESForm&)> aFilter) con
             continue;
 
         Inventory::Entry entry{};
-        modSystem.GetServerModId(pGameEntry->form->formID, entry.BaseId);
+        if (!ItemExtraData::SetBase(entry, pGameEntry->form))
+            continue;
         entry.Count = pGameEntry->count;
 
         for (ExtraDataList* pExtraDataList : *pGameEntry->dataList)
@@ -1175,6 +1163,7 @@ Inventory TESObjectREFR::GetInventory(std::function<bool(TESForm&)> aFilter) con
 
             Inventory::Entry innerEntry;
             innerEntry.BaseId = entry.BaseId;
+            innerEntry.Data.Base = entry.Data.Base;
             innerEntry.Count = 1;
 
             GetItemFromExtraData(innerEntry, pExtraDataList);
@@ -1254,6 +1243,7 @@ bool TESObjectREFR::IsItemInInventory(uint32_t aFormID) const noexcept
 
 void TESObjectREFR::SetInventory(const Inventory& aInventory) noexcept
 {
+    StuckArrows::InventoryReplacement replacement;
     spdlog::debug("Setting inventory for {:X}", formID);
 
     ScopedInventoryOverride _;
@@ -1296,6 +1286,7 @@ Vector<uint32_t> TESObjectREFR::RemoveNonQuestItems(Inventory& aCurrentInventory
 
 void TESObjectREFR::SetInventoryRetainingQuestItems(Inventory& aCurrentInventory, const Inventory& acSourceInventory) noexcept
 {
+    StuckArrows::InventoryReplacement replacement;
     spdlog::debug("Setting inventory for {:X}", formID);
 
     ScopedInventoryOverride _;
@@ -1319,15 +1310,13 @@ void TESObjectREFR::SetInventoryRetainingQuestItems(Inventory& aCurrentInventory
 
 void TESObjectREFR::AddOrRemoveItem(const Inventory::Entry& arEntry, bool aIsSettingInventory, bool aPickedUp) noexcept
 {
-    ModSystem& modSystem = World::Get().GetModSystem();
-
-    uint32_t objectId = modSystem.GetGameId(arEntry.BaseId);
-    TESBoundObject* pObject = Cast<TESBoundObject>(TESForm::GetById(objectId));
+    TESBoundObject* pObject = ItemExtraData::GetBase(arEntry);
     if (!pObject)
     {
         spdlog::warn("{}: Object to add not found, {:X}:{:X}.", __FUNCTION__, arEntry.BaseId.ModId, arEntry.BaseId.BaseId);
         return;
     }
+    const uint32_t objectId = pObject->formID;
 
     // An inventory carries its base container's levelled lists, which are no items: added, they would stay as lists in this one.
     if (pObject->formType == FormType::LeveledItem)
@@ -1443,9 +1432,24 @@ bool TESObjectREFR::PlayAnimationAndWait(BSFixedString* apAnimation, BSFixedStri
 
 #define OBJECT_ANIM_SYNC 0
 
+// A bear trap's script springs it with Trigger01 and arms it with Reset01, or with StartOpen as it loads (ReferenceStateService).
+static void NoteBearTrap(const TESObjectREFR* apRef, const BSFixedString* apAnimation) noexcept
+{
+    if (!apRef || !apAnimation || !apRef->baseForm || !ReferenceStates::IsBearTrap(apRef->baseForm->formID) || apRef->IsTemporary())
+        return;
+    const char* cpName = apAnimation->AsAscii();
+    if (!cpName)
+        return;
+    const bool cLoad = _stricmp(cpName, "StartOpen") == 0;
+    const bool cArmed = cLoad || _stricmp(cpName, "Reset01") == 0;
+    if (cArmed || _stricmp(cpName, "Trigger01") == 0)
+        World::Get().GetRunner().Trigger(BearTrapEvent(apRef->formID, cArmed, cLoad));
+}
+
 bool TP_MAKE_THISCALL(HookPlayAnimationAndWait, void, uint32_t auiStackID, TESObjectREFR* apSelf, BSFixedString* apAnimation, BSFixedString* apEventName)
 {
     spdlog::debug("Animation: {}, EventName: {}", apAnimation->AsAscii(), apEventName->AsAscii());
+    NoteBearTrap(apSelf, apAnimation);
 
 #if OBJECT_ANIM_SYNC
     if (!s_cancelAnimationWaitEvent && !apSelf->IsTemporary())
@@ -1477,6 +1481,7 @@ bool TESObjectREFR::SendAnimationEvent(BSFixedString* apEventName) noexcept
 bool TP_MAKE_THISCALL(HookPlayAnimation, void, uint32_t auiStackID, TESObjectREFR* apSelf, BSFixedString* apEventName)
 {
     spdlog::debug("EventName: {}", apEventName->AsAscii());
+    NoteBearTrap(apSelf, apEventName);
 
 #if OBJECT_ANIM_SYNC
     if (!s_cancelAnimationEvent && !apSelf->IsTemporary())
@@ -1488,11 +1493,13 @@ bool TP_MAKE_THISCALL(HookPlayAnimation, void, uint32_t auiStackID, TESObjectREF
 
 bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, uint8_t aUnk1, TESBoundObject* apObjectToGet, int32_t aCount, char aDefaultProcessing)
 {
+    if (apThis && apActivator && !ScopedActivateOverride::IsOverriden() && GameExtension::OnActivate(apThis->formID, apActivator->formID))
+        return false;
     Actor* pActivator = Cast<Actor>(apActivator);
 
     // A copy of another game's actor never goes through a load door on its own here: its owner's game reports where it went.
     // Otherwise this game's AI takes the copy to a cell its owner never entered, where it is removed and spawned again.
-    // The owner's own use of the door is replayed with TESObjectREFR::Activate, and stops here too when the game carries it out (live-door-copy-replay).
+    // The owner's own use of the door is not replayed on the copy (ObjectService::OnActivateNotify): Activate would not come through here.
     const ActorExtension* pActivatorExtension = pActivator ? pActivator->GetExtension() : nullptr;
     if (pActivatorExtension && pActivatorExtension->IsRemote() && apThis->baseForm && apThis->baseForm->formType == FormType::Door &&
         apThis->extraData.Contains(ExtraDataType::Teleport))
@@ -1507,14 +1514,21 @@ bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, u
     }
 
     // A living copy of another player's follower is not this player's to talk to, recruit or steal from: her own game runs her.
+    // This player may only ask her to wait or to follow her player again; her player's game carries that out (FollowerCommands).
     if (Actor* pTarget = apActivator == PlayerCharacter::Get() ? Cast<Actor>(apThis) : nullptr)
     {
         const ActorExtension* pTargetExtension = pTarget->GetExtension();
-        if (pTargetExtension && pTargetExtension->IsFollowerCopy() && !pTarget->IsDead())
+        if (pTargetExtension && pTargetExtension->IsOthersFollower() && !pTarget->IsDead())
         {
-            spdlog::info("Follower: copy {:X} is another player's follower; activating her does nothing here", pTarget->formID);
+            if (!FollowerCommands::Offer(pTarget))
+                spdlog::info("Follower: copy {:X} is another player's follower; activating her does nothing here", pTarget->formID);
             return false;
         }
+
+        // A living NPC another game runs is asked for first, so the conversation runs where its AI does (DialogueClaim);
+        // this game activates it again once it runs it, or talks to the copy as before when the server does not hand it over.
+        if (!DialogueClaim::t_activatingToTalk && World::Get().GetCharacterService().HoldBackTalk(pTarget))
+            return false;
     }
 
     // Exclude books from activation since only reading them removes them from the cell
@@ -1530,22 +1544,45 @@ bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, u
             blocked = apThis->IsActivationBlocked();
         }
 
-        World::Get().GetRunner().Trigger(
-            ActivateEvent(apThis, pActivator, apObjectToGet, aCount, aDefaultProcessing, aUnk1, openState, false, blocked)
-        );
+        World::Get().GetRunner().Trigger(ActivateEvent(apThis->formID, pActivator->formID, apObjectToGet, aCount, aDefaultProcessing, aUnk1, openState, false, blocked));
     }
 
-    return TiltedPhoques::ThisCall(RealActivate, apThis, apActivator, aUnk1, apObjectToGet, aCount, aDefaultProcessing);
+    // A trap's trigger fires its trap from its script, with itself as the activator (TrapSync).
+    if (!pActivator && apActivator && apActivator->baseForm && TrapSync::IsTriggerBase(apActivator->baseForm->formID))
+    {
+        // Only a copy of another game's actor set it off, and that game's word for the step fired the trap here already:
+        // a second firing would stop a trap that toggles, so the game's own is dropped here (TrapSync::Ledger).
+        auto& ledger = TrapSync::SharedLedger();
+        const auto cNow = std::chrono::steady_clock::now();
+        if (!TrapSync::t_firingForWord && ledger.LastToucher(apActivator->formID, cNow) == TrapSync::Ledger::Toucher::kRemote && !ledger.CopyFire(apThis->formID, cNow))
+        {
+            spdlog::debug("Trap: {:X} not fired again by trigger {:X}: another game's word for this step fired it here already", apThis->formID, apActivator->formID);
+            return false;
+        }
+        World::Get().GetRunner().Trigger(TrapFireEvent(apThis->formID, apActivator->formID));
+    }
+
+    // The player taking an arrow stuck in a wall or the ground (a projectile reference): the other games remove their copy (ArrowPickupService).
+    // Read before the call, which takes the arrow away.
+    // Only a shot arrow (a temporary reference), never a plugin's placed one; removing other players' copies never comes here.
+    const bool cTakingArrow = !ScopedActivateOverride::IsOverriden() && apActivator && apActivator == PlayerCharacter::Get() && apThis->baseForm &&
+                              apThis->baseForm->formType == FormType::Projectile && apThis->IsTemporary();
+    ArrowPickupEvent arrow{};
+    if (cTakingArrow)
+        arrow = {apThis->formID, apThis->baseForm->formID, apThis->parentCell ? apThis->parentCell->formID : 0, apThis->position.x, apThis->position.y, apThis->position.z};
+
+    const bool cActivated = TiltedPhoques::ThisCall(RealActivate, apThis, apActivator, aUnk1, apObjectToGet, aCount, aDefaultProcessing);
+    if (cTakingArrow && cActivated && arrow.CellId != 0)
+        World::Get().GetRunner().Trigger(arrow);
+    return cActivated;
 }
 
 void TP_MAKE_THISCALL(HookAddInventoryItem, TESObjectREFR, TESBoundObject* apItem, ExtraDataList* apExtraData, int32_t aCount, TESObjectREFR* apOldOwner)
 {
     if (!ScopedInventoryOverride::IsOverriden())
     {
-        auto& modSystem = World::Get().GetModSystem();
-
         Inventory::Entry item{};
-        modSystem.GetServerModId(apItem->formID, item.BaseId);
+        ItemExtraData::SetBase(item, apItem);
         item.Count = aCount;
 
         if (apExtraData)
@@ -1562,6 +1599,7 @@ void TP_MAKE_THISCALL(HookAddInventoryItem, TESObjectREFR, TESBoundObject* apIte
 BSPointerHandle<TESObjectREFR>*
 TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObjectREFR>* apResult, TESBoundObject* apItem, int32_t aCount, ITEM_REMOVE_REASON aReason, ExtraDataList* apExtraList, TESObjectREFR* apMoveToRef, const NiPoint3* apDropLoc, const NiPoint3* apRotate)
 {
+    StuckArrows::AmmoRemoval ammoRemoval(apThis, apItem);
     // The player dropping an item from the inventory comes here, as RemoveItem with the "dropping" reason.
     // It does not pass through Actor::DropObject, the only other place drops are announced to the other players.
     const bool cOwnDrop = aReason == ITEM_REMOVE_REASON::kDropping && !ScopedInventoryOverride::IsOverriden() && apThis == PlayerCharacter::Get();
@@ -1570,10 +1608,8 @@ TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObje
 
     if (!ScopedInventoryOverride::IsOverriden())
     {
-        auto& modSystem = World::Get().GetModSystem();
-
         Inventory::Entry item{};
-        modSystem.GetServerModId(apItem->formID, item.BaseId);
+        ItemExtraData::SetBase(item, apItem);
 
         if (apExtraList)
         {
@@ -1600,7 +1636,11 @@ TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObje
             dropped.ExtraWornLeft = false;
         }
         else
-            QueueReferenceInventoryChange(apThis, InventoryChangeEvent(apThis->formID, std::move(item)), apMoveToRef);
+        {
+            InventoryChangeEvent event(apThis->formID, std::move(item));
+            event.IntoPlayer = apMoveToRef && apMoveToRef == PlayerCharacter::Get();
+            QueueReferenceInventoryChange(apThis, std::move(event), apMoveToRef);
+        }
     }
 
     spdlog::debug("Removing inventory item {:X} from {:X}", apItem->formID, apThis->formID);
@@ -1679,19 +1719,22 @@ void TP_MAKE_THISCALL(HookLockChange, TESObjectREFR)
         World::Get().GetRunner().Trigger(LockChangeEvent(apThis->formID, false, 0));
 }
 
-#ifdef SKYRIMVR
 TP_THIS_FUNCTION(TReferenceEnable, void, TESObjectREFR, bool aResetInventory);
 TP_THIS_FUNCTION(TReferenceDisable, void, TESObjectREFR);
 static TReferenceEnable* RealReferenceEnable = nullptr;
 static TReferenceDisable* RealReferenceDisable = nullptr;
 
-// TESObjectREFR's Disable, after the slot VR adds for AttachWeapon (SE 0x89).
+// TESObjectREFR's Disable, one slot later on VR, which adds AttachWeapon before it.
+#ifdef SKYRIMVR
 constexpr size_t kDisableSlot = 0x8A;
+#else
+constexpr size_t kDisableSlot = 0x89;
+#endif
 
 // A switch that changed the disabled flag is reported; ObjectService decides whether the party gets it.
 void ReportEnableChange(const TESObjectREFR* apRef, bool aWasDisabled) noexcept
 {
-    if (apRef && aWasDisabled != apRef->IsDisabled() && !apRef->IsTemporary() && !IsProcessExiting())
+    if (apRef && aWasDisabled != apRef->IsDisabled() && !apRef->IsTemporary() && !IsProcessExiting() && !ScopedReferenceEnableOverride::IsOverriden())
         World::Get().GetRunner().Trigger(ReferenceEnableEvent(apRef->formID, !apRef->IsDisabled()));
 }
 
@@ -1702,9 +1745,32 @@ void TP_MAKE_THISCALL(HookReferenceEnable, TESObjectREFR, bool aResetInventory)
     ReportEnableChange(apThis, cWasDisabled);
 }
 
+// Logs a switch-off of a reference hidden here for another player's copy, made by a script or the game (HiddenSwitchOff).
+// Nothing acts on it yet. At most one line a second, with the caller, to tell a script's path from this game's own.
+static void LogHiddenSwitchOff(TESObjectREFR* apRef, bool aWasDisabled, uintptr_t aCaller) noexcept
+{
+    if (!apRef || apRef->formType != Actor::Type)
+        return;
+    const ActorExtension* pExtension = static_cast<Actor*>(apRef)->GetExtension();
+    if (!HiddenSwitchOff::IsForeign(pExtension && pExtension->IsHiddenHere(), aWasDisabled, ScopedReferenceEnableOverride::IsOverriden()))
+        return;
+
+    static std::atomic<int64_t> s_nextLogMs{0};
+    const int64_t cNowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t next = s_nextLogMs.load(std::memory_order_relaxed);
+    if (cNowMs < next || !s_nextLogMs.compare_exchange_strong(next, cNowMs + 1000, std::memory_order_relaxed))
+        return;
+    const uintptr_t cExe = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    spdlog::info(
+        "HiddenSwitchOff: reference {:X}, hidden here for another player's copy, switched off by someone else (caller exe+{:X}, thread {}); "
+        "it still comes back on when released (log only)",
+        apRef->formID, aCaller - cExe, GetCurrentThreadId());
+}
+
 void TP_MAKE_THISCALL(HookReferenceDisable, TESObjectREFR)
 {
     const bool cWasDisabled = apThis->IsDisabled();
+    LogHiddenSwitchOff(apThis, cWasDisabled, reinterpret_cast<uintptr_t>(_ReturnAddress()));
     TiltedPhoques::ThisCall(RealReferenceDisable, apThis);
     ReportEnableChange(apThis, cWasDisabled);
 }
@@ -1713,14 +1779,13 @@ static TiltedPhoques::Initializer s_referenceEnableHooks(
     []()
     {
         POINTER_SKYRIMSE(TReferenceEnable, s_referenceEnable, 19800, 19373);
-        VersionDbPtr<void*> refrVtable(235511);
+        POINTER_SKYRIMSE(void*, refrVtable, 190259, 235511);
         RealReferenceEnable = s_referenceEnable.Get();
         if (auto* pVtable = reinterpret_cast<void* const*>(refrVtable.Get()))
             RealReferenceDisable = static_cast<TReferenceDisable*>(pVtable[kDisableSlot]);
         TP_HOOK(&RealReferenceEnable, HookReferenceEnable);
         TP_HOOK(&RealReferenceDisable, HookReferenceDisable);
     });
-#endif
 
 static TiltedPhoques::Initializer s_objectReferencesHooks(
     []()

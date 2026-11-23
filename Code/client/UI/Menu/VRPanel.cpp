@@ -189,12 +189,12 @@ void VRPanel::ToggleOnStickChord() noexcept
     if (menu.GetSurface() == MenuSurface::kPanel)
     {
         menu.Close();
-        spdlog::info("VRPanel: closed by both stick clicks");
+        spdlog::debug("VRPanel: closed by both stick clicks");
     }
     else if (menu.GetSurface() == MenuSurface::kNone)
     {
         if (menu.Open(MenuSurface::kPanel))
-            spdlog::info("VRPanel: opened by both stick clicks");
+            spdlog::debug("VRPanel: opened by both stick clicks");
         else
             Utils::ShowModHudMessage("the menu cannot open here");
     }
@@ -223,7 +223,7 @@ void VRPanel::SetShown(const bool aShown, OverlayService& aOverlay, VRPage& aPag
         StopPointing(aOverlay);
         VREyeDraw::Hide();
     }
-    spdlog::info("VRPanel: {}", aShown ? "shown" : "hidden");
+    spdlog::debug("VRPanel: {}", aShown ? "shown" : "hidden");
 }
 
 /**
@@ -242,7 +242,7 @@ void VRPanel::KeepInFront(const VRControllers::HeadSpace& acHead) noexcept
         return;
     VREyeDraw::Show(*m_placement);
     if (cWasPlaced)
-        spdlog::info("VRPanel: brought back in front of the player");
+        spdlog::debug("VRPanel: brought back in front of the player");
 }
 
 /**

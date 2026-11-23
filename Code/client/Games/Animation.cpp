@@ -14,6 +14,13 @@
 
 #include <World.h>
 #include <Copies/Takeover.h>
+#include <HitReactions.h>
+#include <Services/HitReactionService.h>
+#include <Games/Skyrim/AnimationGraphEvents.h>
+#include <Games/Skyrim/CopyBodyRules.h>
+#include <Games/Skyrim/VR/VRBodySync.h>
+
+#include <LogPolicy.h>
 
 #include <mutex>
 
@@ -23,10 +30,23 @@ static TPerformAction* RealPerformAction;
 // TODO: make scoped override
 thread_local bool g_forceAnimation = false;
 
+// Above zero while the game plays an action this client performs for its own actor or replays on a copy,
+// so the graph events sent meanwhile are told from those the game or a mod sends on its own (AnimationGraphEvents).
+thread_local uint32_t g_playingAction = 0;
+
+namespace
+{
+struct ScopedPlayingAction
+{
+    ScopedPlayingAction() noexcept { ++g_playingAction; }
+    ~ScopedPlayingAction() noexcept { --g_playingAction; }
+};
+} // namespace
+
 namespace
 {
 // TEMPORARY: logs which actions flood the stream, and how many of them the game refused on the sending actor.
-// Logged once per actor and action every ten seconds, when one actor performs the same action more than ten times in a second.
+// Logged once per actor every thirty seconds, when one actor performs the same action more than ten times in a second.
 void NoteActionRate(uint32_t aActorId, uint32_t aActionId, const char* acpEventName, bool aWorked) noexcept
 {
     struct Rate
@@ -34,21 +54,23 @@ void NoteActionRate(uint32_t aActorId, uint32_t aActionId, const char* acpEventN
         std::chrono::steady_clock::time_point WindowStart{};
         uint32_t Count = 0;
         uint32_t Failed = 0;
-        std::chrono::steady_clock::time_point NextReport{};
     };
     static std::mutex s_lock;
     static TiltedPhoques::Map<uint64_t, Rate> s_rates;
+    static TiltedPhoques::Map<uint32_t, int64_t> s_nextReportMs;
 
     const auto now = std::chrono::steady_clock::now();
     std::scoped_lock _{s_lock};
     if (s_rates.size() > 512)
         s_rates.clear();
+    if (s_nextReportMs.size() > 512)
+        s_nextReportMs.clear();
     Rate& rate = s_rates[(static_cast<uint64_t>(aActorId) << 32) | aActionId];
     if (now - rate.WindowStart >= std::chrono::seconds(1))
     {
-        if (rate.Count > 10 && now >= rate.NextReport)
+        const int64_t cNowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        if (rate.Count > 10 && LogPolicy::ReportDue(cNowMs, s_nextReportMs[aActorId], 30000))
         {
-            rate.NextReport = now + std::chrono::seconds(10);
             spdlog::info("ActionFlood: actor {:X} performed action {:X} ({}) {} times in a second, {} of them refused by the game here and not sent",
                          aActorId, aActionId, acpEventName ? acpEventName : "?", rate.Count, rate.Failed);
         }
@@ -95,7 +117,10 @@ bool IsRepeatOfLastSent(const ActionEvent& acAction) noexcept
 uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apAction)
 {
     auto pActor = apAction->actor;
-    const auto pExtension = pActor->GetExtension();
+    // GetExtension() returns null for an actor this client did not allocate (Actor::ForcePosition): its actions are the game's alone.
+    const auto pExtension = pActor ? pActor->GetExtension() : nullptr;
+    if (!pExtension)
+        return TiltedPhoques::ThisCall(RealPerformAction, apThis, apAction);
 
     if (!pExtension->IsRemote() || g_forceAnimation)
     {
@@ -110,7 +135,11 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
 
         pActor->SaveAnimationVariables(action.Variables);
 
-        const auto res = TiltedPhoques::ThisCall(RealPerformAction, apThis, apAction);
+        uint8_t res = 0;
+        {
+            ScopedPlayingAction playing;
+            res = TiltedPhoques::ThisCall(RealPerformAction, apThis, apAction);
+        }
         // TEMPORARY: what this game's AI performs on an NPC it just gained.
         Takeover::NoteOwnAction(action.ActorId, apAction->eventName.AsAscii(), res != 0);
 
@@ -145,7 +174,47 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
         return res;
     }
 
+    // The game ends a copy's bleedout itself (Actor::SetLifeState, after a heal here or when its bleedout runs out): it writes the copy
+    // alive, then performs its stop. Dropped like the game's other actions on a copy, that stop left its graph kneeling for good while
+    // it read alive (live-copy-essential-up). It plays once its owner's NPC is up; until then it is held back, and the copy kneels on
+    // as its owner's does, remembered so that it gets up when its owner's does (InterpolationSystem).
+    if (!pExtension->IsPlayer() && apAction->action && apAction->action->formID == CopyBodyRules::kActionBleedoutStop)
+    {
+        const uint32_t cFlags1 = pActor->actorState.flags1;
+        const auto cOwner = static_cast<CopyBodyRules::OwnerWord>(pExtension->OwnerWordOfCopy.load(std::memory_order_relaxed));
+        if (CopyBodyRules::LetsEngineStopThrough(true, true, cFlags1, cOwner))
+        {
+            uint8_t res = 0;
+            {
+                ScopedPlayingAction playing;
+                res = TiltedPhoques::ThisCall(RealPerformAction, apThis, apAction);
+            }
+            pExtension->EngineStopPlayed.store(res ? 1 : 2, std::memory_order_relaxed);
+            if (res)
+                pExtension->KneelsInGraph.store(false, std::memory_order_relaxed);
+            spdlog::debug("KnockDown: NPC copy {:X} ended its bleedout the game's way; its stop {}", pActor->formID, res ? "played" : "was refused");
+            return res;
+        }
+        if (CopyBodyRules::KneelsInGraphOnly(true, true, cFlags1))
+        {
+            pExtension->KneelsInGraph.store(true, std::memory_order_relaxed);
+            spdlog::debug("KnockDown: NPC copy {:X} ended its bleedout here while its owner's NPC is not up; it kneels on until its owner's gets up", pActor->formID);
+        }
+        pExtension->EngineStopPlayed.store(2, std::memory_order_relaxed);
+        return 0;
+    }
+
+    // A copy plays only its owner's actions. A stagger or recoil it wants here is this game's hit at work,
+    // so its owner's game is told, and plays it (HitReactionService).
+    if (const auto cKind = HitReactions::KindOfAction(apAction->action ? apAction->action->formID : 0); cKind && !pExtension->IsPlayer())
+        HitReactionService::OnCopyReaction(pActor->formID, *cKind);
+
     return 0;
+}
+
+bool ActorMediator::PerformOwnAction(TESActionData* apAction) noexcept
+{
+    return HookPerformAction(this, apAction) != 0;
 }
 
 ActorMediator* ActorMediator::Get() noexcept
@@ -200,6 +269,11 @@ bool ActorMediator::ForceAction(TESActionData* apAction) noexcept
     auto pActor = static_cast<Actor*>(apAction->actor);
     if (pActor)
     {
+        // A copy replaying its owner's stagger or recoil: the graph may take the stagger after this returns.
+        if (HitReactions::KindOfAction(apAction->action ? apAction->action->formID : 0))
+            AnimationGraphEvents::NoteReplayedReaction(pActor->formID);
+
+        ScopedPlayingAction playing;
         result = TiltedPhoques::ThisCall(PerformComplexAction, this, apAction);
 
         ApplyAnimationVariables(*qword_142F271B8.Get(), apAction);

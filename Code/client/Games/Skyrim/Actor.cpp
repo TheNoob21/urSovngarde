@@ -1,5 +1,11 @@
+#include <Services/GameExtension.h>
+#include <FollowerPolicy.h>
 #include <Games/References.h>
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstring>
+#include <mutex>
 #include <intrin.h>
 #include <Games/Skyrim/EquipManager.h>
 #include <AI/AIProcess.h>
@@ -14,9 +20,14 @@
 #include <ExtraData/ExtraLeveledCreature.h>
 #include <Games/Memory.h>
 #include <Combat/CombatController.h>
+#include <CombatTargets.h>
 #include <CrashHandler.h>
 #include <Copies/RecentModelChanges.h>
+#include <Systems/InterpolationSystem.h>
+#include <Systems/CopyAnimationQueue.h>
 #include <Copies/SceneLines.h>
+#include <StuckArrows.h>
+#include <StuckArrowStore.h>
 
 #include <Events/HealthChangeEvent.h>
 #include <Events/InventoryChangeEvent.h>
@@ -35,6 +46,12 @@
 #include <Games/TES.h>
 #include <World.h>
 #include <Services/CharacterService.h>
+#include <Services/DetectionService.h>
+#include <Services/FurnitureService.h>
+#include <Services/MountService.h>
+#include <SaveScope.h>
+#include <Services/CrimeService.h>
+#include <CrimeReports.h>
 #include <Services/PapyrusService.h>
 
 #include <Forms/ActorValueInfo.h>
@@ -47,6 +64,8 @@
 #include <Games/Skyrim/ExtraData/ExtraCount.h>
 #include <Games/Misc/ActorKnowledge.h>
 #include <Copies/InventoryCompare.h>
+#include <Services/Generic/CopyLootCheck.h>
+#include <FollowerCommands.h>
 
 #include <ExtraData/ExtraDataList.h>
 #include <ExtraData/ExtraCharge.h>
@@ -58,6 +77,7 @@
 #include <ExtraData/ExtraTextDisplayData.h>
 #include <Forms/EnchantmentItem.h>
 #include <Forms/AlchemyItem.h>
+#include <ItemExtraData.h>
 #include <Forms/TESObjectCELL.h>
 
 #include <Structs/Skyrim/AnimationGraphDescriptor_BHR_Master.h>
@@ -74,6 +94,7 @@
 #include <ModCompat/BehaviorVar.h>
 #include <Helpers/PerfScope.h>
 #include <Services/PvpProjectiles.h>
+#include <DragonSouls.h>
 #include <Services/PvpRules.h>
 #include <Helpers/FiniteVector.h>
 #include <Helpers/ModuleImage.h>
@@ -83,7 +104,7 @@ namespace
 void QueueActorInventoryChange(Actor* apActor, InventoryChangeEvent aEvent, TESObjectREFR* apTransferReference = nullptr)
 {
     auto ownershipToken = Utils::GetLocalOwnershipToken(apActor->formID);
-    if (!ownershipToken && apTransferReference == PlayerCharacter::Get())
+    if (!ownershipToken && (apTransferReference == PlayerCharacter::Get() || FollowerCommands::MayAddTradeItem(apActor, aEvent.Item.Count, apTransferReference != nullptr)))
         ownershipToken = Utils::GetRemoteOwnershipToken(apActor->formID);
 
     if (!ownershipToken)
@@ -167,6 +188,10 @@ static TPickUpObject* RealPickUpObject = nullptr;
 static TDropObject* RealDropObject = nullptr;
 static TSetPosition* RealSetPosition = nullptr;
 static TActorProcess* RealActorProcess = nullptr;
+#ifdef SKYRIMVR
+// The actor update is hooked on VR (see VRAddressOverrides.h, SE 36365).
+// There it also advances the animation graph, so a skipped copy's graph is advanced here.
+#endif
 
 float Actor::GetSpeed() noexcept
 {
@@ -208,32 +233,83 @@ namespace
 void* const* s_characterVtable = nullptr;
 void* s_gameSetPosition = nullptr;
 
-#ifdef SKYRIMVR
-constexpr size_t kSetPositionSlot = 0xAB;
-// TESForm::Save, which writes the form flags a load restores.
+// TESForm::Save, which writes the form flags a load restores; the same slot on SE and VR.
 constexpr size_t kSaveSlot = 0xE;
 
 using TCharacterSave = void(TESForm*, BGSSaveFormBuffer*);
 TCharacterSave* s_realCharacterSave = nullptr;
 
 // A hidden reference goes into the save as enabled, so a save made while connected keeps that reference for a game without the connection.
-// The flag is taken off for the write only: nothing loads or moves.
+// The flag is taken off for the write only: nothing loads or moves. Each mask is put back when this ends.
+struct CharacterSaveMask
+{
+    explicit CharacterSaveMask(TESForm* apThis) noexcept
+        : pForm(apThis)
+        , pActor(Cast<Actor>(apThis))
+        , Hidden(HiddenHere(apThis, pActor))
+        , DragonLifted(DragonSouls::LiftForSave(pActor))
+        , SeatBack(pActor)
+        , HorseOwnerBack(pActor)
+    {
+    }
+
+    ~CharacterSaveMask() noexcept
+    {
+        if (DragonLifted)
+            DragonSouls::RestoreAfterSave(pActor);
+        if (Hidden)
+        {
+            pForm->flags |= TESForm::DISABLED;
+            spdlog::debug("SaveGuard: reference {:X}, hidden here, written to the save as enabled", pForm->formID);
+        }
+    }
+
+    TP_NOCOPYMOVE(CharacterSaveMask);
+
+    static bool HiddenHere(TESForm* apThis, Actor* apActor) noexcept
+    {
+        const ActorExtension* pExtension = apActor ? apActor->GetExtension() : nullptr;
+        if (!pExtension || !pExtension->IsHiddenHere() || !apThis->IsDisabled())
+            return false;
+        apThis->flags &= ~TESForm::DISABLED;
+        return true;
+    }
+
+    TESForm* pForm;
+    Actor* pActor;
+    bool Hidden;
+    // Nor does a save keep a dragon out of the game's own absorb, which only co-op does (DragonSouls).
+    bool DragonLifted;
+    // Nor another game's NPC seated here by its owner's word (FurnitureService): it would load seated, its furniture taken.
+    const FurnitureService::SeatSaveGuard SeatBack;
+    // Nor a horse counted as this player's too because a party member rode it here (party horses): it is saved as its owner here had it.
+    const MountService::ShareSaveGuard HorseOwnerBack;
+};
+
+// Characters being written now. Another write of one, nested or on another thread, waits for the first one's mask and keeps it on
+// until the last of them ends.
+SaveScope::FormsWriting<CharacterSaveMask> s_charactersWriting;
+
 void HookCharacterSave(TESForm* apThis, BGSSaveFormBuffer* apBuffer)
 {
-    auto* pActor = Cast<Actor>(apThis);
-    const ActorExtension* pExtension = pActor ? pActor->GetExtension() : nullptr;
-    const bool cHidden = pExtension && pExtension->IsHiddenHere() && apThis->IsDisabled();
-    if (cHidden)
-        apThis->flags &= ~TESForm::DISABLED;
+    s_charactersWriting.Write(apThis->formID, [apThis] { return std::make_unique<CharacterSaveMask>(apThis); }, [apThis, apBuffer] { s_realCharacterSave(apThis, apBuffer); });
+}
 
-    s_realCharacterSave(apThis, apBuffer);
-
-    if (cHidden)
+// The slot and not the function: a plugin that detours the function then finds it as the game has it.
+void GuardCharacterSave(void* const* apVtable) noexcept
+{
+    auto* const pSlot = const_cast<void**>(&apVtable[kSaveSlot]);
+    DWORD oldProtect = 0;
+    if (*pSlot && VirtualProtect(pSlot, sizeof(void*), PAGE_READWRITE, &oldProtect))
     {
-        apThis->flags |= TESForm::DISABLED;
-        spdlog::info("SaveGuard: reference {:X}, hidden here, written to the save as enabled", apThis->formID);
+        s_realCharacterSave = reinterpret_cast<TCharacterSave*>(*pSlot);
+        *pSlot = reinterpret_cast<void*>(&HookCharacterSave);
+        VirtualProtect(pSlot, sizeof(void*), oldProtect, &oldProtect);
     }
 }
+
+#ifdef SKYRIMVR
+constexpr size_t kSetPositionSlot = 0xAB;
 
 TiltedPhoques::Initializer s_gameSetPositionCapture(
     []()
@@ -243,16 +319,7 @@ TiltedPhoques::Initializer s_gameSetPositionCapture(
         {
             s_characterVtable = pVtable;
             s_gameSetPosition = pVtable[kSetPositionSlot];
-
-            // The slot and not the function: a plugin that detours the function then finds it as the game has it.
-            auto* const pSlot = const_cast<void**>(&pVtable[kSaveSlot]);
-            DWORD oldProtect = 0;
-            if (*pSlot && VirtualProtect(pSlot, sizeof(void*), PAGE_READWRITE, &oldProtect))
-            {
-                s_realCharacterSave = reinterpret_cast<TCharacterSave*>(*pSlot);
-                *pSlot = reinterpret_cast<void*>(&HookCharacterSave);
-                VirtualProtect(pSlot, sizeof(void*), oldProtect, &oldProtect);
-            }
+            GuardCharacterSave(pVtable);
         }
         if (!s_realCharacterSave)
             spdlog::error("SaveGuard: Character's vtable not found; another player's follower is shown on this game's own reference");
@@ -272,7 +339,7 @@ void LogSetPositionOwner() noexcept
         spdlog::info("ForcePosition: Character::SetPosition is the game's own; copies are moved with it");
         return;
     }
-    spdlog::info("ForcePosition: Character::SetPosition is replaced by {}; copies are moved with the game's own instead", ModuleImage::NameOf(pCurrent));
+    spdlog::debug("ForcePosition: Character::SetPosition is replaced by {}; copies are moved with the game's own instead", ModuleImage::NameOf(pCurrent));
 }
 
 // Moves a Character with the game's own SetPosition, which a plugin watching for teleports does not see.
@@ -287,6 +354,17 @@ bool MoveWithGameSetPosition(Actor* apActor, const NiPoint3& acPosition, const b
     return true;
 }
 
+#else
+// A creature hidden behind a stand-in is disabled on the flat game too, so its saves need the same guard.
+TiltedPhoques::Initializer s_characterSaveCapture(
+    []()
+    {
+        VersionDbPtr<void*> vtable(207886);
+        if (auto* pVtable = reinterpret_cast<void* const*>(vtable.Get()))
+            GuardCharacterSave(pVtable);
+        if (!s_realCharacterSave)
+            spdlog::error("SaveGuard: Character's vtable not found; another player's follower is shown on this game's own reference");
+    });
 #endif
 } // namespace
 
@@ -474,6 +552,15 @@ void Actor::SetNoBleedoutRecovery(bool aSet) noexcept
     TiltedPhoques::ThisCall(s_setNoBleedoutRecovery, this, aSet);
 }
 
+void Actor::SetLifeState(uint32_t aLifeState) noexcept
+{
+    TP_THIS_FUNCTION(TSetLifeState, void, Actor, uint32_t);
+    POINTER_SKYRIMSE(TSetLifeState, s_setLifeState, 37612, 36604);
+    if (!s_setLifeState.Get())
+        return;
+    TiltedPhoques::ThisCall(s_setLifeState, this, aLifeState);
+}
+
 void Actor::DispelAllSpells(bool aNow) noexcept
 {
     magicTarget.DispelAllSpells(aNow);
@@ -495,6 +582,21 @@ Actor* Actor::GetCombatTarget() const noexcept
 // An actor already fighting has a combat controller, which is simply pointed at the new target.
 // Only an actor with no combat at all is started, so nothing is ever stopped first.
 // StopCombat() then StartCombat() is not safe on VR: the Papyrus start can fail and leave the actor out of combat.
+bool Actor::CallOutTheft() noexcept
+{
+    using ObjectReference = TESObjectREFR;
+
+    PAPYRUS_FUNCTION(void, ObjectReference, Say, TESForm*, Actor*, bool);
+
+    // Skyrim.esm is always load index 0.
+    constexpr uint32_t cStealTopic = 0x2A45B;
+    TESForm* pTopic = TESForm::GetById(cStealTopic);
+    if (!pTopic || pTopic->formType != FormType::Topic)
+        return false;
+    s_pSay(this, pTopic, nullptr, false);
+    return true;
+}
+
 void Actor::StartCombatEx(Actor* apTarget) noexcept
 {
     if (GetCombatTarget() == apTarget)
@@ -525,6 +627,18 @@ void Actor::StopCombat() noexcept
 {
     PAPYRUS_FUNCTION(void, Actor, StopCombat);
     s_pStopCombat(this);
+}
+
+void Actor::SetLookAt(TESObjectREFR* apTarget, bool aPathingLookAt) noexcept
+{
+    PAPYRUS_FUNCTION(void, Actor, SetLookAt, TESObjectREFR*, bool);
+    s_pSetLookAt(this, apTarget, aPathingLookAt);
+}
+
+void Actor::ClearLookAt() noexcept
+{
+    PAPYRUS_FUNCTION(void, Actor, ClearLookAt);
+    s_pClearLookAt(this);
 }
 
 bool Actor::IsHostileToActor(Actor* apActor) noexcept
@@ -789,9 +903,9 @@ Factions Actor::GetFactions() const noexcept
 
         for (auto i = 0u; i < factions.length; ++i)
         {
-            Faction faction;
-
-            modSystem.GetServerModId(factions[i].faction->formID, faction.Id);
+            Faction faction{};
+            if (!modSystem.GetServerModId(factions[i].faction->formID, faction.Id))
+                continue;
             faction.Rank = factions[i].rank;
 
             result.NpcFactions.push_back(faction);
@@ -803,9 +917,9 @@ Factions Actor::GetFactions() const noexcept
     {
         for (auto i = 0u; i < pChanges->entries.length; ++i)
         {
-            Faction faction;
-
-            modSystem.GetServerModId(pChanges->entries[i].faction->formID, faction.Id);
+            Faction faction{};
+            if (!modSystem.GetServerModId(pChanges->entries[i].faction->formID, faction.Id))
+                continue;
             faction.Rank = pChanges->entries[i].rank;
 
             result.ExtraFactions.push_back(faction);
@@ -817,9 +931,19 @@ Factions Actor::GetFactions() const noexcept
 
 bool Actor::IsPlayerFollower() const noexcept
 {
-    if (!IsPlayerTeammate() || IsTemporary())
+    // Never the player, nor a temporary actor (a copy, or one a script placed), whatever an add-on says.
+    constexpr uint32_t cPlayerForm = 0x14;
+    if (IsTemporary() || formID == cPlayerForm)
         return false;
 
+    // An add-on that knows a follower framework's own marks may decide (UrGameFollowerPolicy); with none, core's rule below, as before.
+    const bool cTeammate = IsPlayerTeammate();
+    const uint32_t cAnswer = GameExtension::FollowerAnswer(formID, baseForm ? baseForm->formID : 0, cTeammate);
+    return FollowerPolicy::Decide(cAnswer, cTeammate && IsInCurrentFollowerFaction());
+}
+
+bool Actor::IsInCurrentFollowerFaction() const noexcept
+{
     constexpr uint32_t cCurrentFollowerFaction = 0x5C84E;
 
     // A rank below zero is not a member: followers' own records list the faction at -1 until they are recruited.
@@ -905,10 +1029,10 @@ MagicEquipment Actor::GetMagicEquipment() const noexcept
     auto& modSystem = World::Get().GetModSystem();
 
     uint32_t mainId = magicItems[0] ? magicItems[0]->formID : 0;
-    modSystem.GetServerModId(mainId, equipment.LeftHandSpell);
+    modSystem.GetSharedSpellId(mainId, equipment.LeftHandSpell);
 
     uint32_t secondaryId = magicItems[1] ? magicItems[1]->formID : 0;
-    modSystem.GetServerModId(secondaryId, equipment.RightHandSpell);
+    modSystem.GetSharedSpellId(secondaryId, equipment.RightHandSpell);
 
     uint32_t shoutId = equippedShout ? equippedShout->formID : 0;
     modSystem.GetServerModId(shoutId, equipment.Shout);
@@ -970,6 +1094,9 @@ void Actor::SetActorInventory(const Inventory& acInventory) noexcept
     }
 
     SetMagicEquipment(acInventory.CurrentMagicEquipment);
+
+    // The game can still add a copy's own gear after this; it is read again a few seconds later.
+    CopyLootCheck::Note(this, acInventory);
 }
 
 void Actor::SetMagicEquipment(const MagicEquipment& acEquipment) noexcept
@@ -977,14 +1104,14 @@ void Actor::SetMagicEquipment(const MagicEquipment& acEquipment) noexcept
     auto* pEquipManager = EquipManager::Get();
     auto& modSystem = World::Get().GetModSystem();
 
-    if (acEquipment.LeftHandSpell)
+    if (acEquipment.LeftHandSpell && !GameExtension::RejectMagic(acEquipment.LeftHandSpell))
     {
         uint32_t mainHandWeaponId = modSystem.GetGameId(acEquipment.LeftHandSpell);
         spdlog::debug("Setting left hand spell: {:X}", mainHandWeaponId);
         pEquipManager->EquipSpell(this, TESForm::GetById(mainHandWeaponId), 0);
     }
 
-    if (acEquipment.RightHandSpell)
+    if (acEquipment.RightHandSpell && !GameExtension::RejectMagic(acEquipment.RightHandSpell))
     {
         uint32_t secondaryHandWeaponId = modSystem.GetGameId(acEquipment.RightHandSpell);
         spdlog::debug("Setting right hand spell: {:X}", secondaryHandWeaponId);
@@ -1080,6 +1207,51 @@ bool Actor::InitiateMountPackage(Actor* apMount) noexcept
     return TiltedPhoques::ThisCall(RealInitiateMountPackage, this, apMount);
 }
 
+bool Actor::IsOnMount() const noexcept
+{
+    PAPYRUS_FUNCTION(bool, Actor, IsOnMount);
+    return s_pIsOnMount(this);
+}
+
+bool Actor::CanReadMount() noexcept
+{
+    static PapyrusLookup s_isOnMount("Actor", "IsOnMount");
+    return s_isOnMount.Resolve() != nullptr;
+}
+
+bool Actor::IsBeingRidden() const noexcept
+{
+    PAPYRUS_FUNCTION(bool, Actor, IsBeingRidden);
+    return s_pIsBeingRidden(this);
+}
+
+void Actor::SetVehicle(TESObjectREFR* apVehicle) noexcept
+{
+    using ObjectReference = TESObjectREFR;
+
+    PAPYRUS_FUNCTION(void, Actor, SetVehicle, ObjectReference*);
+    s_pSetVehicle(this, apVehicle);
+}
+
+void Actor::MountVehicleQuick() noexcept
+{
+    // What an AI package that rides when it can calls as it starts (AE 37904, VR 0x14060E130): it reads the horse SetVehicle
+    // wrote (an actor's own horse otherwise) and, if the game's own mount rules allow it (the horse alive, a mount, free, within
+    // 3000 units), builds the mount interaction on rider and horse in the same call. No package and no AI update are needed.
+    TP_THIS_FUNCTION(TMountVehicleQuick, void, Actor);
+    POINTER_SKYRIMSE(TMountVehicleQuick, s_mountVehicleQuick, 37904, 37904);
+    TiltedPhoques::ThisCall(s_mountVehicleQuick.Get(), this);
+}
+
+bool Actor::ExitMountQuick() noexcept
+{
+    // Ends the mount interaction (AE 38705, VR 0x140637E10). Mode 2 is the one the interaction itself takes when it must end at
+    // once: the rider stands and is detached from the horse in the call. Papyrus Dismount instead gives the rider a package.
+    TP_THIS_FUNCTION(TExitMountQuick, bool, Actor, int32_t aMode);
+    POINTER_SKYRIMSE(TExitMountQuick, s_exitMountQuick, 38705, 38705);
+    return TiltedPhoques::ThisCall(s_exitMountQuick.Get(), this, 2);
+}
+
 void Actor::GenerateMagicCasters() noexcept
 {
     using CS = MagicSystem::CastingSource;
@@ -1142,11 +1314,9 @@ bool Actor::IsDragon() const noexcept
 
 bool Actor::IsSaveGuarded() noexcept
 {
-#ifdef SKYRIMVR
+    // Both games guard Character's save slot (s_gameSetPositionCapture on VR, s_characterSaveCapture on flat), so a reference hidden
+    // behind another player's follower copy is written to a save as enabled on either.
     return s_realCharacterSave != nullptr;
-#else
-    return false;
-#endif
 }
 
 bool Actor::IsPersonRace(const TESRace* apRace) noexcept
@@ -1155,22 +1325,35 @@ bool Actor::IsPersonRace(const TESRace* apRace) noexcept
     return RaceHasKeyword(apRace, cActorTypeNPC);
 }
 
-#ifdef SKYRIMVR
 // The copy Kill is killing on its owner's word, on this thread: the game's "may this attacker kill it?" then says yes.
 // The game lets only its own player kill a protected NPC, and never an essential one; the owner's game decided already.
 thread_local const Actor* t_killedOnOwnersWord = nullptr;
+thread_local uint32_t t_ownerKillEssentialBit = 0;
 
-// Actor::CanBeKilledBy (SE 36247, VR 0x1405D9520), asked by KillImpl and by the damage functions.
+// Actor::CanBeKilledBy (SE 36247, AE 37229, VR 0x1405D9520), asked by KillImpl and by the damage functions.
+// KillImpl sets the essential and protected flags again from the base and the quests before it asks, so only this hook lets a copy die.
 TP_THIS_FUNCTION(TCanBeKilledBy, bool, Actor, Actor* apAttacker);
 static TCanBeKilledBy* RealCanBeKilledBy = nullptr;
 
 bool TP_MAKE_THISCALL(HookCanBeKilledBy, Actor, Actor* apAttacker)
 {
     if (apThis && apThis == t_killedOnOwnersWord)
+    {
+#ifndef SKYRIMVR
+        // KillImpl refreshed this classification from the base/quests before this call.
+        // Flat's native life setter (AE 0x693200) converts dying/dead to essential-down while bit18 is set,
+        // independently of this permission result. Let the owner's native kill reach its real dying/dead state.
+        if (const auto* pExtension = apThis->GetExtension(); pExtension && pExtension->IsRemote() && !pExtension->IsRemotePlayer())
+        {
+            constexpr uint32_t cEssential = 1u << 18;
+            t_ownerKillEssentialBit |= apThis->flags2 & cEssential;
+            apThis->flags2 &= ~cEssential;
+        }
+#endif
         return true;
+    }
     return TiltedPhoques::ThisCall(RealCanBeKilledBy, apThis, apAttacker);
 }
-#endif
 
 void Actor::Kill(Actor* apKiller) noexcept
 {
@@ -1180,6 +1363,8 @@ void Actor::Kill(Actor* apKiller) noexcept
         return;
 
     RecentModelChanges::Note(this, RecentModelChanges::Kind::Killed);
+    // Out of the game's own absorb before its death runs the dragon's script (DragonSouls).
+    DragonSouls::Hold(this);
 
     // Remote actors only play animations sent by their owner (HookPerformAction).
     // The death animation and ragdoll have to go through here, or the body dies standing up.
@@ -1187,25 +1372,48 @@ void Actor::Kill(Actor* apKiller) noexcept
     if (forceAnimation)
         g_forceAnimation = true;
 
-#ifdef SKYRIMVR
     // A copy dies on its owner's word even when protected or essential (see HookCanBeKilledBy).
     const Actor* pKilledBefore = t_killedOnOwnersWord;
+    const uint32_t cEssentialBitBefore = t_ownerKillEssentialBit;
+    t_ownerKillEssentialBit = 0;
     if (pExtension->IsRemote())
         t_killedOnOwnersWord = this;
 
+#ifdef SKYRIMVR
     // Call KillImpl (SE 36872) by address rather than through the virtual, whose VR slot is unverified.
     TP_THIS_FUNCTION(TKillImpl, void, Actor, Actor* apAttacker, float aDamage, bool aSendEvent, bool aRagdollInstant);
     POINTER_SKYRIMSE(TKillImpl, s_killImpl, 0, 36872);
     TiltedPhoques::ThisCall(s_killImpl, this, apKiller, 100.f, true, true);
 
+    t_ownerKillEssentialBit = cEssentialBitBefore;
     t_killedOnOwnersWord = pKilledBefore;
     if (forceAnimation)
         g_forceAnimation = false;
     return;
 #endif
+    // On flat, KillImpl first asks VirtIsDead(false), which counts essential-down (life 7) as dead.
+    // It returns before CanBeKilledBy, so the owner-word allowance cannot make this copy's body die.
+    // Let the native kill run from alive, keeping its knock and graph state; restore the down word if it refuses.
+    constexpr uint32_t cLifeMask = 0x1E00000u;
+    const uint32_t cLifeBeforeKill = actorState.flags1 & cLifeMask;
+    const bool cEssentialDownOnOwnersWord = forceAnimation && ActorState::LifeStateOf(cLifeBeforeKill) == LifeStates::kEssentialDown;
+    if (cEssentialDownOnOwnersWord)
+        actorState.flags1 &= ~cLifeMask;
     // TODO: these args are kind of bogus of course
     KillImpl(apKiller, 100.f, true, true);
+    // Restore only the classification borrowed by the owner-word hook; all native death changes remain.
+    flags2 |= t_ownerKillEssentialBit;
+    t_ownerKillEssentialBit = cEssentialBitBefore;
+    if (cEssentialDownOnOwnersWord && !actorState.IsDeadOrDying())
+        actorState.flags1 = (actorState.flags1 & ~cLifeMask) | cLifeBeforeKill;
+    // The game can still refuse a kill the server accepted. Say so rather than forcing the life state,
+    // which could disturb the body when it recovers.
+    if (forceAnimation && !actorState.IsDeadOrDying())
+        spdlog::debug(
+            "Death sync: the game did not kill NPC copy {:X} (life {}, knock {}, flags2 {:#x}, health {:.0f})", formID, actorState.LifeState(), (actorState.flags1 >> 25) & 0x7,
+            flags2, GetActorValue(ActorValueInfo::kHealth));
 
+    t_killedOnOwnersWord = pKilledBefore;
     if (forceAnimation)
         g_forceAnimation = false;
 
@@ -1216,10 +1424,39 @@ void Actor::Kill(Actor* apKiller) noexcept
     */
 }
 
+void Actor::SetFlyState(uint32_t aState) noexcept
+{
+    // Actor::SetFlyState, SE 36922 / AE 37947 (VR 0x1406110F0, in VRAddressOverrides): what the graph's flight handlers call.
+    TP_THIS_FUNCTION(TSetFlyState, void, Actor, uint32_t aState);
+    POINTER_SKYRIMSE(TSetFlyState, s_setFlyState, 37947, 37947);
+    // It tells the movement controller with no check that there is one.
+    if (!movementDrivenControl)
+        return;
+    TiltedPhoques::ThisCall(s_setFlyState, this, aState);
+}
+
 bool Actor::PlayIdle(TESIdleForm* apIdle) noexcept
 {
     PAPYRUS_FUNCTION(bool, Actor, PlayIdle, TESIdleForm*);
     return s_pPlayIdle(this, apIdle);
+}
+
+TP_THIS_FUNCTION(TNativeResurrect, void, Actor, bool aResetInventory, bool aAttach3D);
+static TNativeResurrect* RealNativeResurrect = nullptr;
+
+void TP_MAKE_THISCALL(HookNativeResurrect, Actor, bool aResetInventory, bool aAttach3D)
+{
+    if (apThis)
+        if (auto* pExtension = apThis->GetExtension())
+        {
+            pExtension->NativeLifeGeneration.fetch_add(1, std::memory_order_relaxed);
+            pExtension->ObservedCopyFall.store(0, std::memory_order_relaxed);
+            // A new life: a kneel, an owner's word or a stop of the one before would get it up or hold it down on that one's account.
+            pExtension->ForgetCopyBleedout();
+        }
+    if (apThis)
+        StuckArrows::OnNativeRevival(apThis->formID);
+    TiltedPhoques::ThisCall(RealNativeResurrect, apThis, aResetInventory, aAttach3D);
 }
 
 /**
@@ -1241,6 +1478,7 @@ void Actor::Respawn() noexcept
         return;
     }
 
+    InterpolationSystem::Forget(formID);
     RecentModelChanges::Note(this, RecentModelChanges::Kind::Revived);
     EmptyHandsOfStrayExtraData("its item does not hold, before its revival");
     // Resurrect(resetInventory, attach3D): Anniversary Edition 37321 on flat, SE 36331 for VR (VRAddressOverrides.h).
@@ -1255,14 +1493,36 @@ void Actor::Respawn() noexcept
 
 bool Actor::IsVampireLord() const noexcept
 {
-    return race && race->formID == 0x200283A;
+    return race && GetBeastFormKind(race->formID) == BeastForm::Kind::VampireLord;
+}
+
+uint32_t Actor::GetDawnguardFormId(uint32_t aBaseId) noexcept
+{
+    // The load order is fixed once the game is running, so the plugin is looked up until it is found.
+    static int s_dawnguardIndex = BeastForm::kNotLoaded;
+
+    if (s_dawnguardIndex == BeastForm::kNotLoaded)
+    {
+        const ModManager* pManager = ModManager::Get();
+        const Mod* pDawnguard = pManager ? pManager->GetByName("Dawnguard.esm") : nullptr;
+        if (pDawnguard && pDawnguard->IsLoaded() && !pDawnguard->IsLite())
+            s_dawnguardIndex = pDawnguard->GetId();
+    }
+
+    return BeastForm::DawnguardFormId(s_dawnguardIndex, aBaseId);
+}
+
+BeastForm::Kind Actor::GetBeastFormKind(uint32_t aRaceFormId) noexcept
+{
+    const uint32_t cVampireLordRace = GetDawnguardFormId(BeastForm::kVampireLordRaceBase);
+    return BeastForm::Classify(aRaceFormId, cVampireLordRace ? static_cast<int>(cVampireLordRace >> 24) : BeastForm::kNotLoaded);
 }
 
 extern thread_local bool g_forceAnimation;
 
 void Actor::FixVampireLordModel() noexcept
 {
-    TESBoundObject* pLordArmor = Cast<TESBoundObject>(TESForm::GetById(0x2011a84));
+    TESBoundObject* pLordArmor = Cast<TESBoundObject>(TESForm::GetById(GetDawnguardFormId(BeastForm::kVampireLordArmorBase)));
     if (!pLordArmor)
         return;
 
@@ -1277,7 +1537,6 @@ void Actor::FixVampireLordModel() noexcept
 
     BSFixedString str("isLevitating");
     uint32_t isLevitating = GetAnimationVariableInt(&str);
-    spdlog::critical("isLevitating {}", isLevitating);
 
     // By default, a loaded vampire lord is not levitating.
     if (isLevitating)
@@ -1623,10 +1882,8 @@ void TP_MAKE_THISCALL(HookAddInventoryItem, Actor, TESBoundObject* apItem, Extra
 {
     if (!ScopedInventoryOverride::IsOverriden())
     {
-        auto& modSystem = World::Get().GetModSystem();
-
         Inventory::Entry item{};
-        modSystem.GetServerModId(apItem->formID, item.BaseId);
+        ItemExtraData::SetBase(item, apItem);
         item.Count = aCount;
 
         if (apExtraData)
@@ -1642,10 +1899,8 @@ void* TP_MAKE_THISCALL(HookPickUpObject, Actor, TESObjectREFR* apObject, int32_t
 {
     if (!ScopedInventoryOverride::IsOverriden())
     {
-        auto& modSystem = World::Get().GetModSystem();
-
         Inventory::Entry item{};
-        modSystem.GetServerModId(apObject->baseForm->formID, item.BaseId);
+        ItemExtraData::SetBase(item, apObject->baseForm);
         item.Count = aCount;
 
         if (apObject->GetExtraDataList())
@@ -1668,10 +1923,8 @@ void Actor::PickUpObject(TESObjectREFR* apObject, int32_t aCount, bool aUnk1, fl
 
 void* TP_MAKE_THISCALL(HookDropObject, Actor, void* apResult, TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation)
 {
-    auto& modSystem = World::Get().GetModSystem();
-
     Inventory::Entry item{};
-    modSystem.GetServerModId(apObject->formID, item.BaseId);
+    ItemExtraData::SetBase(item, apObject);
     item.Count = -aCount;
 
     if (apExtraData)
@@ -1713,10 +1966,7 @@ void Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLoca
 {
     ExtraDataList* pExtraData = GetExtraDataFromItem(arEntry);
 
-    ModSystem& modSystem = World::Get().GetModSystem();
-
-    uint32_t objectId = modSystem.GetGameId(arEntry.BaseId);
-    TESBoundObject* pObject = Cast<TESBoundObject>(TESForm::GetById(objectId));
+    TESBoundObject* pObject = ItemExtraData::GetBase(arEntry);
     if (!pObject)
     {
         spdlog::warn("Object to drop not found, {:X}:{:X}.", arEntry.BaseId.ModId, arEntry.BaseId.BaseId);
@@ -1740,6 +1990,160 @@ void Actor::DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int
 
 TP_THIS_FUNCTION(TUpdateDetectionState, void, ActorKnowledge, void*);
 static TUpdateDetectionState* RealUpdateDetectionState = nullptr;
+
+// The NPC copies that saw this game's player during its own crime alarm (CrimeService): the alarm asks the query on its own thread.
+static thread_local CrimeReports::WitnessCollector s_crimeWitnesses;
+
+namespace
+{
+class CrimeReplay;
+thread_local const CrimeReplay* s_pCrimeReplay = nullptr;
+
+// Only the synchronous replay of another player's crime. No guard is kept peaceful on a timer: a later hit must start combat.
+class CrimeReplay
+{
+public:
+    CrimeReplay(Actor* apOffender, const bool aGuardWasAttacked = false) noexcept
+        : m_pPrevious(s_pCrimeReplay)
+        , m_pOffender(apOffender)
+    {
+        const ActorExtension* pExtension = apOffender ? apOffender->GetExtension() : nullptr;
+        if (!pExtension || !pExtension->IsRemotePlayer() || aGuardWasAttacked)
+            return;
+
+        // Include guards the game may alert beyond the report's witnesses. Keep ids, then look them up again after the alarm.
+        if (const ProcessLists* pProcesses = ProcessLists::Get())
+        {
+            for (uint32_t i = 0; i < pProcesses->highActorHandleArray.length; ++i)
+            {
+                Actor* pActor = Cast<Actor>(TESObjectREFR::GetByHandle(pProcesses->highActorHandleArray[i]));
+                if (!LocalGuard(pActor))
+                    continue;
+                Actor* pTarget = pActor->GetCombatTarget();
+                if (pTarget != apOffender)
+                    m_guards.push_back({pActor->formID, pTarget ? pTarget->formID : 0, pActor->IsInCombat()});
+            }
+        }
+        s_pCrimeReplay = this;
+    }
+
+    ~CrimeReplay() noexcept
+    {
+        s_pCrimeReplay = m_pPrevious;
+        for (const Guard& cGuard : m_guards)
+        {
+            Actor* pGuard = Cast<Actor>(TESForm::GetById(cGuard.Id));
+            if (!LocalGuard(pGuard))
+                continue;
+            switch (CrimeReports::GuardCombatAfterCrime(cGuard.InCombat, cGuard.TargetId != 0, pGuard->GetCombatTarget() == m_pOffender))
+            {
+            case CrimeReports::GuardCombat::kStop: pGuard->StopCombat(); break;
+            case CrimeReports::GuardCombat::kRestoreTarget:
+                // Re-aim existing combat without stopping it, including a fight whose target was already empty.
+                pGuard->SetCombatTargetEx(cGuard.TargetId ? Cast<Actor>(TESForm::GetById(cGuard.TargetId)) : nullptr);
+                break;
+            default: break;
+            }
+        }
+    }
+
+    TP_NOCOPYMOVE(CrimeReplay);
+
+    bool Blocks(Actor* apWitness, Actor* apTarget) const noexcept
+    {
+        return apWitness && apTarget == m_pOffender &&
+               std::find_if(m_guards.begin(), m_guards.end(), [apWitness](const Guard& acGuard) { return acGuard.Id == apWitness->formID; }) != m_guards.end();
+    }
+
+private:
+    static bool LocalGuard(Actor* apActor) noexcept
+    {
+        if (!apActor || !apActor->parentCell || !apActor->HasLoadedProcess() || apActor->IsDisabled() || apActor->IsDead() || !apActor->IsGuard())
+            return false;
+        const ActorExtension* pExtension = apActor->GetExtension();
+        return pExtension && !pExtension->IsRemote() && !pExtension->IsPlayer();
+    }
+
+    struct Guard
+    {
+        uint32_t Id;
+        uint32_t TargetId;
+        bool InCombat;
+    };
+
+    const CrimeReplay* m_pPrevious;
+    Actor* m_pOffender;
+    Vector<Guard> m_guards;
+};
+} // namespace
+
+// Actor::RequestDetectionLevel (flat AE 37764, CommonLibSSE-NG; SE/VR 36748), the game's "does this actor see that one". Among its
+// 47 direct callers on 1.7.104 are the crime alarm's witness test (Actor::StealAlarm, AE 37422) and pickpocketing.
+TP_THIS_FUNCTION(TRequestDetectionLevel, int32_t, Actor, Actor* apTarget, uint32_t aPriority);
+static TRequestDetectionLevel* RealRequestDetectionLevel = nullptr;
+
+// An NPC copy asked about this game's player answers with its owner's word: here it sees no one, having no AI.
+int32_t TP_MAKE_THISCALL(HookRequestDetectionLevel, Actor, Actor* apTarget, uint32_t aPriority)
+{
+    // Do not recruit a guard through a replayed crime. Ordinary detection and combat queries outside this call are untouched.
+    if (s_pCrimeReplay && s_pCrimeReplay->Blocks(apThis, apTarget))
+        return 0;
+
+    if (apThis && apTarget && apTarget == PlayerCharacter::Get())
+    {
+        if (const ActorExtension* pExtension = apThis->GetExtension(); pExtension && pExtension->IsRemote() && !pExtension->IsPlayer())
+        {
+            const int32_t cLevel = DetectionService::CopyLevel(apThis->formID);
+            if (cLevel > 0)
+                s_crimeWitnesses.Add(apThis->formID);
+            return cLevel;
+        }
+    }
+
+    return TiltedPhoques::ThisCall(RealRequestDetectionLevel, apThis, apTarget, aPriority);
+}
+
+int32_t Actor::RequestDetectionLevel(Actor* apTarget) noexcept
+{
+    constexpr uint32_t cNormalPriority = 3;
+    if (!RealRequestDetectionLevel || !apTarget)
+        return 0;
+    return TiltedPhoques::ThisCall(RealRequestDetectionLevel, this, apTarget, cNormalPriority);
+}
+
+bool Actor::IsLimbGone(const uint32_t aLimb) noexcept
+{
+    TP_THIS_FUNCTION(TIsLimbGone, bool, Actor, uint32_t aLimb);
+
+    POINTER_SKYRIMSE(TIsLimbGone, s_isLimbGone, 19765, 19338);
+
+    return TiltedPhoques::ThisCall(s_isLimbGone, this, aLimb);
+}
+
+// Actor::Decapitate (flat AE 37639; SE/VR 36631): the head cut off, as a killmove or a mod asks.
+// It returns at once when the head is already off; what it returns goes back to its caller unchanged.
+TP_THIS_FUNCTION(TDecapitate, bool, Actor);
+static TDecapitate* RealDecapitate = nullptr;
+// The function as the game calls it, other mods' hooks included.
+static TDecapitate* GameDecapitate = nullptr;
+
+// A head cut off an actor this game runs is cut off its copies in the other games (StuckArrows).
+bool TP_MAKE_THISCALL(HookDecapitate, Actor)
+{
+    const bool cHadHead = apThis && !apThis->IsLimbGone(StuckArrowStore::kHeadLimb);
+
+    const bool cResult = TiltedPhoques::ThisCall(RealDecapitate, apThis);
+
+    if (cHadHead && apThis->IsLimbGone(StuckArrowStore::kHeadLimb))
+        StuckArrows::OnDecapitated(apThis);
+
+    return cResult;
+}
+
+bool Actor::Decapitate() noexcept
+{
+    return GameDecapitate ? TiltedPhoques::ThisCall(GameDecapitate, this) : false;
+}
 
 void TP_MAKE_THISCALL(HookUpdateDetectionState, ActorKnowledge, void* apState)
 {
@@ -1765,6 +2169,25 @@ void TP_MAKE_THISCALL(HookUpdateDetectionState, ActorKnowledge, void* apState)
     return TiltedPhoques::ThisCall(RealUpdateDetectionState, apThis, apState);
 }
 
+// Actor::StartCombat (SE 37608, AE 38561, VR 0x14062E020): the only place the game makes an actor's combat controller, whatever
+// starts the fight (detection, an alarm, a hit, Papyrus). Being in combat is having that controller, and a stopped one goes only in
+// the actor update a copy skips. So an NPC copy is never given one: its fights are its owner's (see CombatService::ApplyCopyFight).
+TP_THIS_FUNCTION(TStartCombat, bool, Actor, Actor* apTarget, void* apCombatGroup);
+static TStartCombat* RealStartCombat = nullptr;
+
+bool TP_MAKE_THISCALL(HookStartCombat, Actor, Actor* apTarget, void* apCombatGroup)
+{
+    // Same as HookActorProcess: an actor with no extension is not one of ours.
+    const ActorExtension* pExtension = apThis->GetExtension();
+    if (pExtension && !CombatTargets::MayStartOwnCombat(pExtension->IsRemote(), pExtension->IsRemotePlayer()))
+    {
+        spdlog::debug("Combat: copy {:X} starts no fight of its own with {:X}, as its owner runs its fights", apThis->formID, apTarget ? apTarget->formID : 0);
+        return false;
+    }
+
+    return TiltedPhoques::ThisCall(RealStartCombat, apThis, apTarget, apCombatGroup);
+}
+
 struct DialogueItem;
 
 // TODO: This is an AIProcess function
@@ -1784,17 +2207,22 @@ uint64_t TP_MAKE_THISCALL(HookProcessResponse, void, DialogueItem* apVoice, Acto
 
 bool TP_MAKE_THISCALL(HookInitiateMountPackage, Actor, Actor* apMount)
 {
-    // Same as HookActorProcess: an actor with no extension is not one of ours.
+    // Capture ids before the native call. Only an accepted local package is network intent;
+    // neither acceptance nor this event proves that the rider has reached the saddle.
     const ActorExtension* pExtension = apThis->GetExtension();
-    if (apMount && pExtension && pExtension->IsLocal())
-        World::Get().GetRunner().Trigger(MountEvent(apThis->formID, apMount->formID));
+    const bool cReport = apMount && pExtension && pExtension->IsLocal() && !apThis->actorState.IsDeadOrDying() && !apMount->actorState.IsDeadOrDying();
+    const uint32_t cRiderId = apThis->formID;
+    const uint32_t cMountId = apMount ? apMount->formID : 0;
 
     // TEMPORARY: a horse killed in play could still be ridden (its prompt said "Steal"); what the game had of it when a ride began.
     if (apMount && pExtension && pExtension->IsLocal() && (apMount->actorState.LifeState() != LifeStates::kAlive || apMount->GetActorValue(ActorValueInfo::kHealth) <= 0.f))
         spdlog::info("Mount: {:X} starts to ride {:X}, whose life state here is {} (dead {}), health {:.0f}", apThis->formID, apMount->formID,
                      apMount->actorState.LifeState(), apMount->IsDead(), apMount->GetActorValue(ActorValueInfo::kHealth));
 
-    return TiltedPhoques::ThisCall(RealInitiateMountPackage, apThis, apMount);
+    const bool cAccepted = TiltedPhoques::ThisCall(RealInitiateMountPackage, apThis, apMount);
+    if (cAccepted && cReport)
+        World::Get().GetRunner().Trigger(MountEvent(cRiderId, cMountId));
+    return cAccepted;
 }
 
 TP_THIS_FUNCTION(TUnequipObject, void, Actor, void* apUnk1, TESBoundObject* apObject, int32_t aUnk2, void* apUnk3);
@@ -1849,6 +2277,23 @@ float Actor::SpeakSound(const char* pFile, uint32_t* apSoundHandle)
     return cAnswer;
 }
 
+#ifdef SKYRIMVR
+static CopyAnimationQueue s_copyAnimations;
+#endif
+
+void Actor::RunQueuedCopyAnimations() noexcept
+{
+#ifdef SKYRIMVR
+    for (const auto& [cFormId, cStep] : s_copyAnimations.Take())
+    {
+        Actor* pActor = Cast<Actor>(TESForm::GetById(cFormId));
+        const ActorExtension* pExtension = pActor ? pActor->GetExtension() : nullptr;
+        if (pExtension && pExtension->IsRemote() && pActor->GetNiNode())
+            pActor->UpdateAnimation(cStep);
+    }
+#endif
+}
+
 char TP_MAKE_THISCALL(HookActorProcess, Actor, float aDeltaTime)
 {
     // Remote actors are driven by their owner, so their AI doesn't run here. A remote corpse still updates, or its ragdoll never falls.
@@ -1862,26 +2307,22 @@ char TP_MAKE_THISCALL(HookActorProcess, Actor, float aDeltaTime)
     // So is an NPC copy knocked to the floor: its get-up runs here, once its ragdoll has come to rest.
     const ActorExtension* pExtension = apThis->GetExtension();
     const bool cKnockedNpc = pExtension && !pExtension->IsRemotePlayer() && apThis->actorState.IsKnockedDown();
+    const uint64_t cObservedLife = pExtension ? pExtension->ObservedCopyFall.load(std::memory_order_relaxed) : 0;
+    const bool cObservedNpcFall = pExtension && !pExtension->IsRemotePlayer() && cObservedLife && cObservedLife == pExtension->NativeLifeGeneration.load(std::memory_order_relaxed);
+    // A player copy falling or getting up as its owner does (PlayerKnockMirror).
+    const bool cMirroredFall = pExtension && pExtension->IsRemotePlayer() && pExtension->OwnerKnockRuns.load(std::memory_order_relaxed);
 
-    // TEMPORARY: whether this hook ever sees an actor, or only the address of a local smart pointer, and whether it ever skips.
-    static std::atomic<uint32_t> s_calls{0};
-    static std::atomic<uint32_t> s_onStack{0};
-    static std::atomic<uint32_t> s_actors{0};
-    static std::atomic<uint32_t> s_skips{0};
-    const auto cFromHere = reinterpret_cast<intptr_t>(apThis) - reinterpret_cast<intptr_t>(&pExtension);
-    s_onStack += cFromHere > -0x10000 && cFromHere < 0x10000 ? 1 : 0;
-    s_actors += pExtension ? 1 : 0;
-    s_skips += pExtension && pExtension->IsRemote() && !apThis->actorState.IsDeadOrDying() && !apThis->actorState.IsBleedingOut() && !cKnockedNpc ? 1 : 0;
-    if (const uint32_t cCalls = ++s_calls; cCalls <= 5 || cCalls % 1000 == 0)
-        spdlog::info("ActorProcessDiag: of {} calls, {} had their argument on the stack, {} saw an actor, {} skipped it", cCalls, s_onStack.load(), s_actors.load(), s_skips.load());
-
-    if (pExtension && pExtension->IsRemote() && !apThis->actorState.IsDeadOrDying() && !apThis->actorState.IsBleedingOut() && !cKnockedNpc)
+    if (pExtension && pExtension->IsRemote() && !apThis->actorState.IsDeadOrDying() && !apThis->actorState.IsBleedingOut() && !cKnockedNpc && !cObservedNpcFall && !cMirroredFall)
     {
         if (apThis->currentProcess)
         {
             if (auto* pController = apThis->currentProcess->GetCharController())
                 pController->UpdateStepTiming(aDeltaTime);
         }
+#ifdef SKYRIMVR
+        // Not here: its graph update would wait for the physics world while holding the graph a physics step may be reading.
+        s_copyAnimations.Add(apThis->formID, aDeltaTime);
+#endif
         return 0;
     }
 
@@ -1915,8 +2356,8 @@ bool TP_MAKE_THISCALL(HookIsFleeing, Actor)
     return TiltedPhoques::ThisCall(RealIsFleeing, apThis);
 }
 
-// The crime alarm (Actor::StealAlarm, SE 36427) walks every actor that might have witnessed the offence.
-// It reads each one's flags at Actor+0xE8, and can crash at +0x12D9 on a null actor in the game's own list.
+// The crime alarm (Actor::StealAlarm, flat AE 37422, SE/VR 36427) walks every actor that might have witnessed the offence.
+// It reads each one, and can crash on a null actor in the game's own list (seen on VR, reading +0xE8 through a null RCX).
 // This happens while connected, with actors just handed to the other player or deleted here as temporaries.
 //
 // The alarm is allowed to fail rather than end the session. The hit lands either way; only that crime report is lost, and it is logged.
@@ -1940,13 +2381,81 @@ static bool CallStealAlarm(Actor* apThis, TESObjectREFR* apRef, TESForm* apObjec
 
 void TP_MAKE_THISCALL(HookStealAlarm, Actor, TESObjectREFR* apRef, TESForm* apObject, int32_t aNum, int32_t aTotal, TESForm* apOwner, bool aAllowWarning)
 {
+    // This game's player's own theft: the NPC copies that see them now are collected as the alarm asks about each witness.
+    const bool cReport = apThis && CrimeReports::ShouldReport(apThis == PlayerCharacter::Get(), false);
+    if (cReport)
+        s_crimeWitnesses.Start();
+
     CrashGuard::Enter();
     const bool cSurvived = CallStealAlarm(apThis, apRef, apObject, aNum, aTotal, apOwner, aAllowWarning);
     CrashGuard::Leave();
+    s_crimeWitnesses.Stop();
+
+    // Seen by copies: the games that run those NPCs run their own alarm for it (CrimeService). Seen only by this game's own NPCs,
+    // or by no one: they react here, and nothing is sent.
+    if (cReport && cSurvived && s_crimeWitnesses.Count())
+        CrimeService::OnLocalCrime(
+            CrimeReports::Kind::kTheft, 0, apRef ? apRef->formID : 0, apObject ? apObject->formID : 0, aNum, aTotal, apOwner ? apOwner->formID : 0, s_crimeWitnesses.Ids(),
+            s_crimeWitnesses.Count());
 
     if (!cSurvived)
         spdlog::warn("Crime alarm walked a null actor and was skipped: offender {:X}, witness {:X}, object {:X}, count {} of {}. The blow still landed, the crime was not reported.",
                      apThis ? apThis->formID : 0, apRef ? apRef->formID : 0, apObject ? apObject->formID : 0, aNum, aTotal);
+}
+
+// The game's other crime alarms, found with Ghidra on flat 1.7.104 and by their exception-table entries on VR:
+// the assault alarm (AE 37424, the entry Papyrus SendAssaultAlarm calls with the player as attacker; VR 36429),
+// the murder alarm (AE 37426, VR 36431) and the pickpocket alarm (AE 37423, VR 36428).
+// Only the assault alarm asks its witnesses about the attacker it is given; the other two ask about this game's player only.
+TP_THIS_FUNCTION(TAssaultAlarm, void, Actor, Actor* apAttacker, bool aAllowWarning);
+static TAssaultAlarm* RealAssaultAlarm = nullptr;
+TP_THIS_FUNCTION(TMurderAlarm, void, Actor, Actor* apKiller);
+static TMurderAlarm* RealMurderAlarm = nullptr;
+TP_THIS_FUNCTION(TPickpocketAlarm, void, Actor, TESObjectREFR* apVictim, TESForm* apItem, int32_t aCount);
+static TPickpocketAlarm* RealPickpocketAlarm = nullptr;
+
+// Set while this game runs the assault alarm for another player's blow, so that alarm is not reported back.
+static thread_local bool s_replayingAssault = false;
+
+// Runs one of the alarms with the NPC copies that saw this game's player collected, and reports the crime when some did.
+template <class TCall> static void CollectWitnesses(const bool aReport, const CrimeReports::Kind aKind, const uint32_t aVictimId, TCall&& aCall) noexcept
+{
+    if (aReport)
+        s_crimeWitnesses.Start();
+    aCall();
+    s_crimeWitnesses.Stop();
+    if (aReport && s_crimeWitnesses.Count())
+        CrimeService::OnLocalCrime(aKind, aVictimId, 0, 0, 0, 0, 0, s_crimeWitnesses.Ids(), s_crimeWitnesses.Count());
+}
+
+void TP_MAKE_THISCALL(HookAssaultAlarm, Actor, Actor* apAttacker, bool aAllowWarning)
+{
+    const bool cReport = apAttacker && CrimeReports::ShouldReport(apAttacker == PlayerCharacter::Get(), s_replayingAssault);
+    CollectWitnesses(cReport, CrimeReports::Kind::kAssault, apThis ? apThis->formID : 0, [&] { TiltedPhoques::ThisCall(RealAssaultAlarm, apThis, apAttacker, aAllowWarning); });
+}
+
+void TP_MAKE_THISCALL(HookMurderAlarm, Actor, Actor* apKiller)
+{
+    const bool cReport = apKiller && CrimeReports::ShouldReport(apKiller == PlayerCharacter::Get(), false);
+    CollectWitnesses(cReport, CrimeReports::Kind::kMurder, apThis ? apThis->formID : 0, [&] { TiltedPhoques::ThisCall(RealMurderAlarm, apThis, apKiller); });
+}
+
+void TP_MAKE_THISCALL(HookPickpocketAlarm, Actor, TESObjectREFR* apVictim, TESForm* apItem, int32_t aCount)
+{
+    const bool cReport = apThis && CrimeReports::ShouldReport(apThis == PlayerCharacter::Get(), false);
+    CollectWitnesses(
+        cReport, CrimeReports::Kind::kPickpocket, apVictim ? apVictim->formID : 0, [&] { TiltedPhoques::ThisCall(RealPickpocketAlarm, apThis, apVictim, apItem, aCount); });
+}
+
+bool Actor::ReplayAssault(Actor* apAttacker) noexcept
+{
+    if (!RealAssaultAlarm || !apAttacker)
+        return false;
+    const CrimeReplay cReplay(apAttacker, CrimeReports::GuardWasAttacked(CrimeReports::Kind::kAssault, IsGuard()));
+    s_replayingAssault = true;
+    HookAssaultAlarm(this, apAttacker, false);
+    s_replayingAssault = false;
+    return true;
 }
 
 #ifdef SKYRIMVR
@@ -2003,7 +2512,8 @@ static void HookMovementDirection(const MovementTarget* apTarget, const NiPoint3
 
     static std::atomic<uint64_t> s_next{0};
     if (SecondPassed(s_next))
-        spdlog::warn("NonFinite: a movement target at ({}) for the actor at ({}), facing ({:.2f}, {:.2f}), not followed", apTarget->Position, *apPosition, apAngles->x, apAngles->z);
+        spdlog::debug(
+            "NonFinite: a movement target at ({}) for the actor at ({}), facing ({:.2f}, {:.2f}), not followed", apTarget->Position, *apPosition, apAngles->x, apAngles->z);
 }
 
 static void HookNonFiniteGuards() noexcept
@@ -2031,7 +2541,6 @@ static void HookNonFiniteGuards() noexcept
 static TiltedPhoques::Initializer s_actorHooks(
     []()
     {
-        POINTER_SKYRIMSE(TActorProcess, s_actorProcess, 37356, 37356);
         POINTER_SKYRIMSE(TSetPosition, s_setPosition, 19790, 19790);
         POINTER_SKYRIMSE(TRemoveSpell, s_removeSpell, 38717, 37772);
         POINTER_SKYRIMSE(TCharacterConstructor, s_characterCtor, 40245, 40245);
@@ -2054,18 +2563,41 @@ static TiltedPhoques::Initializer s_actorHooks(
         POINTER_SKYRIMSE(TSpeakSoundFunction, s_speakSoundFunction, 37542, 37542);
         POINTER_SKYRIMSE(TAddDeathItems, addDeathItems, 37198, 36218);
         POINTER_SKYRIMSE(TIsFleeing, isFleeing, 37577, 37577);
-#ifdef SKYRIMVR
-        POINTER_SKYRIMSE(TStealAlarm, s_stealAlarm, 36427, 36427);
+        POINTER_SKYRIMSE(TStealAlarm, s_stealAlarm, 37422, 36427);
         RealStealAlarm = s_stealAlarm.Get();
         if (RealStealAlarm)
         {
+            // The function's bounds from the game's own unwind table, then the start the hook moves out.
+            DWORD64 imageBase = 0;
+            const uintptr_t cBegin = reinterpret_cast<uintptr_t>(RealStealAlarm);
+            const PRUNTIME_FUNCTION cpEntry = RtlLookupFunctionEntry(cBegin, &imageBase, nullptr);
             TP_HOOK(&RealStealAlarm, HookStealAlarm);
+            CrashGuard::SetCrimeAlarm(cBegin, cpEntry ? imageBase + cpEntry->EndAddress : cBegin + 0x40, reinterpret_cast<uintptr_t>(RealStealAlarm));
         }
         else
-            spdlog::warn("Crime alarm guard off: SE 36427 did not resolve");
-#endif
+            spdlog::warn("Crime alarm guard off: Actor::StealAlarm did not resolve");
 
+        POINTER_SKYRIMSE(TAssaultAlarm, s_assaultAlarm, 37424, 36429);
+        POINTER_SKYRIMSE(TMurderAlarm, s_murderAlarm, 37426, 36431);
+        POINTER_SKYRIMSE(TPickpocketAlarm, s_pickpocketAlarm, 37423, 36428);
+        RealAssaultAlarm = s_assaultAlarm.Get();
+        RealMurderAlarm = s_murderAlarm.Get();
+        RealPickpocketAlarm = s_pickpocketAlarm.Get();
+        if (RealAssaultAlarm)
+            TP_HOOK(&RealAssaultAlarm, HookAssaultAlarm);
+        if (RealMurderAlarm)
+            TP_HOOK(&RealMurderAlarm, HookMurderAlarm);
+        if (RealPickpocketAlarm)
+            TP_HOOK(&RealPickpocketAlarm, HookPickpocketAlarm);
+
+#ifdef SKYRIMVR
+        // AE 37356 is SE 36365, the actor update, on VR.
+        POINTER_SKYRIMSE(TActorProcess, s_vrActorUpdate, 37356, 36365);
+        RealActorProcess = s_vrActorUpdate.Get();
+#else
+        POINTER_SKYRIMSE(TActorProcess, s_actorProcess, 37356, 37356);
         RealActorProcess = s_actorProcess.Get();
+#endif
         RealSetPosition = s_setPosition.Get();
         RealRemoveSpell = s_removeSpell.Get();
         FUNC_GetActorLocation = s_GetActorLocation.Get();
@@ -2077,9 +2609,11 @@ static TiltedPhoques::Initializer s_actorHooks(
         // Character::HitTarget, the same function PLANCK calls for a melee hit (VR 0x631AF0).
         POINTER_SKYRIMSE(THitTarget, s_hitTarget, 37673, 37673);
         RealHitTarget = s_hitTarget.Get();
-        POINTER_SKYRIMSE(TCanBeKilledBy, s_canBeKilledBy, 0, 36247);
-        RealCanBeKilledBy = s_canBeKilledBy.Get();
 #endif
+        POINTER_SKYRIMSE(TCanBeKilledBy, s_canBeKilledBy, 37229, 36247);
+        RealCanBeKilledBy = s_canBeKilledBy.Get();
+        POINTER_SKYRIMSE(TStartCombat, s_startCombat, 38561, 38561);
+        RealStartCombat = s_startCombat.Get();
         RealApplyActorEffect = s_applyActorEffect.Get();
         RealRegenAttributes = s_regenAttributes.Get();
         RealAddInventoryItem = s_addInventoryItem.Get();
@@ -2102,9 +2636,21 @@ static TiltedPhoques::Initializer s_actorHooks(
         TP_HOOK(&RealDamageActor, HookDamageActor);
 #ifdef SKYRIMVR
         TP_HOOK(&RealHitTarget, HookHitTarget);
-        TP_HOOK(&RealCanBeKilledBy, HookCanBeKilledBy);
         HookNonFiniteGuards();
 #endif
+        TP_HOOK(&RealCanBeKilledBy, HookCanBeKilledBy);
+        TP_HOOK(&RealStartCombat, HookStartCombat);
+        // The game's own revive, whichever way it is reached (a script, a console command or Respawn): hook the virtual itself,
+        // so every one of them ends the fall the copy was left in.
+        POINTER_SKYRIMSE(void*, s_actorVtable, 207511, 260538);
+#ifdef SKYRIMVR
+        constexpr size_t cResurrectSlot = 0xAD;
+#else
+        constexpr size_t cResurrectSlot = 0xAB;
+#endif
+        RealNativeResurrect = s_actorVtable.Get() ? reinterpret_cast<TNativeResurrect*>(s_actorVtable.Get()[cResurrectSlot]) : nullptr;
+        if (RealNativeResurrect)
+            TP_HOOK(&RealNativeResurrect, HookNativeResurrect);
         TP_HOOK(&RealApplyActorEffect, HookApplyActorEffect);
         TP_HOOK(&RealRegenAttributes, HookRegenAttributes);
         TP_HOOK(&RealAddInventoryItem, HookAddInventoryItem);
@@ -2117,4 +2663,16 @@ static TiltedPhoques::Initializer s_actorHooks(
         TP_HOOK(&RealSpeakSoundFunction, HookSpeakSoundFunction);
         TP_HOOK(&RealAddDeathItems, HookAddDeathItems);
         TP_HOOK(&RealIsFleeing, HookIsFleeing);
+
+        POINTER_SKYRIMSE(TRequestDetectionLevel, s_requestDetectionLevel, 37764, 36748);
+        RealRequestDetectionLevel = s_requestDetectionLevel.Get();
+        if (RealRequestDetectionLevel)
+            TP_HOOK(&RealRequestDetectionLevel, HookRequestDetectionLevel);
+
+        POINTER_SKYRIMSE(TDecapitate, s_decapitate, 37639, 36631);
+        RealDecapitate = s_decapitate.Get();
+        GameDecapitate = RealDecapitate;
+        if (RealDecapitate)
+            TP_HOOK(&RealDecapitate, HookDecapitate);
+
     });

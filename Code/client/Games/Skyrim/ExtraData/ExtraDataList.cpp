@@ -69,6 +69,36 @@ bool ExtraDataList::Add(ExtraDataType aType, BSExtraData* apNewData)
     return true;
 }
 
+bool ExtraDataList::Remove(ExtraDataType aType, BSExtraData* apNewData)
+{
+    if (!apNewData || !Contains(aType))
+        return false;
+
+    lock.LockForWrite();
+
+    BSExtraData** ppLink = &data;
+    while (*ppLink && *ppLink != apNewData)
+        ppLink = &(*ppLink)->next;
+
+    const bool cFound = *ppLink != nullptr;
+    if (cFound)
+    {
+        *ppLink = apNewData->next;
+        SetType(aType, true);
+    }
+
+    lock.UnlockForWrite();
+
+    // The game's own destructor, then its heap, as the game frees extra data.
+    if (cFound)
+    {
+        apNewData->~BSExtraData();
+        Memory::Free(apNewData);
+    }
+
+    return cFound;
+}
+
 uint32_t ExtraDataList::GetCount() const
 {
     uint32_t count = 0;

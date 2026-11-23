@@ -125,7 +125,6 @@ private:
     int m_startAttempts = 0;
     std::chrono::steady_clock::time_point m_nextStartAttempt{};
     bool m_visible = false;
-    bool m_logNextUpload = false;
     uint16_t m_mouseX = 0;
     uint16_t m_mouseY = 0;
 };

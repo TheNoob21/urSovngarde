@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Structs/ActionEvent.h>
+#include <atomic>
 
 struct ActorExtension
 {
@@ -10,7 +11,8 @@ struct ActorExtension
         kPlayer = 1 << 1,
         kFollowerCopy = 1 << 2,
         kHiddenHere = 1 << 3,
-        kOtherGame = 1 << 4,
+        kOthersFollower = 1 << 4,
+        kOtherGame = 1 << 5,
     };
 
     enum class ReconciliationStage
@@ -27,6 +29,8 @@ struct ActorExtension
     bool IsLocalPlayer() const noexcept;
     //! A temporary actor showing another player's follower.
     bool IsFollowerCopy() const noexcept;
+    //! Another player's follower, on a copy or, without the save guard (flat), on this game's own reference.
+    bool IsOthersFollower() const noexcept;
     //! A reference of this game's own disabled while a copy stands in for it; a save still has it enabled.
     bool IsHiddenHere() const noexcept;
     //! Another player's copy whose player plays the other game: flat Skyrim against Skyrim VR (PvpRules).
@@ -34,6 +38,7 @@ struct ActorExtension
     void SetRemote(bool aSet) noexcept;
     void SetPlayer(bool aSet) noexcept;
     void SetFollowerCopy(bool aSet) noexcept;
+    void SetOthersFollower(bool aSet) noexcept;
     void SetHiddenHere(bool aSet) noexcept;
     void SetOtherGame(bool aSet) noexcept;
 
@@ -45,6 +50,26 @@ struct ActorExtension
     //! Its owner's game, this one or another, revived it since its last death, as this game last heard.
     //! An announcement from here carries it (CharacterService::BuildActorData).
     bool RevivedSinceDeath = false;
+    // The revive count (NativeLifeGeneration) the copy was seen to fall in, or 0. Set on the main thread; actor jobs only read it,
+    // so that the game's own get-up can run.
+    std::atomic<uint64_t> ObservedCopyFall{0};
+    // How many times the game has revived this actor, counting a script reviving one that is up already.
+    std::atomic<uint64_t> NativeLifeGeneration{1};
+    // A copy's owner's last word of its NPC (CopyBodyRules::OwnerWord), written by InterpolationSystem on the main thread.
+    // The game may end the copy's bleedout from an actor job, which reads it (HookPerformAction).
+    std::atomic<uint8_t> OwnerWordOfCopy{0};
+    // The copy's graph kneels while its life says alive (CopyBodyRules::KneelsInGraphOnly), until it gets up.
+    std::atomic<bool> KneelsInGraph{false};
+    // Whether the game's own end of the copy's bleedout played its stop: 0 not tried since it was cleared, 1 played, 2 refused.
+    std::atomic<uint8_t> EngineStopPlayed{0};
+    // The tick of its owner's latest "bleedOutStart" replayed on the copy, or 0: an owner's stop from before it belongs to an earlier fall.
+    std::atomic<uint64_t> OwnerFallTick{0};
+    // A player copy mirroring its owner's fall (PlayerKnockMirror): its process runs so that the game's fall and get-up play.
+    // Written by InterpolationSystem on the main thread, read by HookActorProcess.
+    std::atomic<bool> OwnerKnockRuns{false};
+
+    //! Clears the copy's bleedout recovery above: it changed hands, was removed, revived, or the session ended.
+    void ForgetCopyBleedout() noexcept;
     //! An NPC copy made from a spawn whose 3D step has not run yet (CharacterService::RunRemoteUpdates); a death in between is logged (SpawnDeathDiag).
     bool AwaitingFirst3D = false;
     //! A copy of another player's summon, marked here as commanded by this game's player so it turns on no one.

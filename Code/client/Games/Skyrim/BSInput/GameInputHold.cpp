@@ -201,14 +201,15 @@ void Install() noexcept
     // A layout shifted onto another call would be handed something that is not the event list.
     if (!pCall || !PatchCheck::Is(pCall - 8, {0x48, 0x89, 0x4C, 0x24, 0x40, 0x48, 0x8B, 0xCE, 0xE8}))
     {
-        spdlog::error("GameInputHold: the input poll's hand-off to the game is not the expected code ({}); the game's input is not held while the menu is open",
-                      pCall ? PatchCheck::Bytes(pCall - 8, 13) : std::string("no address"));
+        spdlog::debug(
+            "GameInputHold: the input poll's hand-off to the game is not the expected code ({}); the game's input is not held while the menu is open",
+            pCall ? PatchCheck::Bytes(pCall - 8, 13) : std::string("no address"));
         return;
     }
     // SKSE hooks the same call first: its hook is what this one calls, so its input sinks get what the game gets.
     s_dispatch = TiltedPhoques::GetCall<TDispatch*>(pCall);
     TiltedPhoques::PutCall(pCall, &HookDispatch);
-    spdlog::info("GameInputHold: installed on the input poll's hand-off to the game, before {}", ModuleImage::NameOf(reinterpret_cast<const void*>(s_dispatch)));
+    spdlog::debug("GameInputHold: installed on the input poll's hand-off to the game, before {}", ModuleImage::NameOf(reinterpret_cast<const void*>(s_dispatch)));
 }
 
 /**
@@ -220,6 +221,7 @@ void SetHeld(const bool aHeld) noexcept
 {
     if (s_held.exchange(aHeld) == aHeld)
         return;
-    spdlog::info(aHeld ? "GameInputHold: the game's input is held while the menu is open" : "GameInputHold: the game takes its input again; buttons pressed in the menu count once let go");
+    spdlog::debug(
+        aHeld ? "GameInputHold: the game's input is held while the menu is open" : "GameInputHold: the game takes its input again; buttons pressed in the menu count once let go");
 }
 } // namespace GameInputHold

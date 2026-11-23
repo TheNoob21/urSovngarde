@@ -14,6 +14,8 @@
 
 #include <Structs/ServerSettings.h>
 
+#include <ServerIdIndex.h>
+
 struct World : entt::registry
 {
     World();
@@ -45,10 +47,20 @@ struct World : entt::registry
 
     [[nodiscard]] uint64_t GetTick() const noexcept;
 
+    //! The entity with a server id: the actor this game runs, else its copy, else the object.
+    [[nodiscard]] std::optional<entt::entity> FindByServerId(uint32_t aServerId) const noexcept { return m_serverIds.Find(aServerId); }
+    //! The entity whose LocalComponent, RemoteComponent or ObjectComponent (aKind) has the server id.
+    [[nodiscard]] std::optional<entt::entity> FindByServerId(ServerIdIndex::Kind aKind, uint32_t aServerId) const noexcept { return m_serverIds.Find(aKind, aServerId); }
+
     static void Create() noexcept;
     [[nodiscard]] static World& Get() noexcept;
 
 private:
+    template <class TComponent, ServerIdIndex::Kind TKind> void OnServerIdSet(entt::registry& aRegistry, entt::entity aEntity) noexcept;
+    template <ServerIdIndex::Kind TKind> void OnServerIdGone(entt::registry& aRegistry, entt::entity aEntity) noexcept;
+
+    // Kept by the signals of the components that carry a server id, connected before any service is made.
+    ServerIdIndex::Index<entt::entity> m_serverIds;
     entt::dispatcher m_dispatcher;
     RunnerService m_runner;
     TransportService m_transport;

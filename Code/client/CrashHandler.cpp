@@ -4,6 +4,7 @@
 #include <Games/Skyrim/Watches/EyeBoneWatch.h>
 #include <BranchInfo.h>
 #include "CrashHandler.h"
+#include <LogPolicy.h>
 #include <DbgHelp.h>
 #include <Windows.h>
 #include <TlHelp32.h>
@@ -23,9 +24,25 @@
 #include <strsafe.h>
 #include <Games/Memory.h>
 #include <Helpers/SmallDump.h>
+#include <Helpers/CrashDumpDirectory.h>
 
 using time_point = std::chrono::system_clock::time_point;
 
+namespace
+{
+// The termination hook and watchdog can run after static destructors.
+struct CrashOutputs
+{
+    CrashDumps::Directory m_directory;
+    CrashDumps::History<1> m_fullDumps;
+    CrashDumps::History<3> m_smallDumps;
+};
+CrashOutputs& Outputs()
+{
+    static auto* outputs = new CrashOutputs;
+    return *outputs;
+}
+} // namespace
 std::string SerializeTimePoint(const time_point& time, const std::string& format)
 {
     std::time_t tt = std::chrono::system_clock::to_time_t(time);
@@ -242,6 +259,14 @@ static void LogCrashModule(PEXCEPTION_POINTERS apInfo) noexcept
 // Logs registers and a raw stack scan, because minidumps of this process are mostly unusable.
 // A real stack walk needs unwind info, which the custom-loaded game image does not have.
 // Scanning the stack for pointers into executable memory recovers the return addresses, with some false positives.
+// The loader's own flag: set once the process has begun to unload its DLLs, which the game's hooked exit calls do not see.
+static bool LoaderShuttingDown() noexcept
+{
+    using TShutdownInProgress = BOOLEAN(NTAPI)();
+    static const auto s_pFn = reinterpret_cast<TShutdownInProgress*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress"));
+    return s_pFn && s_pFn();
+}
+
 static void LogCrashContext(PEXCEPTION_POINTERS pExceptionInfo)
 {
     const auto* pRecord = pExceptionInfo->ExceptionRecord;
@@ -315,6 +340,7 @@ static void LogCrashContext(PEXCEPTION_POINTERS pExceptionInfo)
 
 namespace
 {
+#ifdef SKYRIMVR
 //! A stand-in for the missing actor the crime alarm walks into: every field reads zero and every virtual call returns zero.
 //! Built once, on first use.
 void* NullActorDecoy() noexcept
@@ -341,6 +367,7 @@ void* NullActorDecoy() noexcept
     }();
     return s_pDecoy;
 }
+#endif
 } // namespace
 
 namespace CrashGuard
@@ -358,6 +385,22 @@ void Leave() noexcept
 bool Inside() noexcept
 {
     return s_depth > 0;
+}
+
+static std::atomic<uintptr_t> s_alarmBegin{0};
+static std::atomic<uintptr_t> s_alarmEnd{0};
+static std::atomic<uintptr_t> s_alarmMovedStart{0};
+void SetCrimeAlarm(uintptr_t aBegin, uintptr_t aEnd, uintptr_t aMovedStart) noexcept
+{
+    s_alarmBegin = aBegin;
+    s_alarmEnd = aEnd;
+    s_alarmMovedStart = aMovedStart;
+}
+bool InCrimeAlarm(uintptr_t aAddress) noexcept
+{
+    // The moved start is the few instructions a hook copies out, then a jump back: well under 64 bytes.
+    const uintptr_t cMoved = s_alarmMovedStart;
+    return (aAddress >= s_alarmBegin && aAddress < s_alarmEnd) || (cMoved && aAddress >= cMoved && aAddress < cMoved + 64);
 }
 } // namespace CrashGuard
 
@@ -448,20 +491,24 @@ BOOL CALLBACK CrashDumpCallback(PVOID, const PMINIDUMP_CALLBACK_INPUT apInput, P
 
 LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
 {
-    // A fault inside a guarded section is recovered further up this thread's stack, so it is not reported.
-    if (pExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && CrashGuard::Inside())
+    // While the game exits its statics are being destroyed, the lock below among them; locking it then throws, and that
+    // exception comes back here, until the stack runs out. Nothing is reported while the game exits anyway.
+    if (IsProcessExiting())
         return EXCEPTION_CONTINUE_SEARCH;
 
-    // The crime alarm (Actor::StealAlarm) can meet an empty actor slot and read its flags at +0xE8 through a null RCX.
+#ifdef SKYRIMVR
+    // The crime alarm (Actor::StealAlarm) can meet an empty actor slot and read it at +0xE8 through a null RCX (seen on VR).
     // That code was relocated by a hook and has no unwind data, so no __try can catch it.
+    // VR only: on flat no actor read is in the moved code, and the hook's __try handles a fault in the body.
+    // Checked before the guarded-section return below: the hook enters the guard first, and the moved start has no unwind data.
+    // Only a fault in the crime alarm's own code is recovered: elsewhere the same read is another bug, and stays a crash.
     // The read gets a zeroed stand-in and the walk finishes; what leaves the slot empty is unknown.
     {
         const auto& record = *pExceptionInfo->ExceptionRecord;
         static std::atomic<uint32_t> s_recovered{0};
         constexpr uint32_t cMaxRecoveries = 64; // a genuine loop still surfaces instead of being papered over
-        if (record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record.NumberParameters >= 2 &&
-            record.ExceptionInformation[0] == 0 /* a read */ && record.ExceptionInformation[1] == 0xE8 /* of null + 0xE8 */ &&
-            pExceptionInfo->ContextRecord->Rcx == 0)
+        if (record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record.NumberParameters >= 2 && record.ExceptionInformation[0] == 0 /* a read */ &&
+            record.ExceptionInformation[1] == 0xE8 /* of null + 0xE8 */ && pExceptionInfo->ContextRecord->Rcx == 0 && CrashGuard::InCrimeAlarm(pExceptionInfo->ContextRecord->Rip))
         {
             const uint32_t count = ++s_recovered;
             void* pDecoy = count <= cMaxRecoveries ? NullActorDecoy() : nullptr;
@@ -475,6 +522,11 @@ LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
             }
         }
     }
+#endif
+
+    // A fault inside a guarded section is recovered further up this thread's stack, so it is not reported.
+    if (pExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && CrashGuard::Inside())
+        return EXCEPTION_CONTINUE_SEARCH;
 
     // One report per exception type, so a recovered access violation does not use up the one for a /GS failure.
     static int alreadyCrashedAV = 0;
@@ -492,8 +544,8 @@ LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
     // Access violations, and /GS stack cookie failures (STATUS_STACK_BUFFER_OVERRUN).
     if (isNewAV || isNewGS)
     {
-        spdlog::critical (__FUNCTION__ ": crash occurred!"); 
-        
+        spdlog::critical(__FUNCTION__ ": crash occurred{}!", LogPolicy::CrashWhen(LoaderShuttingDown()));
+
         spdlog::error(__FUNCTION__ ": exception code is {:x}, at address {}, flags {:x} ",
                       pExceptionInfo->ExceptionRecord->ExceptionCode,
                       pExceptionInfo->ExceptionRecord->ExceptionAddress,
@@ -530,18 +582,21 @@ LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
             CollectCrashObjects(pExceptionInfo);
             MINIDUMP_CALLBACK_INFORMATION smallCallback{};
             smallCallback.CallbackRoutine = &CrashDumpCallback;
-            const auto logs = TiltedPhoques::GetPath() / "logs";
             const auto name = "crash_" + SerializeTimePoint(std::chrono::system_clock::now(), "UTC_%Y-%m-%d_%H-%M-%S") + ".small.dmp";
-            DWORD smallError = 0;
+            const HANDLE file = Outputs().m_directory.CreateFileForRun(name);
+            DWORD smallError = file == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
             // A second, smaller pass (when the first is too big to send) needs the crash objects handed out again.
-            const uint64_t smallSize = SmallDump::Write(logs / name, pExceptionInfo, &smallCallback, smallError, []() noexcept { g_extraNext = 0; });
+            const uint64_t smallSize = file == INVALID_HANDLE_VALUE ? 0 : SmallDump::Write(file, pExceptionInfo, &smallCallback, smallError, []() noexcept { g_extraNext = 0; });
             if (smallSize)
             {
+                Outputs().m_smallDumps.Keep(file);
                 spdlog::critical(__FUNCTION__ ": small crash dump {} ({} KB)", name, smallSize / 1024);
-                SmallDump::Prune(logs);
             }
             else
+            {
+                CrashDumps::Discard(file);
                 spdlog::critical(__FUNCTION__ ": small crash dump could not be written (error {:#x})", smallError);
+            }
         }
         catch (...) // best effort, like the full dump
         {
@@ -560,7 +615,6 @@ LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
             try
             {
                 MINIDUMP_EXCEPTION_INFORMATION M;
-                char dumpPath[MAX_PATH];
 
                 M.ThreadId = GetCurrentThreadId();
                 M.ExceptionPointers = pExceptionInfo;
@@ -570,16 +624,7 @@ LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
                 oss << "crash_" << SerializeTimePoint(std::chrono::system_clock::now(), "UTC_%Y-%m-%d_%H-%M-%S")
                     << ".dmp";
 
-                GetModuleFileNameA(NULL, dumpPath, sizeof(dumpPath));
-                std::filesystem::path modulePath(dumpPath);
-                auto subPath = modulePath.parent_path();
-
-                CrashHandler::RemovePreviousDump(subPath);
-
-                subPath /= oss.str();
-
-                hDumpFile = CreateFileA(subPath.string().c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                                        FILE_ATTRIBUTE_NORMAL, NULL);
+                hDumpFile = Outputs().m_directory.CreateFileForRun(oss.str());
                 if (hDumpFile == INVALID_HANDLE_VALUE)
                     dumpError = GetLastError();
 
@@ -606,18 +651,20 @@ LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
             {
             }
 
-            // CreateFileA fails with INVALID_HANDLE_VALUE, not NULL.
             if (hDumpFile == INVALID_HANDLE_VALUE)
                 spdlog::critical(__FUNCTION__ ": coredump file could not be created (error {}).", dumpError);
+            else if (dumpWritten)
+            {
+                Outputs().m_fullDumps.Keep(hDumpFile);
+                spdlog::critical(__FUNCTION__ ": coredump created -> flush logs.");
+            }
             else
             {
-                CloseHandle(hDumpFile);
-                if (dumpWritten)
-                    spdlog::critical(__FUNCTION__ ": coredump created -> flush logs.");
-                else
-                    spdlog::critical(__FUNCTION__ ": MiniDumpWriteDump failed (error {:#x}) -> rely on the logged "
-                                     "crash context above.",
-                                     dumpError);
+                CrashDumps::Discard(hDumpFile);
+                spdlog::critical(
+                    __FUNCTION__ ": MiniDumpWriteDump failed (error {:#x}) -> rely on the logged "
+                                 "crash context above.",
+                    dumpError);
             }
         }
 
@@ -948,7 +995,8 @@ std::string ThreadOwner(const DWORD aThreadId) noexcept
 }
 
 // Logs where this process's threads started, most common first: a start address names the module that owns a thread.
-void LogThreadStarts(const uint32_t aCount) noexcept
+// aReadOwners: also read the owners of the biggest group, which suspends those threads (not when thread reads are off).
+void LogThreadStarts(const uint32_t aCount, const bool aReadOwners) noexcept
 {
     using NtQueryInformationThread_t = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
     static const auto s_query = reinterpret_cast<NtQueryInformationThread_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
@@ -1005,7 +1053,7 @@ void LogThreadStarts(const uint32_t aCount) noexcept
 
     // The biggest group may start in ucrtbase's thread starter, which names no owner.
     // Threads spread over the whole group then show which module runs them.
-    if (!sorted.empty() && sorted[0].second >= 100)
+    if (aReadOwners && !sorted.empty() && sorted[0].second >= 100)
     {
         const auto& ids = samples[sorted[0].first];
         constexpr size_t cSpread = 24;
@@ -1050,7 +1098,7 @@ std::vector<std::pair<DWORD, uint64_t>> ThreadCpuTimes() noexcept
 // The process ending itself, which no handler sees: one line straight to disk, with who called.
 // A normal quit shows here too, through Engine Fixes' fast exit; the game's own exit removes this hook first and has its `Exit:` line.
 // A game that vanishes with no line of either kind was killed from outside, failed fast, or overflowed its stack.
-wchar_t s_processEndPath[MAX_PATH + 32]{};
+HANDLE s_processEndFile = INVALID_HANDLE_VALUE;
 using TNtTerminateProcess = LONG(NTAPI)(HANDLE, LONG);
 TNtTerminateProcess* s_realTerminateProcess = nullptr;
 
@@ -1077,26 +1125,46 @@ LONG NTAPI HookNtTerminateProcess(HANDLE ahProcess, LONG aStatus)
         }
         if (length > 0)
             length += _snprintf_s(line + length, sizeof(line) - length, _TRUNCATE, "\r\n");
-        HANDLE hFile = CreateFileW(s_processEndPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hFile != INVALID_HANDLE_VALUE)
+        if (s_processEndFile != INVALID_HANDLE_VALUE)
         {
             DWORD written = 0;
-            WriteFile(hFile, line, static_cast<DWORD>(strlen(line)), &written, nullptr);
-            CloseHandle(hFile);
+            WriteFile(s_processEndFile, line, static_cast<DWORD>(strlen(line)), &written, nullptr);
+            FlushFileBuffers(s_processEndFile);
         }
     }
     return s_realTerminateProcess(ahProcess, aStatus);
 }
 
+// Wine stops a thread with a signal, and reading the game's main thread stopped mid-frame that way has ended the game.
+bool UnderWine() noexcept
+{
+    static const bool s_underWine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
+    return s_underWine;
+}
+
+// The watchdog's thread reads below (stall, stutter, and the freeze report's thread reads and dump) are off under Wine:
+// suspending or sampling the game's threads there has ended the game on the Quest.
+bool ThreadReadsWanted() noexcept
+{
+    return !UnderWine();
+}
+
 // Where the game is while it runs slowly, read at that moment.
 // The main thread may only be waiting, so the thread that works the most in the next 100 ms is read too.
+// Under Wine no thread is stopped: only how busy the busiest one was is written.
 void LogSlowFrame(const char* apLabel) noexcept
 {
     static const DWORD s_mainThreadId = FindMainThreadId();
     const DWORD cUpdate = s_updateThreadId.load(std::memory_order_relaxed);
-    LogThread("game's main thread", s_mainThreadId, apLabel, spdlog::level::info);
-    if (cUpdate != s_mainThreadId)
-        LogThread("thread that last ran our update", cUpdate, apLabel, spdlog::level::info);
+    const bool cRead = !UnderWine();
+    if (!cRead)
+        spdlog::debug("{}: threads are not stopped to be read under Wine", apLabel);
+    else
+    {
+        LogThread("game's main thread", s_mainThreadId, apLabel, spdlog::level::info);
+        if (cUpdate != s_mainThreadId)
+            LogThread("thread that last ran our update", cUpdate, apLabel, spdlog::level::info);
+    }
 
     const auto cBefore = ThreadCpuTimes();
     Sleep(100);
@@ -1118,7 +1186,7 @@ void LogSlowFrame(const char* apLabel) noexcept
         }
     }
     spdlog::info("{}: the busiest thread used {} ms of the last 100", apLabel, most / 10000);
-    if (busiest && busiest != s_mainThreadId && busiest != cUpdate)
+    if (cRead && busiest && busiest != s_mainThreadId && busiest != cUpdate)
         LogThread("busiest thread", busiest, apLabel, spdlog::level::info);
 }
 
@@ -1159,7 +1227,7 @@ DWORD WINAPI WatchdogMain(LPVOID) noexcept
         static int64_t s_stallReadForBeat = 0;
         static int64_t s_nextStallMs = 0;
         static int64_t s_stallReads = 0;
-        if (cSince >= 200 && cBeat != s_stallReadForBeat && cNow >= s_nextStallMs && s_stallReads < 8 + (cNow - s_stallsFromMs) / 30000 &&
+        if (ThreadReadsWanted() && cSince >= 200 && cBeat != s_stallReadForBeat && cNow >= s_nextStallMs && s_stallReads < 8 + (cNow - s_stallsFromMs) / 30000 &&
             cNow - s_loadingScreenAtMs.load(std::memory_order_relaxed) >= 60000)
         {
             s_stallReadForBeat = cBeat;
@@ -1181,7 +1249,7 @@ DWORD WINAPI WatchdogMain(LPVOID) noexcept
         // The first look has no second before it to compare with.
         const uint64_t cFramesThisSecond = s_lastFrames ? cFrames - s_lastFrames : 0;
         s_lastFrames = cFrames;
-        if (cFramesThisSecond > 0 && cFramesThisSecond < 15 && cSince < 1000 && cNow >= s_nextStutterMs && s_stutterReads < 12)
+        if (ThreadReadsWanted() && cFramesThisSecond > 0 && cFramesThisSecond < 15 && cSince < 1000 && cNow >= s_nextStutterMs && s_stutterReads < 12)
         {
             ++s_stutterReads;
             s_nextStutterMs = cNow + 20000;
@@ -1201,7 +1269,7 @@ DWORD WINAPI WatchdogMain(LPVOID) noexcept
                 if (const uint32_t cThreads = CountThreads(); cThreads > 500)
                 {
                     s_nextThreadStartsMs = cNow + 300000;
-                    LogThreadStarts(cThreads);
+                    LogThreadStarts(cThreads, ThreadReadsWanted());
                 }
             }
         }
@@ -1218,6 +1286,13 @@ DWORD WINAPI WatchdogMain(LPVOID) noexcept
         ++reportsForBeat;
         spdlog::error("FreezeWatchdog: no frame of ours for {} s (a long loading screen does this too); where the game is:", cSince / 1000);
         LogHealth(cSince);
+        // Under Wine the report stops here by default: suspending the game's threads to read them has ended the game there.
+        if (!ThreadReadsWanted())
+        {
+            spdlog::error("FreezeWatchdog: threads are not read and no freeze dump is written (off under Wine)");
+            spdlog::default_logger()->flush();
+            continue;
+        }
         const DWORD cMain = FindMainThreadId();
         LogThread("game's main thread", cMain);
         const DWORD cUpdate = s_updateThreadId.load(std::memory_order_relaxed);
@@ -1228,11 +1303,11 @@ DWORD WINAPI WatchdogMain(LPVOID) noexcept
         // One file, overwritten by the next freeze, so freezes never fill the folder.
         if (reportsForBeat == 1)
         {
-            const auto cPath = TiltedPhoques::GetPath() / "logs" / "freeze.small.dmp";
-            DWORD error = 0;
+            static const HANDLE file = Outputs().m_directory.CreateFileForRun(L"freeze.small.dmp");
+            DWORD error = file == INVALID_HANDLE_VALUE ? ERROR_OPEN_FAILED : ERROR_SUCCESS;
             // No size target: past it only the writing thread's stack is kept, and that is this watchdog's.
-            if (const uint64_t cSize = SmallDump::Write(cPath, nullptr, nullptr, error, nullptr, UINT64_MAX))
-                spdlog::error("FreezeWatchdog: every thread's stack written to logs\\freeze.small.dmp ({} KB)", cSize / 1024);
+            if (const uint64_t cSize = file == INVALID_HANDLE_VALUE ? 0 : SmallDump::Write(file, nullptr, nullptr, error, nullptr, UINT64_MAX, MiniDumpWithHandleData))
+                spdlog::error("FreezeWatchdog: every thread's stack written to this run's freeze.small.dmp ({} KB)", cSize / 1024);
             else
                 spdlog::error("FreezeWatchdog: the freeze dump could not be written (error {:#x})", error);
         }
@@ -1255,8 +1330,7 @@ void Beat() noexcept
 
 void Start() noexcept
 {
-    const auto cProcessEndPath = TiltedPhoques::GetPath() / "logs" / "process-end.log";
-    wcsncpy_s(s_processEndPath, cProcessEndPath.c_str(), _TRUNCATE);
+    s_processEndFile = Outputs().m_directory.CreateFileForRun(L"process-end.log");
     s_realTerminateProcess = reinterpret_cast<TNtTerminateProcess*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtTerminateProcess"));
     TP_HOOK_IMMEDIATE(&s_realTerminateProcess, HookNtTerminateProcess);
 
@@ -1275,6 +1349,19 @@ void Start() noexcept
 LPTOP_LEVEL_EXCEPTION_FILTER CrashHandler::m_pUnhandled;
 CrashHandler::CrashHandler()
 {
+    auto& output = Outputs().m_directory;
+    try
+    {
+        if (output.InitializeForCurrentProcess())
+            spdlog::debug("Crash output under launcher logs: {}", output.Path().filename().string());
+    }
+    catch (const std::exception& error)
+    {
+        spdlog::debug("Could not initialize crash output: {}", error.what());
+    }
+    if (output.Path().empty())
+        spdlog::debug("Private crash output directory unavailable. Dump files and rotation are disabled.");
+
     // Record the original (or as close as we can get) top-level unhandled exception handler.
     // We grab this so we can see if it is changed, presumably by a mod or even graphics drivers.
     // Something in STR breaks unhandled exception handling, so we'll fake it if necessary.
@@ -1300,17 +1387,4 @@ CrashHandler::CrashHandler()
 
 CrashHandler::~CrashHandler()
 {
-}
-
-void CrashHandler::RemovePreviousDump(std::filesystem::path path)
-{
-    // This is the game folder (the launcher spoofs the module path), so only delete our own dumps.
-    for (auto& entry : std::filesystem::directory_iterator(path))
-    {
-        const auto name = entry.path().filename().string();
-        if (entry.is_regular_file() && name.rfind("crash_UTC_", 0) == 0 && entry.path().extension() == ".dmp")
-        {
-            DeleteFileA(entry.path().string().c_str());
-        }
-    }
 }

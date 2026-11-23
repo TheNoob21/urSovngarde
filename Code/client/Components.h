@@ -19,5 +19,8 @@
 #include <Components/ObjectComponent.h>
 #include <Components/PlayerComponent.h>
 #include <Components/CombatComponent.h>
+#include <Components/CopyFightComponent.h>
+#include <Components/CopySeatComponent.h>
+#include <Components/CopyHeadTrackComponent.h>
 
 #undef TP_INTERNAL_COMPONENTS_GUARD

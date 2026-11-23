@@ -8,6 +8,7 @@
 
 #include <Services/OverlayService.h>
 #include <Services/MenuService.h>
+#include <Systems/VROverlaySupport.h>
 #include <Games/Skyrim/VR/VRRuntime.h>
 #include <World.h>
 #include <Helpers/EmbeddedPicture.h>
@@ -61,7 +62,7 @@ void VRDashboard::Update(OverlayService& aOverlay, VRPage& aPage) noexcept
 bool VRDashboard::TryToStart() noexcept
 {
     // OpenComposite has no dashboard to put the menu on.
-    if (VRRuntime::IsOpenComposite())
+    if (!VROverlaySupport::VROverlaysAvailable())
     {
         m_failed = true;
         return false;
@@ -76,7 +77,7 @@ bool VRDashboard::TryToStart() noexcept
     m_initialized = InitializeOverlay();
     if (!m_initialized && ++m_startAttempts >= 10)
     {
-        spdlog::error("VRDashboard: giving up, the Skyrim Together menu is not available in the headset");
+        spdlog::debug("VRDashboard: giving up, the Skyrim Together menu is not available in the headset");
         m_failed = true;
     }
     return m_initialized;
@@ -94,14 +95,14 @@ bool VRDashboard::InitializeOverlay() noexcept
     m_pOverlay = VRRuntime::GetOpenVROverlay();
     if (!m_pSystem || !m_pOverlay)
     {
-        spdlog::warn("VRDashboard: OpenVR interfaces unavailable (error {})", error);
+        spdlog::debug("VRDashboard: OpenVR interfaces unavailable (error {})", error);
         return false;
     }
 
     if (!MakeDevice() || !MakeSharedPicture() || !CreateTab())
         return false;
 
-    spdlog::info("VRDashboard: Skyrim Together dashboard overlay created");
+    spdlog::debug("VRDashboard: Skyrim Together dashboard overlay created");
     return true;
 }
 
@@ -134,7 +135,7 @@ bool VRDashboard::MakeDevice() noexcept
 
     if (FAILED(cResult))
     {
-        spdlog::error("VRDashboard: D3D11CreateDevice failed ({:#x})", static_cast<uint32_t>(cResult));
+        spdlog::debug("VRDashboard: D3D11CreateDevice failed ({:#x})", static_cast<uint32_t>(cResult));
         return false;
     }
     return true;
@@ -164,7 +165,7 @@ bool VRDashboard::MakeSharedPicture() noexcept
 
     if (FAILED(m_pDevice->CreateTexture2D(&desc, nullptr, &m_pTexture)))
     {
-        spdlog::error("VRDashboard: could not create the overlay texture");
+        spdlog::debug("VRDashboard: could not create the overlay texture");
         return false;
     }
     return true;
@@ -180,7 +181,7 @@ bool VRDashboard::CreateTab() noexcept
     const auto cError = m_pOverlay->CreateDashboardOverlay("skyrimtogether.menu", "urSovngarde", &m_handle, &m_thumbnailHandle);
     if (cError != vr::VROverlayError_None)
     {
-        spdlog::error("VRDashboard: CreateDashboardOverlay failed ({})", static_cast<int>(cError));
+        spdlog::debug("VRDashboard: CreateDashboardOverlay failed ({})", static_cast<int>(cError));
         return false;
     }
 
@@ -205,11 +206,11 @@ void VRDashboard::SetTabIcon() noexcept
     std::optional<EmbeddedPicture::Picture> icon = EmbeddedPicture::Load(L"URSOVNGARDE_ICON");
     if (!icon)
     {
-        spdlog::warn("VRDashboard: the urSovngarde icon could not be read; the tab shows SteamVR's default icon");
+        spdlog::debug("VRDashboard: the urSovngarde icon could not be read; the tab shows SteamVR's default icon");
         return;
     }
     const auto cError = m_pOverlay->SetOverlayRaw(m_thumbnailHandle, icon->Rgba.data(), icon->Width, icon->Height, 4);
-    spdlog::info("VRDashboard: tab icon set, {}x{} (result {})", icon->Width, icon->Height, static_cast<int>(cError));
+    spdlog::debug("VRDashboard: tab icon set, {}x{} (result {})", icon->Width, icon->Height, static_cast<int>(cError));
 }
 
 /**
@@ -219,8 +220,7 @@ void VRDashboard::SetTabIcon() noexcept
  */
 void VRDashboard::UploadFrame(VRPage& aPage) noexcept
 {
-    uint32_t contentPercent = 0;
-    if (!aPage.CopyOverPanelIfNewer(m_pictureVersion, m_pixels, contentPercent))
+    if (!aPage.CopyOverPanelIfNewer(m_pictureVersion, m_pixels))
         return;
 
     m_pContext->UpdateSubresource(m_pTexture, 0, nullptr, m_pixels.data(), VRPage::kWidth * 4, 0);
@@ -230,13 +230,7 @@ void VRDashboard::UploadFrame(VRPage& aPage) noexcept
     m_pContext->Flush();
 
     vr::Texture_t texture{m_pTexture, vr::TextureType_DirectX, vr::ColorSpace_Auto};
-    const auto cError = m_pOverlay->SetOverlayTexture(m_handle, &texture);
-
-    if (m_logNextUpload)
-    {
-        m_logNextUpload = false;
-        spdlog::info("VRDashboard: page frame sent to SteamVR (result {}), {}% of the page has content", static_cast<int>(cError), contentPercent);
-    }
+    m_pOverlay->SetOverlayTexture(m_handle, &texture);
 }
 
 /**
@@ -280,9 +274,8 @@ void VRDashboard::ProcessEvents(OverlayService& aOverlay, VRPage& aPage) noexcep
             PageInput::Text(pApp, event.data.keyboard.cNewInput, strnlen(event.data.keyboard.cNewInput, sizeof(event.data.keyboard.cNewInput)));
             break;
         case vr::VREvent_OverlayShown:
-            spdlog::info("VRDashboard: tab opened (in game: {})", aOverlay.GetInGame());
+            spdlog::debug("VRDashboard: tab opened (in game: {})", aOverlay.GetInGame());
             m_visible = true;
-            m_logNextUpload = true;
             aPage.SetShownBy(VRPage::kDashboard, true);
             World::Get().ctx().at<MenuService>().Open(MenuSurface::kDashboard);
             break;

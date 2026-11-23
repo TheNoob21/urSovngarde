@@ -24,6 +24,7 @@ enum class ExtraDataType : uint32_t
     AliasInstanceArray = 0x88,
     OutfitItem = 0x8E,
     SceneData = 0x92,
+    AttachedArrows3D = 0x98,
     TextDisplayData = 0x99,
     Enchantment = 0x9B,
     Soul = 0x9C,

@@ -12,6 +12,7 @@
 #include <Games/Skyrim/VR/VRRuntime.h>
 #include <Games/Skyrim/VR/VRControllers.h>
 #include <Helpers/SafeRelease.h>
+#include <Systems/VROverlaySupport.h>
 
 #include <openvr/openvr.h>
 
@@ -770,7 +771,9 @@ EyeMatrices ReadEyeMatrices() noexcept
  */
 vr::EVRCompositorError HookSubmit(void* apThis, const vr::EVREye aEye, const vr::Texture_t* apTexture, const vr::VRTextureBounds_t* apBounds, const vr::EVRSubmitFlags aFlags)
 {
-    if (apTexture && apTexture->eType == vr::TextureType_DirectX && apTexture->handle && GetCurrentThreadId() == s_mainThread && !s_drawer.Failed)
+    // Without CEF there is no panel, so only OpenComposite's banners need the eye images.
+    if (apTexture && apTexture->eType == vr::TextureType_DirectX && apTexture->handle && GetCurrentThreadId() == s_mainThread && !s_drawer.Failed &&
+        (VROverlaySupport::CefAvailable() || VRRuntime::IsOpenComposite()))
     {
         auto* pTarget = static_cast<ID3D11Texture2D*>(apTexture->handle);
         if (s_drawer.Made || MakeDrawer(pTarget))

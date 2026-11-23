@@ -1,3 +1,4 @@
+#include <Services/GameExtension.h>
 #include "Projectile.h"
 #include <Games/Skyrim/Forms/TESObjectWEAP.h>
 #include <Games/Skyrim/Forms/MagicItem.h>
@@ -10,11 +11,10 @@
 #include <Forms/SpellItem.h>
 #include <Helpers/ReadableMemory.h>
 #include <Helpers/PatchCheck.h>
-#ifdef SKYRIMVR
 #include <Games/Skyrim/VR/VRBodySync.h>
+#include <Games/Skyrim/SpellAimRules.h>
 #include <PlayerCharacter.h>
 #include <atomic>
-#endif
 
 TP_THIS_FUNCTION(TLaunch, BSPointerHandle<Projectile>*, BSPointerHandle<Projectile>, Projectile::LaunchData& arData);
 static TLaunch* RealLaunch = nullptr;
@@ -68,11 +68,12 @@ static uint32_t ValidFormId(const void* apForm) noexcept
     return formId;
 }
 
-#ifdef SKYRIMVR
 // A held spell is cast again on its caster's copy, and each frame a flame or a beam takes its shooter's aim.
 // A copy's aim is its body's. The real spell follows the hand, as turned by whatever spell mods the caster runs.
 // So the real one's angles travel with the VR pose, and these calls give them to the copy's.
 // They are the four calls to the actor's aim in the two updates (VR 0x140768570 and 0x14075E720), heading then pitch in each.
+// The flat game has the same four calls, and there the aim of a VR player's copy comes from an animation it never plays: its flame went to the ground.
+#ifdef SKYRIMVR
 // The real angles are read where each update turns the player's own spell to its hand: a launch's angles can be the game's aim assist.
 constexpr uintptr_t kAimHeading = 0x6104F0;
 constexpr uintptr_t kAimPitch = 0x610590;
@@ -83,6 +84,17 @@ constexpr uintptr_t kBeamPitchCall = 0x75E8E2;
 constexpr uintptr_t kHandAim = 0x778ED0;
 constexpr uintptr_t kFlameHandAimCall = 0x76875B;
 constexpr uintptr_t kBeamHandAimCall = 0x75E987;
+#else
+// The flame's and the beam's updates, and where in each they call the actor's aim.
+constexpr uint32_t kAimHeadingId = 37929;
+constexpr uint32_t kAimPitchId = 37930;
+constexpr uint32_t kFlameUpdateId = 43894;
+constexpr uint32_t kBeamUpdateId = 43749;
+constexpr size_t kFlameHeadingCall = 0x128;
+constexpr size_t kFlamePitchCall = 0x13B;
+constexpr size_t kBeamHeadingCall = 0x1AB;
+constexpr size_t kBeamPitchCall = 0x1BE;
+#endif
 
 using TActorAim = float(Actor*);
 static TActorAim* RealFlameHeading = nullptr;
@@ -90,75 +102,106 @@ static TActorAim* RealFlamePitch = nullptr;
 static TActorAim* RealBeamHeading = nullptr;
 static TActorAim* RealBeamPitch = nullptr;
 
+#ifdef SKYRIMVR
 using THandAim = void(Projectile*, const void*);
 static THandAim* RealFlameHandAim = nullptr;
 static THandAim* RealBeamHandAim = nullptr;
-
-// Whether a second has passed since this said true last. The updates can run on any thread.
-static bool SecondPassed(std::atomic<int64_t>& aNext) noexcept
-{
-    const int64_t cNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    int64_t next = aNext.load(std::memory_order_relaxed);
-    return cNow >= next && aNext.compare_exchange_strong(next, cNow + 1000);
-}
+#endif
 
 static bool OwnerSpellAim(const Actor* apShooter, float& aZAngle, float& aXAngle) noexcept
 {
+    if (!apShooter)
+        return false;
     const ActorExtension* pExtension = const_cast<Actor*>(apShooter)->GetExtension();
     return pExtension && pExtension->IsRemotePlayer() && VRBodySync::CopySpellAim(apShooter->formID, aZAngle, aXAngle);
 }
 
-// How far the copy's held spell passes from this player, so that a session's log says it.
-static void SayCopySpellAim(const Actor* apShooter, const float aZAngle, const float aXAngle) noexcept
+#ifndef SKYRIMVR
+// Keep the two real call results together without retaining an actor or projectile pointer.
+// Flame and beam updates cannot consume each other's heading, nor can another update thread.
+static thread_local SpellAimRules::Pair s_flameAim;
+static thread_local SpellAimRules::Pair s_beamAim;
+
+static double SpellAimNow() noexcept
 {
-    static std::atomic<int64_t> s_next{0};
-    const PlayerCharacter* pPlayer = PlayerCharacter::Get();
-    if (!pPlayer || !SecondPassed(s_next))
-        return;
-    const glm::vec3 cWay = glm::vec3(pPlayer->position) - glm::vec3(apShooter->position);
-    const float cToPlayer = std::atan2(cWay.x, cWay.y);
-    spdlog::info("SpellAimDiag: copy {:X}'s held spell goes heading {:.1f}, pitch {:.1f}; this player is {:.1f} degrees off it, {:.0f} units away", apShooter->formID,
-                 glm::degrees(aZAngle), glm::degrees(aXAngle), glm::degrees(std::remainder(cToPlayer - aZAngle, glm::two_pi<float>())), glm::length(cWay));
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+static bool CanNoteFlatAim(Actor* apShooter) noexcept
+{
+    return SpellAimRules::CanNote(apShooter && apShooter == PlayerCharacter::Get(), entt::locator<World>::has_value() && World::Get().GetTransport().IsConnected());
+}
+
+static void NoteFlatHeading(Actor* apShooter, SpellAimRules::Pair& aPair, float aHeading) noexcept
+{
+    aPair.Heading(CanNoteFlatAim(apShooter), aHeading, SpellAimNow());
+}
+
+static void NoteFlatPitch(Actor* apShooter, SpellAimRules::Pair& aPair, float aPitch) noexcept
+{
+    float heading = 0.f;
+    if (aPair.Pitch(CanNoteFlatAim(apShooter), aPitch, SpellAimNow(), heading))
+        VRBodySync::NoteSpellAim(heading, aPitch);
+}
+#endif
 
 static float HookFlameHeading(Actor* apShooter)
 {
     float zAngle = 0.f, xAngle = 0.f;
     if (!OwnerSpellAim(apShooter, zAngle, xAngle))
-        return RealFlameHeading(apShooter);
-    SayCopySpellAim(apShooter, zAngle, xAngle);
+    {
+        const float heading = RealFlameHeading(apShooter);
+#ifndef SKYRIMVR
+        NoteFlatHeading(apShooter, s_flameAim, heading);
+#endif
+        return heading;
+    }
     return zAngle;
 }
 
 static float HookFlamePitch(Actor* apShooter)
 {
     float zAngle = 0.f, xAngle = 0.f;
-    return OwnerSpellAim(apShooter, zAngle, xAngle) ? xAngle : RealFlamePitch(apShooter);
+    if (OwnerSpellAim(apShooter, zAngle, xAngle))
+        return xAngle;
+    const float pitch = RealFlamePitch(apShooter);
+#ifndef SKYRIMVR
+    NoteFlatPitch(apShooter, s_flameAim, pitch);
+#endif
+    return pitch;
 }
 
 static float HookBeamHeading(Actor* apShooter)
 {
     float zAngle = 0.f, xAngle = 0.f;
     if (!OwnerSpellAim(apShooter, zAngle, xAngle))
-        return RealBeamHeading(apShooter);
-    SayCopySpellAim(apShooter, zAngle, xAngle);
+    {
+        const float heading = RealBeamHeading(apShooter);
+#ifndef SKYRIMVR
+        NoteFlatHeading(apShooter, s_beamAim, heading);
+#endif
+        return heading;
+    }
     return zAngle;
 }
 
 static float HookBeamPitch(Actor* apShooter)
 {
     float zAngle = 0.f, xAngle = 0.f;
-    return OwnerSpellAim(apShooter, zAngle, xAngle) ? xAngle : RealBeamPitch(apShooter);
+    if (OwnerSpellAim(apShooter, zAngle, xAngle))
+        return xAngle;
+    const float pitch = RealBeamPitch(apShooter);
+#ifndef SKYRIMVR
+    NoteFlatPitch(apShooter, s_beamAim, pitch);
+#endif
+    return pitch;
 }
 
+#ifdef SKYRIMVR
 static void NoteHandAim(const Projectile* apThis) noexcept
 {
     VRBodySync::NoteSpellAim(apThis->rotation.z, apThis->rotation.x);
 
-    static std::atomic<int64_t> s_next{0};
-    if (const PlayerCharacter* pPlayer = PlayerCharacter::Get(); pPlayer && SecondPassed(s_next))
-        spdlog::info("SpellAimDiag: this player's held spell goes heading {:.1f}, pitch {:.1f}; its body at heading {:.1f}", glm::degrees(apThis->rotation.z),
-                     glm::degrees(apThis->rotation.x), glm::degrees(pPlayer->rotation.z));
 }
 
 static void HookFlameHandAim(Projectile* apThis, const void* apHandMatrix)
@@ -193,6 +236,33 @@ static void HookHeldSpellAim() noexcept
     TiltedPhoques::SwapCall(reinterpret_cast<uint8_t*>(cExe + kBeamPitchCall), RealBeamPitch, &HookBeamPitch);
     TiltedPhoques::SwapCall(reinterpret_cast<uint8_t*>(cExe + kFlameHandAimCall), RealFlameHandAim, &HookFlameHandAim);
     TiltedPhoques::SwapCall(reinterpret_cast<uint8_t*>(cExe + kBeamHandAimCall), RealBeamHandAim, &HookBeamHandAim);
+}
+#else
+static void HookHeldSpellAim() noexcept
+{
+    VersionDbPtr<uint8_t> aimHeading(kAimHeadingId);
+    VersionDbPtr<uint8_t> aimPitch(kAimPitchId);
+    VersionDbPtr<uint8_t> flameUpdate(kFlameUpdateId);
+    VersionDbPtr<uint8_t> beamUpdate(kBeamUpdateId);
+    const auto cCallsTo = [](const uint8_t* apCall, const uint8_t* apTarget)
+    {
+        return apTarget && PatchCheck::Is(apCall, {0xE8}) && apCall + 5 + *reinterpret_cast<const int32_t*>(apCall + 1) == apTarget;
+    };
+    uint8_t* pFlameHeading = PatchCheck::At(flameUpdate.Get(), kFlameHeadingCall);
+    uint8_t* pFlamePitch = PatchCheck::At(flameUpdate.Get(), kFlamePitchCall);
+    uint8_t* pBeamHeading = PatchCheck::At(beamUpdate.Get(), kBeamHeadingCall);
+    uint8_t* pBeamPitch = PatchCheck::At(beamUpdate.Get(), kBeamPitchCall);
+    if (!cCallsTo(pFlameHeading, aimHeading.Get()) || !cCallsTo(pFlamePitch, aimPitch.Get()) || !cCallsTo(pBeamHeading, aimHeading.Get()) || !cCallsTo(pBeamPitch, aimPitch.Get()))
+    {
+        spdlog::error(
+            "Projectile: the flame's or the beam's aim calls are not the expected code ({}, {}, {}, {}); another player's held spell follows its copy's body",
+            PatchCheck::Bytes(pFlameHeading, 5), PatchCheck::Bytes(pFlamePitch, 5), PatchCheck::Bytes(pBeamHeading, 5), PatchCheck::Bytes(pBeamPitch, 5));
+        return;
+    }
+    TiltedPhoques::SwapCall(pFlameHeading, RealFlameHeading, &HookFlameHeading);
+    TiltedPhoques::SwapCall(pFlamePitch, RealFlamePitch, &HookFlamePitch);
+    TiltedPhoques::SwapCall(pBeamHeading, RealBeamHeading, &HookBeamHeading);
+    TiltedPhoques::SwapCall(pBeamPitch, RealBeamPitch, &HookBeamPitch);
 }
 #endif
 
@@ -279,13 +349,19 @@ BSPointerHandle<Projectile>* TP_MAKE_THISCALL(HookLaunch, BSPointerHandle<Projec
 
     auto result = TiltedPhoques::ThisCall(RealLaunch, apThis, arData);
 
+    if (GameExtension::ChecksMagic() && (!result || !result->handle.iBits || !Event.ProjectileBaseID || !Event.ShooterID || !Event.ParentCellID ||
+                                         (arData.pSpell && !Event.SpellID) || (arData.pFromWeapon && !Event.WeaponID) || (arData.pFromAmmo && !Event.AmmoID)))
+        return result;
     TP_ASSERT(result, "No projectile handle returned.");
-
     TESObjectREFR* pObject = TESObjectREFR::GetByHandle(result->handle.iBits);
     Projectile* pProjectile = Cast<Projectile>(pObject);
 
+    if (!pProjectile && GameExtension::ChecksMagic())
+        return result;
     TP_ASSERT(pProjectile, "No projectile found.");
 
+    Event.Handle = result->handle.iBits;
+    Event.Form = pProjectile->formID;
     Event.Power = pProjectile->fPower;
 
     // Projectiles can launch before the World exists (main menu scene).
@@ -304,9 +380,7 @@ static TiltedPhoques::Initializer s_projectileHooks(
 
         TP_HOOK(&RealLaunch, HookLaunch);
 
-#ifdef SKYRIMVR
         HookHeldSpellAim();
-#endif
 
         // A null projectile handle read from the stack here crashes the game; the stub re-reads it and returns false.
         // SE 33672 / VR 0x554980 reads it at +0x397 ([rsp+0x58], 0x158 frame); AE 34452 at +0x374 ([rsp+0x50], 0x138 frame).

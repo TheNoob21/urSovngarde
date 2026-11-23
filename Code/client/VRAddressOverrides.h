@@ -82,6 +82,7 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
     { 34525u, 0x0557830u }, // SE 33741 MagicTarget::CheckAddEffectTargetData
     { 34526u, 0x05579c0u }, // SE 33742 MagicTarget::AddTarget
     { 34529u, 0x0557f80u }, // SE 33745 MagicTarget::GetTargetAsActor
+    { 34540u, 0x0558580u }, // SE 33756 MagicTarget::VisitEffects
     { 34582u, 0x057f650u }, // SE 34582 BGSSaveLoadChangesMap::GetChangeFlags
     { 34989u, 0x0569920u }, // SE 34193 SummonCreatureEffect start
     { 35086u, 0x056e070u }, // SE 34286 ValueModifierEffect::ApplyActorEffect
@@ -92,29 +93,40 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
     { 36047u, 0x05a0ff0u }, // SE 35157 BGSSaveFormBuffer::WriteId
     { 36048u, 0x05a1070u }, // SE 35158 BGSSaveFormBuffer::WriteFormId
     { 36291u, 0x05ad8f0u }, // SE 35402 Calendar::Update
+    // Upstream's actor update hook names AE 37356, which is SE 36365, not SE 37356 (0x619ab0).
+    // 0x6226a0 is the VR address of SE 37356: the hook there sees no actor, so copies run their own AI.
+    // Hooked on SE 36365 instead, copies' bones froze (2026-09-20): VR advances the animation graph in it.
+    { 36365u, 0x05e0e20u }, // SE 36365 actor update (AE 37356), hooked on VR
     { 36372u, 0x05e2010u }, // SE 36372 Character animation graph update (VRBodySync)
     { 36427u, 0x05e5dc0u }, // SE 36427 (SE 0x5dd770) Actor::StealAlarm, the crime alarm
+    { 36428u, 0x05e67b0u }, // SE 36428 the pickpocket alarm (flat AE 37423; the function after StealAlarm, the same prologue)
+    { 36429u, 0x05e6e60u }, // SE 36429 the assault alarm's entry (flat AE 37424, 0x4b bytes on both)
+    { 36431u, 0x05e7570u }, // SE 36431 the murder alarm (flat AE 37426, the same prologue; 16 of 17 neighbours match)
     { 36525u, 0x05ef640u }, // SE 36525 Actor::AddObjectToContainer
     { 36527u, 0x05efa10u }, // SE 36527 Actor::GetGoldAmount
     { 36544u, 0x05b4290u }, // SE 35545 WinMain
     { 36548u, 0x05b65e0u }, // SE 35549 Main::Init (intro movie branch at +0x96)
     { 36564u, 0x05bab10u }, // Main::Update; the shared sleep's agreed OK and its line in the menu run before its UI jobs
     { 36741u, 0x0604f30u }, // SE 36741 Actor::GetDetectionState
+    { 36748u, 0x0605190u }, // SE 36748 Actor::RequestDetectionLevel (VR Address Library; its exception-table entry and 16 of 17 neighbours match flat AE 37764)
     { 37147u, 0x05d5120u }, // SE 36174 animation helper
     { 37175u, 0x05d63a0u }, // SE 36196 Character dtor
-    // Upstream skips SE 37356 (0x619ab0, the actor's AI) for remote actors.
-    // It must not map to SE 36365 (0x5e0e20, the whole per-frame update), or remote actors slide with frozen bones.
-    // 0x6226a0 is the VR address the public database gives for 37356, and it sits 0x40 after 37354 as in SE.
-    { 37356u, 0x06226a0u }, // SE 37356 Actor::Process (AI)
+    { 37356u, 0x06226a0u }, // SE 37356; the actor update hook's default on VR (see SE 36365)
     { 37511u, 0x05ee4f0u }, // SE 36511 TESObjectREFR::PayGoldToContainer
     { 37521u, 0x05eeca0u }, // SE 36521 Actor::PickUpObject
     { 37542u, 0x05f0e20u }, // SE 36541 Actor speak sound
     { 37577u, 0x05f5280u }, // SE 36575 Actor::IsFleeing
     { 37677u, 0x0600220u }, // SE 36669 Actor::SetFactionRank
     { 37717u, 0x0602f40u }, // SE 36707 Actor::SetPlayerTeammate
+    { 37904u, 0x060e130u }, // Actor quick mount on its vehicle, the function before SE 36881 (flat AE 37904 matched by bytes: same prologue, the same nine calls in order)
     { 37905u, 0x060e300u }, // SE 36881 Actor::InitiateMountPackage
+    // Read from the running game: the six graph flight handlers call it with 1 to 5 and 0; the same field reads and sizes as SE.
+    // The library's own 37947 is SE 37947 (ActorEquipManager::UnequipSpell, under 38903 below), so start-up logs it as differing.
+    { 37947u, 0x06110f0u }, // SE 36922 Actor::SetFlyState
     { 37975u, 0x0612420u }, // SE 36950 Actor::UnequipObject
     { 38533u, 0x062c950u }, // SE 37583 Actor::SetNoBleedoutRecovery
+    { 38561u, 0x062e020u }, // SE 37608 Actor::StartCombat, the only maker of a combat controller (VR Address Library; same checks and callers as flat AE 38561)
+    { 38705u, 0x0637e10u }, // Actor ends its mount interaction (flat AE 38705 matched by bytes: same prologue, IsOnMount, interaction, end calls)
     { 38896u, 0x0640c40u }, // SE 37940 ActorEquipManager::EquipSpell (by hand index)
     { 38899u, 0x0640f30u }, // SE 37943 ActorEquipManager::UnequipAll
     { 38903u, 0x06413c0u }, // SE 37947 ActorEquipManager::UnequipSpell (by hand index)
@@ -129,11 +141,15 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
     { 38953u, 0x0644160u }, // SE 37999 ActorMediator::PerformComplexAction
     { 38959u, 0x0644510u }, // SE 38005 AI package init
     { 38979u, 0x0645240u }, // SE 38023 ActorState::SetWeaponDrawn
+    { 39000u, 0x0645a40u }, // Actor sit/sleep state change on its current furniture (matched by bytes and its calls to 39912/39914/39916)
     { 39002u, 0x0645b10u }, // SE 38046 animation helper
     { 39004u, 0x0646160u }, // SE 38048 ApplyAnimationVariables
     { 39114u, 0x064c170u }, // SE 38156 AIProcess::CheckForNewPackage
     { 39643u, 0x066dd50u }, // SE 38612 dialogue response processing
     { 39856u, 0x0685270u }, // SE 0x67bdf0 AIProcess::GetCharController
+    { 39912u, 0x06878d0u }, // AIProcess::SetSitSleepState (matched by bytes: same arguments, two furniture event sends, marker store at +0x2E8)
+    { 39914u, 0x0688330u }, // AIProcess furniture marker (middle-high process +0x2E8, as flat AE)
+    { 39916u, 0x0688370u }, // AIProcess current furniture handle (middle-high process +0x208, as flat AE)
     { 389089u, 0x1ec8278u }, // SE 512261 (SE 0x1e083a8) physics timestep global
     { 40245u, 0x069bec0u }, // SE 39171 Character ctor
     { 40246u, 0x069bfc0u }, // SE 39172 Character ctor (uint8)
@@ -168,6 +184,7 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
     { 63372u, 0x0b1d8b0u }, // SE 62430 BSAnimationGraphManager event helper
     { 68221u, 0x0c413f0u }, // SE 66964 CRC hash stub
     { 68545u, 0x0c4e600u }, // SE 67245 BSInputEnableManager::EnableOtherEvent
+    { 68835u, 0x0c97810u }, // SE 68835 NiObject::Clone (CreateClone, then ProcessClone, on a local NiCloningProcess); the offset of libraries 0.252 and 0.298
     { 69066u, 0x0c6b170u }, // SE 67740 BSThreadUtils::SetThreadName
     { 69165u, 0x0c6dc90u }, // SE 67823 BSFixedString::Set
     { 70639u, 0x0cac090u }, // SE 69269 NiCamera::WorldPtToScreenPt3
@@ -3013,6 +3030,7 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
     { 13631u, 0x0175a10u }, // SE 13530 UIMessageQueue::AddMessage
     { 400445u, 0x1f850f8u }, // SE 514285 UIMessageQueue singleton
     { 34819u, 0x058e920u }, // SE 34819 BGSSaveLoadManager::Load
+    { 34818u, 0x058e310u }, // SE 34818 BGSSaveLoadManager::Save_Impl (VR Address Library 0.252.0)
     { 33236u, 0x050e7a0u }, // SE 32489 CombatController update-target hook (s_updateTarget)
     { 21600u, 0x03067f0u }, // SE 21600 PlayerCamera::IsFirstPerson helper
     { 63591u, 0x0b5f9a0u }, // SE 63591 BShkbAnimationGraph internal send event
@@ -3020,6 +3038,7 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
     // SE ids the VR Address Library answers, copied from its version 0.275.0.
     // Releases older than 0.158 lack some of them; none from 0.100 on maps any of them elsewhere.
     { 10878u, 0x01077c0u }, // BGSDefaultObjectManager::GetSingleton
+    { 22289u, 0x0320eb0u }, // TESObjectREFR::ApplyArtObject (VR Address Library 0.298.0)
     { 11308u, 0x01150c0u }, // FixedStrings::GetSingleton
     { 11913u, 0x0136c30u }, // ExtraDataList::HasQuestObjectAlias
     { 12204u, 0x0143180u }, // LookupReferenceByHandle
@@ -3042,15 +3061,22 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
     { 32141u, 0x0500950u }, // IAnimationGraphManagerHolder::SetGraphVariableBool
     { 32142u, 0x0500970u }, // IAnimationGraphManagerHolder::SetGraphVariableInt
     { 32143u, 0x0500990u }, // IAnimationGraphManagerHolder::SetGraphVariableFloat
+    // SE 32144 is a 16-byte stub after SetGraphVariableFloat, as AE 32888 is (jmp to AE 32934); VR has the same stub at 0x5009B0,
+    // jmp 0x502B00 (e9 4b 21 00 00). Its target takes the name in rdx and the point in r8 and asks vtable +0x10 for the manager, as AE 32934 does.
+    { 32144u, 0x0502b00u }, // IAnimationGraphManagerHolder::SetGraphVariableNiPoint3 (the stub's target, as the VR Address Library has it)
+    { 32192u, 0x0502890u }, // IAnimationGraphManagerHolder::GetGraphVariableNiPoint3 (SE 0x4F2620 + the 0x10270 shift of 32141-32143)
     { 33630u, 0x0550d40u }, // MagicCaster::InterruptCast
     { 33632u, 0x0550ec0u }, // MagicCaster::FindTargets
     { 33672u, 0x0554980u }, // MagicCaster::LaunchSpell
     { 35263u, 0x05a67b0u }, // BGSCreatedObjectManager::AddWeaponEnchantment
     { 35264u, 0x05a6850u }, // BGSCreatedObjectManager::AddArmorEnchantment
+    { 35265u, 0x05a68f0u }, // BGSCreatedObjectManager::AddPotion
+    { 35266u, 0x05a69a0u }, // BGSCreatedObjectManager::AddPoison
     { 35492u, 0x05b1710u }, // GarbageCollector::Add
     { 36218u, 0x05d80a0u }, // Actor::AddDeathItems
     { 36247u, 0x05d9520u }, // Actor::CanBeKilledBy
     { 36331u, 0x05dd850u }, // Actor::Resurrect
+    { 260538u, 0x16ce888u }, // Actor primary vtable (CommonLibSSE-NG VariantID)
     { 36344u, 0x05de910u }, // Actor::GetLevel
     { 36345u, 0x05de930u }, // Actor::DamageHealth
     { 36690u, 0x06025a0u }, // Actor::HasPerk
@@ -3097,10 +3123,12 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
     { 97463u, 0x126bbd0u }, // Object::GetHandle
     { 97746u, 0x129a720u }, // BSScript::Stack::GetStackFrameVariable
     { 97923u, 0x129dd90u }, // BSScript::NF_util::NativeFunctionBase::Call
+    { 229625u, 0x15a3e30u }, // ExtraTextDisplayData vtable
     { 231896u, 0x15b78f4u }, // the Havok world scale
     { 232777u, 0x15bf5d8u }, // TESActionData vtable
     { 235511u, 0x15e17f8u }, // TESObjectREFR vtable
     { 261397u, 0x16d6de0u }, // Character vtable
+    { 261400u, 0x16d7778u }, // Character vtable, its IAnimationGraphManagerHolder part
     { 514141u, 0x1f82ad8u }, // TESDataHandler singleton
     { 514167u, 0x1f831b0u }, // ProcessLists singleton
     { 514172u, 0x1f831c8u }, // BGSCreatedObjectManager::GetSingleton
@@ -3118,8 +3146,10 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
     { 515124u, 0x2fc52e8u }, // MenuControls singleton
     { 516574u, 0x2fea520u }, // BSInputDeviceManager singleton
     { 516851u, 0x2feb200u }, // the change-flags manager singleton (Forms.cpp)
+    { 516860u, 0x2feb248u }, // BGSSaveLoadManager singleton (CommonLibVR Offset::BGSSaveLoadManager::Singleton)
     { 517228u, 0x2ffd778u }, // WeatherManager singleton
     { 517711u, 0x2fffdeau }, // PlayerCharacter god mode flag
+    { 519819u, 0x3013ac8u }, // the pending message boxes, filled by MessageBoxData::QueueMessage (SE 51422) and read by MessageBoxMenu
     { 524557u, 0x3175fe0u }, // INISettingCollection singleton
     { 524728u, 0x317e790u }, // the renderer window data
     { 524729u, 0x317e798u }, // the D3D11 device
@@ -3155,4 +3185,8 @@ static constexpr VRAddressOverrideEntry kVRAddressOverrides[] = {
 
     // The Sleep/Wait menu's OK callback (AE 524025): the menu at args+0x18, the hours at [[args+0x28]+0x10], then the sleep or the wait start.
     { 9000017u, 0x08eaca0u },
+
+    // EnemyHealth::SetTarget (AE 51672), the enemy meter taking a target from a HUDData: the only caller of the
+    // health-below-full check and called from EnemyHealth's ProcessMessage (type 0xB); byte for byte AE's, but for the player's +0x10BC.
+    { 9000101u, 0x08b0470u },
 };

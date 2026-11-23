@@ -1,5 +1,27 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
+
+// Which player's save is loaded, and whether a load is running. A load stops the party's words being taught at once,
+// before the game changes anything, and TESLoadGameEvent lets them through once the new save's player is in place.
+namespace PlayerSaveContext
+{
+struct Snapshot
+{
+    uint64_t PlayerId{};
+    uint64_t Generation{};
+    bool Loading{true};
+};
+Snapshot Read() noexcept;
+uint64_t BeginLoad() noexcept;
+// The native call refused that load, which sends no load event.
+void RefuseLoad(uint64_t aGeneration) noexcept;
+void CompleteLoad() noexcept;
+// Runs aWrite only if the same save is still loaded, and keeps a load from starting meanwhile, even one that starts on the loader thread.
+bool RunFor(const Snapshot& acExpected, const std::function<void()>& acWrite) noexcept;
+} // namespace PlayerSaveContext
+
 #pragma pack(push, 1)
 
 struct BGSSaveLoadManager

@@ -26,8 +26,12 @@ EnchantmentItem* EnchantmentItem::Create(const Inventory::EnchantmentData& aData
         effectItem.data.iDuration = effect.Duration;
         effectItem.fRawCost = effect.RawCost;
         effectItem.pEffectSetting = Cast<EffectSetting>(TESForm::GetById(modSystem.GetGameId(effect.EffectId)));
+        // An effect this game lacks would make another enchantment, or one the game's own code cannot read: none is made, as for a made potion.
         if (!effectItem.pEffectSetting)
-            spdlog::error("Effect setting not found: {:X}:{:X}", effect.EffectId.ModId, effect.EffectId.BaseId);
+        {
+            spdlog::error("Effect setting not found: {:X}:{:X}; the enchantment is not created", effect.EffectId.ModId, effect.EffectId.BaseId);
+            return nullptr;
+        }
 
         // TODO: TESCondition?
 

@@ -75,6 +75,45 @@ enum SpellType : int32_t
     SPELL_TYPE_COUNT = 0xE,
 };
 
+// Powers, lesser powers and dragon shouts: fire-and-forget casts through the OTHER source.
+constexpr bool IsVoiceCast(const SpellType acType) noexcept
+{
+    return acType == POWER || acType == LESSER_POWER || acType == VOICE_POWER;
+}
+
+// Whether a voice cast goes to the other games as a cast, on either build.
+// Slow Time and the beast forms are not: they arrive there as their effect and transform, and a replayed cast would apply them again.
+constexpr bool IsVoiceCastSent(const bool acSlowOrBeastForm) noexcept
+{
+    return !acSlowOrBeastForm;
+}
+
+// Whether a held spell goes to the other games as a cast; the rest go as projectiles.
+// Concentration spells, wards and invisibility go as casts. So does a healing concentration spell (Healing Hands, Healing):
+// its beam or glow is seen on the caster's copy, while its healing still reaches the target as an effect, and the copy's own beam heals nobody.
+constexpr bool IsSentAsCast(const CastingType acCasting, const bool acWard, const bool acInvisibility) noexcept
+{
+    if (acWard || acInvisibility)
+        return true;
+    return acCasting == CONCENTRATION;
+}
+
+// Whether another player's copy, casting here, makes an NPC it touches feel a hit (so it turns on the caster, as on its owner).
+// A healing or buff spell is no attack, on its owner either.
+constexpr bool CopyEffectIsHit(const bool acHealing, const bool acBuff) noexcept
+{
+    return !acHealing && !acBuff;
+}
+
+// Whether another player's effect lands on this game's player, from the effect's own flags (EffectSetting: hostile 1, detrimental 4).
+// With PvP off a hostile or detrimental effect does not; a heal or a buff always does.
+constexpr bool PlayerEffectTaken(const bool acPvpEnabled, const uint32_t acEffectFlags) noexcept
+{
+    constexpr uint32_t cHostile = 1u << 0;
+    constexpr uint32_t cDetrimental = 1u << 2;
+    return acPvpEnabled || (acEffectFlags & (cHostile | cDetrimental)) == 0;
+}
+
 } // namespace MagicSystem
 
 namespace EffectArchetypes

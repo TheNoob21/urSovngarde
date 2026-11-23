@@ -19,6 +19,7 @@ struct TESBoundObject;
 struct TESActorBase;
 struct TESContainer;
 struct BGSScene;
+struct BSFaceGenAnimationData;
 
 enum class ITEM_REMOVE_REASON
 {
@@ -105,7 +106,7 @@ struct TESObjectREFR : TESForm
     virtual void sub_60();
     virtual BSFaceGenNiNode* GetFaceGenNiNode();
     virtual void sub_62();
-    virtual void sub_63();
+    virtual BSFaceGenAnimationData* GetFaceGenAnimationData();
     virtual void sub_64();
     virtual void DetachHavok();
     virtual void sub_66();
@@ -131,7 +132,7 @@ struct TESObjectREFR : TESForm
     virtual void sub_7A();
     virtual void sub_7B();
     virtual void sub_7C();
-    virtual void sub_7D();
+    virtual void UpdateAnimation(float aDelta);
     virtual void* sub_7E(bool aUnk);
     virtual void sub_7F();
     virtual void sub_80();

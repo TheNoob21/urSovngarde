@@ -45,9 +45,17 @@ public:
     static void SetEnemyMeterTarget(uint32_t aHandle, uint16_t aLevel);
     //! When the game itself last pointed the meter at a real enemy; our driver leaves the meter alone then.
     static std::chrono::steady_clock::time_point LastGameEnemyMeterTargetAt();
+    //! Tells the open world map to gather its markers again from the player's list (an update with no data, as the game sends).
+    //! False when the map is not open or the message queue is not known.
+    static bool RefreshMapMarkers();
+    //! Ask an open menu to close, the way the game asks (a hide message on the UI queue); main thread only.
+    //! @return false when the menu is not open or the queue was not found.
+    static bool CloseMenu(const BSFixedString& acMenu);
     //! How many loading screens the game has queued since it started (a load door, fast travel, a loaded save).
     //! PlayerService takes the end of each as a safe point; the client's update does not see the screen itself.
     static uint32_t LoadingScreensQueued();
+    //! How many of those the game queued with the map open: fast travels.
+    static uint32_t FastTravelsQueued();
 
     bool GetMenuOpen(const BSFixedString& acName) const;
     void CloseAllMenus();
@@ -104,6 +112,11 @@ public:
 // intellisense is too dumb but the compiler knows.
 static_assert(sizeof(UI) == 0x1C8);
 static_assert(offsetof(UI, UI::numPausesGame) == 0x160);
+
+// Whether the local player is in dialogue or has a menu open that they act in: inventory, magic, map, journal, console,
+// container, barter, crafting, lockpicking, a book, a loading screen, a mod's menu and the like. Takes the UI's lock; call it
+// from the game thread.
+bool IsPlayerInMenu() noexcept;
 
 #ifdef SKYRIMVR
 // Admission policy for newly opened skills and map menus. Existing menus keep their flags until closed.

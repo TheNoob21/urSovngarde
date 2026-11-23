@@ -15,9 +15,15 @@ struct MagicTarget
 
     struct ForEachActiveEffectVisitor
     {
-        virtual ~ForEachActiveEffectVisitor();
+        enum class Result : int32_t
+        {
+            kStop = 0,
+            kContinue = 1
+        };
 
-        virtual bool Visit(ActiveEffect* apEffect) = 0;
+        virtual ~ForEachActiveEffectVisitor() = default;
+
+        virtual Result Accept(ActiveEffect* apEffect) = 0;
     };
     static_assert(sizeof(ForEachActiveEffectVisitor) == 0x8);
 
@@ -80,9 +86,15 @@ struct MagicTarget
     Actor* GetTargetAsActor();
 
     bool AddTarget(AddTargetData& arData, float aCasterPerkFactor, bool aApplyStaminaPerkBonus) noexcept;
+    // Adds the effect as the game itself would: checked by the game, and sent to the other players like any effect made here.
+    bool AddTargetAsGame(AddTargetData& arData) noexcept;
     // this function actually adds the effect
     bool CheckAddEffect(AddTargetData& arData) noexcept;
     void DispelAllSpells(bool aNow) noexcept;
+    // Walks the target's active effects as the game does. On VR the list is lock-free and its nodes are shared pointers,
+    // so it must not be read as SE's simple list.
+    void VisitEffects(ForEachActiveEffectVisitor& arVisitor) noexcept;
+    TiltedPhoques::Vector<ActiveEffect*> GetActiveEffects() noexcept;
 
     void* unk04;
     void* unk08;

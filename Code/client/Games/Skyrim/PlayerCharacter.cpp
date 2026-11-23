@@ -12,6 +12,7 @@
 #include <Events/SetWaypointEvent.h>
 #include <Events/RemoveWaypointEvent.h>
 #include <Events/DroppedItemEvents.h>
+#include <PlacedTakes.h>
 
 #include <World.h>
 
@@ -26,6 +27,7 @@
 
 #include <ModCompat/BehaviorVar.h>
 #include <BSSpinLock.h>
+#include <ItemExtraData.h>
 
 int32_t PlayerCharacter::LastUsedCombatSkill = -1;
 
@@ -103,7 +105,7 @@ NiPoint3 PlayerCharacter::RespawnPlayer(TESObjectCELL* apSafePointCell, const Ni
     if (apSafePointCell)
     {
         const char* cpSafeEditorId = apSafePointCell->GetFormEditorID();
-        spdlog::info("RespawnPlayer: at the safe point in cell {:X} '{}', ({:.0f})", apSafePointCell->formID, cpSafeEditorId ? cpSafeEditorId : "", acSafePoint);
+        spdlog::debug("RespawnPlayer: at the safe point in cell {:X} '{}', ({:.0f})", apSafePointCell->formID, cpSafeEditorId ? cpSafeEditorId : "", acSafePoint);
         MoveTo(apSafePointCell, acSafePoint);
         SetNoBleedoutRecovery(true);
         return acSafePoint;
@@ -234,10 +236,10 @@ bool PlayerCharacter::IsSleepingOrWaiting() const noexcept
     return TiltedPhoques::ThisCall(s_isSleepingOrWaiting.Get(), this);
 }
 
-#ifdef SKYRIMVR
 namespace
 {
-// The game's lock on currentMapMarkers; the game empties the list under it at every load (see VRAddressOverrides.h).
+// The game's lock on currentMapMarkers; the game empties the list under it at every load (VR: see VRAddressOverrides.h).
+// AE 404255: the lock PlayerCharacter's own marker list functions (40671-40673) take around +0x508.
 BSSpinLock* MapMarkersLock() noexcept
 {
     POINTER_SKYRIMSE(BSSpinLock, s_lock, 404255, 9000013);
@@ -296,14 +298,13 @@ bool PlayerCharacter::RemoveMapMarker(uint32_t aHandle) noexcept
     }
     return false;
 }
-#endif
 
 char TP_MAKE_THISCALL(HookPickUpObject, PlayerCharacter, TESObjectREFR* apObject, int32_t aCount, bool aUnk1, bool aUnk2)
 {
     auto& modSystem = World::Get().GetModSystem();
 
     Inventory::Entry item{};
-    modSystem.GetServerModId(apObject->baseForm->formID, item.BaseId);
+    ItemExtraData::SetBase(item, apObject->baseForm);
     item.Count = aCount;
 
     if (apObject->GetExtraDataList() && !ScopedExtraDataOverride::IsOverriden())
@@ -317,13 +318,14 @@ char TP_MAKE_THISCALL(HookPickUpObject, PlayerCharacter, TESObjectREFR* apObject
     // A quest object goes to the others as well: replayed there, the pick-up gives it to this player's copy, and their quest needs one of their own.
     // Their game hands it to its player as it does a looted one (TESObjectREFR::AddOrRemoveItem).
     bool shouldUpdateClients = (apObject->IsTemporary() || item.IsQuestItem) && !ScopedActivateOverride::IsOverriden();
+    const bool cShareTake = PlacedTakes::ShouldShare(apObject->IsTemporary(), item.IsQuestItem, ScopedActivateOverride::IsOverriden());
     if (item.IsQuestItem && shouldUpdateClients)
         spdlog::info("QuestItem: picked up quest object {:X} (reference {:X}); sent to the other players", apObject->baseForm->formID, apObject->formID);
 
     // The player still needs its server entity and ownership epoch so stale inventory events can be rejected.
     if (const auto ownershipToken = Utils::GetLocalOwnershipToken(apThis->formID))
     {
-        InventoryChangeEvent event(apThis->formID, std::move(item), false, shouldUpdateClients);
+        InventoryChangeEvent event(apThis->formID, item, false, shouldUpdateClients);
         event.PickedUp = true;
         event.ServerId = ownershipToken->ServerId;
         event.OwnershipEpoch = ownershipToken->OwnershipEpoch;
@@ -333,18 +335,19 @@ char TP_MAKE_THISCALL(HookPickUpObject, PlayerCharacter, TESObjectREFR* apObject
     // Sent before the pick-up runs, because afterwards the reference is gone.
     // DroppedItemService decides whether the server remembers the item, and if so tells everyone to remove their copy.
     // Placed references count too: one may stand in for another player's drop of the same item.
-    // A placed book also carries its cell and position, so other players remove their copy from the table.
+    // A placed item also carries its cell and position, so the server keeps it taken for every game (PlacedTakes).
     if (apObject->IsTemporary() || !ScopedActivateOverride::IsOverriden())
     {
-        ItemPickedUpEvent event{apObject->formID};
-        if (!apObject->IsTemporary() && apObject->baseForm->formType == FormType::Book && modSystem.GetServerModId(apObject->formID, event.ObjectId))
+        ItemPickedUpEvent event{apObject->formID, apObject->GetHandle().handle.iBits};
+        event.Item = item;
+        if (TESObjectCELL* pCell = apObject->GetParentCellEx())
+            modSystem.GetServerModId(pCell->formID, event.CellId);
+        if (TESWorldSpace* pWorldSpace = apObject->GetWorldSpace())
+            modSystem.GetServerModId(pWorldSpace->formID, event.WorldSpaceId);
+        event.Position = glm::vec3(apObject->position.x, apObject->position.y, apObject->position.z);
+        if (cShareTake && modSystem.GetServerModId(apObject->formID, event.ObjectId))
         {
-            event.PlacedBook = true;
-            if (TESObjectCELL* pCell = apObject->GetParentCellEx())
-                modSystem.GetServerModId(pCell->formID, event.CellId);
-            if (TESWorldSpace* pWorldSpace = apObject->GetWorldSpace())
-                modSystem.GetServerModId(pWorldSpace->formID, event.WorldSpaceId);
-            event.Position = glm::vec3(apObject->position.x, apObject->position.y, apObject->position.z);
+            event.Placed = true;
         }
         World::Get().GetRunner().Trigger(std::move(event));
     }

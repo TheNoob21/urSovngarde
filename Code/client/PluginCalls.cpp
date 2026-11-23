@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <PluginCalls.h>
+#include <CoopActions.h>
 
 #include <World.h>
 #include <Games/ActorExtension.h>
@@ -8,7 +9,6 @@
 #include <Services/ActorValueService.h>
 #include <Services/CalendarService.h>
 #include <Services/CharacterService.h>
-#include <Services/MenuService.h>
 #include <Services/ObjectService.h>
 
 #include <Messages/RequestPartyPlugin.h>
@@ -72,6 +72,8 @@ void RunPluginCalls() noexcept
     }
     for (const auto& call : calls)
         call();
+
+    CoopActions::Update();
 }
 
 void StorePartyPluginAnswer(const String& acPluginFile, const String& acPlayerWithout) noexcept
@@ -105,29 +107,6 @@ void ForgetPartyValues() noexcept
 
 extern "C"
 {
-
-/**
- * In game menu (not Steam VR dashboard) only used by rig test now, do not remove
- * @param aOpen The value to set the menu open state to.
- */
-__declspec(dllexport) void urSovngarde_SetMenuOpen(bool aOpen) noexcept
-{
-    AddCall(
-        [aOpen]()
-        {
-            auto& menu = World::Get().ctx().at<MenuService>();
-            // The SteamVR dashboard is the player's own: it is neither moved nor closed from here.
-            if (aOpen && menu.GetSurface() != MenuSurface::kDashboard)
-                menu.Open(MenuService::kInGame);
-            else if (!aOpen)
-                menu.CloseOn(MenuService::kInGame);
-        });
-}
-
-__declspec(dllexport) bool urSovngarde_IsMenuOpen() noexcept
-{
-    return entt::locator<World>::has_value() && World::Get().ctx().at<MenuService>().IsOpen();
-}
 
 // A game that is not connected plays alone, and does its own switching and reviving.
 __declspec(dllexport) bool urSovngarde_IsConnected() noexcept

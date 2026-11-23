@@ -176,10 +176,11 @@ void* TP_MAKE_THISCALL(EquipHook, EquipManager, Actor* apActor, TESForm* apItem,
             return nullptr;
     }
 
-    // Consumables are "equipped" as well. We don't want this to sync, for several reasons.
-    // The right hand item on the server would be overridden by the consumable.
-    // Furthermore, the equip action on the other clients would doubly subtract the consumables.
-    if (pExtension->IsLocal() && !apItem->IsConsumable() && !apData->bQueueEquip)
+    // Consumables are "equipped" as well when eaten or drunk. That is sent too, but the other games never equip one:
+    // that would use up the copy's own and apply its effect a second time (the effect travels by itself).
+    // They play its eating or drinking sound at the copy instead (InventoryService::OnNotifyEquipmentChanges).
+    // The server keeps only the worn list sent with it, so the hands it knows are not changed.
+    if (pExtension->IsLocal() && !apData->bQueueEquip)
     {
         EquipmentChangeEvent evt{};
         evt.ActorId = apActor->formID;
@@ -243,7 +244,7 @@ void* TP_MAKE_THISCALL(EquipSpellHook, EquipManager, Actor* apActor, TESForm* ap
         EquipmentChangeEvent evt{};
         evt.ActorId = apActor->formID;
         evt.ItemId = apSpell->formID;
-        evt.EquipSlotId = apData->pEquipSlot->formID;
+        evt.EquipSlotId = apData->pEquipSlot ? apData->pEquipSlot->formID : 0;
         evt.IsSpell = true;
 
         QueueEquipmentChange(apActor, std::move(evt));
@@ -268,7 +269,7 @@ void* TP_MAKE_THISCALL(UnEquipSpellHook, EquipManager, Actor* apActor, TESForm* 
         EquipmentChangeEvent evt{};
         evt.ActorId = apActor->formID;
         evt.ItemId = apSpell->formID;
-        evt.EquipSlotId = apData->pEquipSlot->formID;
+        evt.EquipSlotId = apData->pEquipSlot ? apData->pEquipSlot->formID : 0;
         evt.Unequip = true;
         evt.IsSpell = true;
 

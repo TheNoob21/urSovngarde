@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Misc/BSFixedString.h>
+#include <initializer_list>
 #include <tuple>
 
 struct BSScript
@@ -322,6 +323,46 @@ struct BSScript
         DidLaunchSkyrimTogetherFunc(const char* apFunctionName, const char* apClassName, FunctionType aFunction, Variable::Type aType);
 
         bool MarshallAndDispatch(Variable* apBaseVar, IVirtualMachine* apVm, uint32_t aStackID, Variable* apResult, StackFrame* apStackFrame) override;
+    };
+
+    // The arguments a global native was called with, read by position.
+    // A value of the wrong type reads as zero, false or an empty string, so a script cannot crash a handler.
+    struct NativeArguments
+    {
+        Variable* const* pVariables;
+        uint32_t count;
+
+        int32_t Int(uint32_t aIndex) const noexcept;
+        float Float(uint32_t aIndex) const noexcept;
+        bool Bool(uint32_t aIndex) const noexcept;
+        // Valid for the duration of the call only.
+        const char* String(uint32_t aIndex) const noexcept;
+    };
+
+    // What a global native hands back; set once, with the type declared for the function.
+    struct NativeReturn
+    {
+        Variable* pResult;
+
+        void SetBool(bool aValue) const noexcept;
+        void SetInt(int32_t aValue) const noexcept;
+        void SetString(const char* acpValue) const noexcept;
+    };
+
+    // A global native with any number of int, float, bool or string arguments, for scripts that call into this mod.
+    // Handlers run on the thread the script runs on, so they hand work to the game's thread themselves.
+    struct GlobalNativeFunc : NativeFunction
+    {
+        using Handler = void(const NativeArguments&, const NativeReturn&);
+
+        GlobalNativeFunc(
+            const char* apFunctionName, const char* apClassName, Handler* apHandler, Variable::Type aReturnType, std::initializer_list<Variable::Type> aParameterTypes);
+
+        bool MarshallAndDispatch(Variable* apBaseVar, IVirtualMachine* apVm, uint32_t aStackID, Variable* apResult, StackFrame* apStackFrame) override;
+
+    private:
+        static constexpr uint32_t kMostParameters = 8;
+        uint32_t m_parameterCount;
     };
 
     // Bad PoC code

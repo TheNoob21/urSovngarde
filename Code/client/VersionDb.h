@@ -7,6 +7,9 @@
 #include <sstream>
 #include <vector>
 
+#include <common/VRSupportedVersion.h>
+#include "VersionDbV5.h"
+
 #ifdef SKYRIMVR
 #include "VRAddressOverrides.h"
 #endif
@@ -304,33 +307,6 @@ public:
         return true;
     }
 
-    // Address Library format version 5
-    bool LoadV5(std::ifstream& file)
-    {
-        char nameBuf[65] = {};
-        file.read(nameBuf, 64);
-        nameBuf[64] = '\0';
-        _moduleName = nameBuf;
-
-        const auto pointerSize = read<std::uint64_t>(file);
-        (void)pointerSize;
-
-        const auto addressCount = read<std::uint32_t>(file);
-
-        for (std::uint32_t id = 0; id < addressCount; ++id)
-        {
-            const auto offset = read<std::uint32_t>(file);
-
-            if (offset == 0)
-                continue;
-
-            _data[id] = offset;
-            _rdata[offset] = id;
-        }
-
-        return true;
-    }
-
     bool Load(const std::filesystem::path& acGamePath, int major, int minor, int revision, int build)
     {
         Clear();
@@ -342,9 +318,29 @@ public:
         if (!file.good())
             return false;
 
-        int format = read<int>(file);
+        int format = 0;
+        if (!file.read(reinterpret_cast<char*>(&format), sizeof(format)))
+            return false;
 
-        if (format != 2 && format != 5)
+        if (format == 5)
+        {
+            file.seekg(0);
+            if (!VersionDbV5::Load(file, {major, minor, revision, build}, _moduleName, _data, _rdata))
+            {
+                Clear();
+                return false;
+            }
+            _ver[0] = major;
+            _ver[1] = minor;
+            _ver[2] = revision;
+            _ver[3] = build;
+            char verName[64];
+            _snprintf_s(verName, 64, "%d.%d.%d.%d", major, minor, revision, build);
+            _verStr = verName;
+            _base = reinterpret_cast<unsigned long long>(GetModuleHandleA(NULL));
+            return true;
+        }
+        if (format != 2)
             return false;
 
         for (int i = 0; i < 4; i++)
@@ -361,7 +357,7 @@ public:
             _base = (unsigned long long)handle;
         }
 
-        return format == 5 ? LoadV5(file) : LoadV2(file);
+        return LoadV2(file);
     }
 
     bool DumpToTextFile(const std::string& path)
@@ -383,8 +379,12 @@ public:
         return true;
     }
 
-    bool LoadCSV(const std::filesystem::path& acGamePath)
+    bool LoadCSV(const std::filesystem::path& acGamePath, std::string_view aExeVersion)
     {
+        // Reject before opening the CSV or changing any database state.
+        if (!VRSupportedVersion::IsSupported(aExeVersion))
+            return false;
+
         std::ifstream file(acGamePath / "Data" / "SKSE" / "Plugins" / "version-1-4-15-0.csv");
         if (!file.good())
             return false;

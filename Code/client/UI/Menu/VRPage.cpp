@@ -61,10 +61,6 @@ struct PageRenderHandler final : TiltedPhoques::OverlayRenderHandler
      */
     void OnPaint(CefRefPtr<CefBrowser>, PaintElementType aType, const RectList&, const void* apBuffer, int aWidth, int aHeight) override
     {
-        static std::atomic<bool> s_loggedFirstPaint = false;
-        if (!s_loggedFirstPaint.exchange(true))
-            spdlog::info("VRPage: first page paint, type {}, {}x{}", static_cast<int>(aType), aWidth, aHeight);
-
         if (aType != PET_VIEW || aWidth != VRPage::kWidth || aHeight != VRPage::kHeight)
             return;
         m_page.StorePaint(apBuffer);
@@ -88,21 +84,17 @@ private:
  *
  * @param acPainted The picture as the browser painted it, BGRA premultiplied.
  * @param aOpaque Filled with the same picture over the panel, BGRA, fully opaque.
- * @return How many of its pixels have any content, as opposed to fully transparent ones.
  */
-size_t LayOverPanel(const std::vector<uint8_t>& acPainted, std::vector<uint8_t>& aOpaque) noexcept
+void LayOverPanel(const std::vector<uint8_t>& acPainted, std::vector<uint8_t>& aOpaque) noexcept
 {
     aOpaque.resize(acPainted.size());
-    size_t contentPixels = 0;
     for (size_t i = 0; i < acPainted.size(); i += 4)
     {
-        contentPixels += acPainted[i + 3] != 0;
         // The picture is blue, green, red: its first byte is the panel's third colour.
         for (int c = 0; c < 3; ++c)
             aOpaque[i + c] = PanelColours::OverPanel(&acPainted[i], 2 - c);
         aOpaque[i + 3] = 255;
     }
-    return contentPixels;
 }
 } // namespace
 
@@ -191,18 +183,15 @@ bool VRPage::CopyPaintedIfNewer(uint64_t& aVersion, std::vector<uint8_t>& aPixel
  *
  * @param aVersion The number of the presenter's last picture; set to the new one's.
  * @param aPixels Filled with the picture, BGRA.
- * @param aContentPercent Set to how much of the page has content, to tell a blank page from a slow one.
  * @return True when a newer picture was copied.
  */
-bool VRPage::CopyOverPanelIfNewer(uint64_t& aVersion, std::vector<uint8_t>& aPixels, uint32_t& aContentPercent) noexcept
+bool VRPage::CopyOverPanelIfNewer(uint64_t& aVersion, std::vector<uint8_t>& aPixels) noexcept
 {
     std::scoped_lock lock(m_lock);
     if (!TakeNewerVersion(aVersion))
         return false;
 
-    const size_t cContentPixels = LayOverPanel(m_pixels, aPixels);
-    const size_t cAllPixels = m_pixels.size() / 4;
-    aContentPercent = static_cast<uint32_t>(cContentPixels * 100 / cAllPixels);
+    LayOverPanel(m_pixels, aPixels);
     return true;
 }
 
@@ -232,7 +221,7 @@ void VRPage::Update(OverlayService& aOverlay) noexcept
         m_zoomed = true;
         constexpr double kZoomLevel = 3.0;
         pBrowser->GetHost()->SetZoomLevel(kZoomLevel);
-        spdlog::info("VRPage: page zoom level set to {}", kZoomLevel);
+        spdlog::debug("VRPage: page zoom level set to {}", kZoomLevel);
     }
 }
 

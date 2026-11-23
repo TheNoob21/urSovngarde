@@ -3,6 +3,7 @@
 #include <Games/TES.h>
 
 #include <Actor.h>
+#include <Services/GameExtension.h>
 
 ModManager* ModManager::Get() noexcept
 {
@@ -35,7 +36,19 @@ uint32_t& TP_MAKE_THISCALL(SpawnNewREFR, ModManager, uint32_t& aRefHandleOut, TE
 {
     TP_EMPTY_HOOK_PLACEHOLDER;
 
-    return TiltedPhoques::ThisCall(RealSpawnNewREFR, apThis, aRefHandleOut, apBaseForm, apPosition, apRotation, apParentCell, apWorldSpace, apActor, a9, a10, aForcePersist, a12);
+    auto& result =
+        TiltedPhoques::ThisCall(RealSpawnNewREFR, apThis, aRefHandleOut, apBaseForm, apPosition, apRotation, apParentCell, apWorldSpace, apActor, a9, a10, aForcePersist, a12);
+    if (aRefHandleOut)
+        GameExtension::OnCreate(aRefHandleOut);
+    return result;
+}
+
+uint32_t ModManager::SpawnReference(TESForm* apBase, NiPoint3& aPosition, NiPoint3& aRotation, TESObjectCELL* apCell, TESWorldSpace* apWorld) noexcept
+{
+    uint32_t handle{};
+    if (RealSpawnNewREFR && apBase && apCell)
+        TiltedPhoques::ThisCall(RealSpawnNewREFR, this, handle, apBase, &aPosition, &aRotation, apCell, apWorld, nullptr, 0, 0, char(0), char(1));
+    return handle;
 }
 
 uint32_t ModManager::Spawn(NiPoint3& aPosition, NiPoint3& aRotation, TESObjectCELL* apParentCell, TESWorldSpace* apWorldSpace, Actor* apCharacter) noexcept
@@ -77,5 +90,6 @@ static TiltedPhoques::Initializer s_tesHooks(
 
         RealSpawnNewREFR = s_realSpawnNewREFR.Get();
 
-        // TP_HOOK(&RealSpawnNewREFR, SpawnNewREFR);
+        if (RealSpawnNewREFR)
+            TP_HOOK(&RealSpawnNewREFR, SpawnNewREFR);
     });

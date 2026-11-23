@@ -235,11 +235,21 @@ static TiltedPhoques::Initializer s_memoryHooks(
 
 using T_initterm_e = decltype(&_initterm_e);
 T_initterm_e Real_initterm_e = nullptr;
+#ifdef SKYRIMVR
+void PreloadPluginsAtCrtInit(const void* apSlotValue); // PluginPreload.cpp
+#endif
 
 // If EngineFixes loaded, and it changed our FormAllocate hook, 
 // reset it. Our hook works just fine chaining to theirs.
 int __cdecl Hook_initterm_e(_PIFV* apFirst, _PIFV* apLast)
 {
+#ifdef SKYRIMVR
+    // The game's first _initterm_e comes before its static initialisers, where plugin preloaders load their plugins.
+    static bool s_pluginsPreloaded = false;
+    if (!std::exchange(s_pluginsPreloaded, true))
+        PreloadPluginsAtCrtInit(reinterpret_cast<const void*>(Real_initterm_e));
+#endif
+
     // We want to run last, so pre-chain.
     auto retval = Real_initterm_e(apFirst, apLast); 
     

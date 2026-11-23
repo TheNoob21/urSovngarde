@@ -4,6 +4,7 @@
 #include <Interface/GFxValue.h>
 #include <Interface/IMenu.h>
 #include <Interface/UI.h>
+#include <Services/FollowMenuOk.h>
 #include <Services/LocalSleepVote.h>
 #include <PlayerCharacter.h>
 #include <World.h>
@@ -80,11 +81,17 @@ void RunRealOk(const void* apMenu, const float aHours) noexcept
 void HookOk(void* apArgs)
 {
     // Only a server that has accepted this player counts its vote, and only a main loop that presses the agreed OK can end it.
+    // The menu that answers the leader's fast travel offer is no vote and no wait: its OK follows (PartyService::HasFollowOffer).
     const auto cHours = ReadArgsHours(apArgs);
-    if (!World::Get().GetTransport().IsOnline() || !s_holdEnabled || !cHours)
+    auto& partyService = World::Get().GetPartyService();
+    switch (FollowMenuOk::Decide(World::Get().GetTransport().IsOnline(), s_holdEnabled, cHours.has_value(), partyService.IsFollowAccepted()))
     {
-        RealOk(apArgs);
+    case FollowMenuOk::Action::kFollow:
+        spdlog::info("SleepVote: OK in the menu that follows the leader's fast travel; following, no wait");
+        partyService.CloseFollowMenu();
         return;
+    case FollowMenuOk::Action::kGameOk: RealOk(apArgs); return;
+    case FollowMenuOk::Action::kVote: break;
     }
 
     // A press during the wait the server asked for is dropped; the menu then says how long is left.

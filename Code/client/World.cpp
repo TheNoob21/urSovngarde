@@ -14,21 +14,39 @@
 #include <Services/DiscordService.h>
 #include <Services/ObjectService.h>
 #include <Services/DroppedItemService.h>
+#include <Services/ItemTakeService.h>
 #include <Services/QuestService.h>
 #include <Services/ActorValueService.h>
 #include <Services/InventoryService.h>
 #include <Services/MagicService.h>
+#include <Services/MagicStateService.h>
 #include <Services/CommandService.h>
 #include <Services/CalendarService.h>
 #include <Services/StringCacheService.h>
 #include <Services/PlayerService.h>
 #include <Services/CombatService.h>
+#include <Services/FurnitureService.h>
+#include <Services/HeadTrackService.h>
+#include <Services/HitReactionService.h>
+#include <Services/RagdollPoseService.h>
+#include <Services/ItemDataService.h>
+#include <Services/BlockService.h>
+#include <Services/MountService.h>
+#include <Services/VRSwingService.h>
+#include <Services/ArrowPickupService.h>
+#include <Services/VRShoutService.h>
+#include <Services/DetectionService.h>
+#include <Services/CrimeService.h>
 #include <Services/CharacterService.h>
 #include <Services/PresenceService.h>
 #include <Games/Skyrim/Interface/IMenu.h>
 #include <Games/Skyrim/Interface/UI.h>
 #include <Services/WeatherService.h>
 #include <Services/MapService.h>
+#include <Services/MapDiscoveryService.h>
+#include <Services/ExtensionService.h>
+#include <Services/ActivationCatchUpService.h>
+#include <Services/ReferenceStateService.h>
 #include <Services/VRConnectService.h>
 #include <Services/LauncherLinkService.h>
 #include <Services/SteamFriendsService.h>
@@ -39,6 +57,7 @@
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
+#include <Components.h>
 
 #include <ModCompat/BehaviorVar.h>  
 
@@ -48,6 +67,16 @@ World::World()
     , m_modSystem(m_dispatcher)
     , m_lastFrameTime{std::chrono::high_resolution_clock::now()}
 {
+    on_construct<LocalComponent>().connect<&World::OnServerIdSet<LocalComponent, ServerIdIndex::Kind::kLocal>>(*this);
+    on_update<LocalComponent>().connect<&World::OnServerIdSet<LocalComponent, ServerIdIndex::Kind::kLocal>>(*this);
+    on_destroy<LocalComponent>().connect<&World::OnServerIdGone<ServerIdIndex::Kind::kLocal>>(*this);
+    on_construct<RemoteComponent>().connect<&World::OnServerIdSet<RemoteComponent, ServerIdIndex::Kind::kRemote>>(*this);
+    on_update<RemoteComponent>().connect<&World::OnServerIdSet<RemoteComponent, ServerIdIndex::Kind::kRemote>>(*this);
+    on_destroy<RemoteComponent>().connect<&World::OnServerIdGone<ServerIdIndex::Kind::kRemote>>(*this);
+    on_construct<ObjectComponent>().connect<&World::OnServerIdSet<ObjectComponent, ServerIdIndex::Kind::kObject>>(*this);
+    on_update<ObjectComponent>().connect<&World::OnServerIdSet<ObjectComponent, ServerIdIndex::Kind::kObject>>(*this);
+    on_destroy<ObjectComponent>().connect<&World::OnServerIdGone<ServerIdIndex::Kind::kObject>>(*this);
+
     ctx().emplace<ImguiService>();
     ctx().emplace<DiscoveryService>(*this, m_dispatcher);
     ctx().emplace<OverlayService>(*this, m_transport, m_dispatcher);
@@ -59,31 +88,73 @@ World::World()
     ctx().emplace<DiscordService>(m_dispatcher);
     ctx().emplace<ObjectService>(*this, m_dispatcher, m_transport);
     ctx().emplace<DroppedItemService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<ItemTakeService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CalendarService>(*this, m_dispatcher, m_transport);
     ctx().emplace<QuestService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher, m_transport);
+    // Before the defender's rule (ActorValueService): each frame a flat block is weighed before held blows are let through.
+    ctx().emplace<BlockService>(*this, m_transport, m_dispatcher);
     ctx().emplace<ActorValueService>(*this, m_dispatcher, m_transport);
     ctx().emplace<InventoryService>(*this, m_dispatcher, m_transport);
     ctx().emplace<MagicService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<MagicStateService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CommandService>(*this, m_transport, m_dispatcher);
     ctx().emplace<PlayerService>(*this, m_dispatcher, m_transport);
     ctx().emplace<StringCacheService>(m_dispatcher);
     ctx().emplace<CombatService>(*this, m_transport, m_dispatcher);
+    ctx().emplace<FurnitureService>(*this, m_transport, m_dispatcher);
+    ctx().emplace<HeadTrackService>(*this, m_transport, m_dispatcher);
+    ctx().emplace<HitReactionService>(*this, m_transport, m_dispatcher);
+    ctx().emplace<RagdollPoseService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<ItemDataService>(*this, m_transport, m_dispatcher);
+    ctx().emplace<MountService>(*this, m_transport, m_dispatcher);
+    ctx().emplace<DetectionService>(*this, m_transport, m_dispatcher);
+    ctx().emplace<CrimeService>(*this, m_transport, m_dispatcher);
     ctx().emplace<PresenceService>(*this, m_dispatcher, m_transport);
     ctx().emplace<WeatherService>(*this, m_transport, m_dispatcher);
     ctx().emplace<MapService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<ExtensionService>(m_dispatcher);
+    ctx().emplace<MapDiscoveryService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<ActivationCatchUpService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<ReferenceStateService>(*this, m_dispatcher, m_transport);
     ctx().emplace<VoiceService>(*this, m_dispatcher);
     ctx().emplace<PlayerMarkerService>(*this, m_dispatcher);
     ctx().emplace<ReviveService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SleepVoteService>(m_dispatcher, m_transport, ctx().at<CalendarService>());
     ctx().emplace<VRConnectService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<ArrowPickupService>(*this, m_dispatcher, m_transport);
+#ifdef SKYRIMVR
+    ctx().emplace<VRSwingService>(*this, m_dispatcher);
+    ctx().emplace<VRShoutService>(*this, m_dispatcher);
+#endif
     ctx().emplace<LauncherLinkService>(*this, m_dispatcher);
     ctx().emplace<SteamFriendsService>(*this, m_dispatcher, m_transport);
 
     BehaviorVar::Get()->Init();
 }
 
-World::~World() = default;
+World::~World()
+{
+    on_construct<LocalComponent>().disconnect(*this);
+    on_update<LocalComponent>().disconnect(*this);
+    on_destroy<LocalComponent>().disconnect(*this);
+    on_construct<RemoteComponent>().disconnect(*this);
+    on_update<RemoteComponent>().disconnect(*this);
+    on_destroy<RemoteComponent>().disconnect(*this);
+    on_construct<ObjectComponent>().disconnect(*this);
+    on_update<ObjectComponent>().disconnect(*this);
+    on_destroy<ObjectComponent>().disconnect(*this);
+}
+
+template <class TComponent, ServerIdIndex::Kind TKind> void World::OnServerIdSet(entt::registry& aRegistry, const entt::entity aEntity) noexcept
+{
+    m_serverIds.Set(TKind, aEntity, aRegistry.get<TComponent>(aEntity).Id);
+}
+
+template <ServerIdIndex::Kind TKind> void World::OnServerIdGone(entt::registry&, const entt::entity aEntity) noexcept
+{
+    m_serverIds.Erase(TKind, aEntity);
+}
 
 void World::Update() noexcept
 {
@@ -159,7 +230,7 @@ void World::ReportPerformance(double aFrameMs, double aUpdateMs) noexcept
     const double averageMs = totalMs / frames;
 
     std::string hooks;
-    constexpr std::array<const char*, static_cast<size_t>(PerfCounter::kCount)> kNames{"VR pose", "inventory apply", "actor spawn", "equipment snapshot"};
+    constexpr std::array<const char*, static_cast<size_t>(PerfCounter::kCount)> kNames{"VR pose", "inventory apply", "actor spawn", "equipment snapshot", "VR frame end"};
     auto& slots = PerfCounters::Get();
     for (size_t i = 0; i < slots.size(); ++i)
     {

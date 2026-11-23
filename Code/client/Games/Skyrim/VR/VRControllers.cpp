@@ -183,7 +183,7 @@ bool ConfirmNodeName(const uint8_t* apNode, const char* acpName, const uint32_t 
     const NodeCheck cResult = cMatches ? NodeCheck::kValid : NodeCheck::kWrongNode;
     // Two threads may check at the same moment: only the first one to record the answer logs it.
     if (aCheck.exchange(cResult) == NodeCheck::kUnchecked && !cMatches)
-        spdlog::warn("VRControllers: PlayerCharacter+0x{:X} is not the {} on this build", aOffset, acpName);
+        spdlog::debug("VRControllers: PlayerCharacter+0x{:X} is not the {} on this build", aOffset, acpName);
     return cMatches;
 }
 
@@ -388,7 +388,7 @@ void LogUnitsPerMetreOnce(const VRControllers::HeadSpace& acSpace, const float a
     static std::atomic<bool> s_logged = false;
     if (s_logged.exchange(true))
         return;
-    spdlog::info("VRControllers: {:.1f} game units to the metre (headset node scale {:.3f})", acSpace.UnitsPerMetre, aNodeScale);
+    spdlog::debug("VRControllers: {:.1f} game units to the metre (headset node scale {:.3f})", acSpace.UnitsPerMetre, aNodeScale);
 }
 
 /**

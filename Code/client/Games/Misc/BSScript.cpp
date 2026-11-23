@@ -4,12 +4,14 @@
 #include <World.h>
 #include <Events/PapyrusFunctionRegisterEvent.h>
 #include <Events/ScriptDoorEvent.h>
+#include <Events/WordLearnedEvent.h>
 #include <Forms/TESForm.h>
 #include <Misc/GameVM.h>
 #include <Actor.h>
 #include <PlayerCharacter.h>
 #include <Games/ActorExtension.h>
 #include <Games/PapyrusFunctions.h>
+#include <Games/CoopNatives.h>
 #include <Games/Memory.h>
 #include <Structs/DoorState.h>
 
@@ -38,6 +40,19 @@ static void __fastcall HookSetOpen(BSScript::IVirtualMachine* apVirtualMachine, 
         World::Get().GetRunner().Trigger(ScriptDoorEvent(apRef->formID, aOpen));
 }
 
+using TTeachWord = void(__fastcall*)(BSScript::IVirtualMachine*, uint32_t, void*, TESForm*);
+static TTeachWord RealTeachWord = nullptr;
+
+// What the game's scripts reach when they call Game.TeachWord: a word wall's, a quest's.
+// A word a party member was taught is taught through the game's own function (PapyrusService), so it does not come through here.
+static void __fastcall HookTeachWord(BSScript::IVirtualMachine* apVirtualMachine, uint32_t aStackId, void* apTag, TESForm* apWord)
+{
+    RealTeachWord(apVirtualMachine, aStackId, apTag, apWord);
+
+    if (apWord && !IsProcessExiting())
+        World::Get().GetRunner().Trigger(WordLearnedEvent(apWord->formID));
+}
+
 void TP_MAKE_THISCALL(HookRegisterPapyrusFunction, BSScript::IVirtualMachine, NativeFunction* apFunction)
 {
     auto& runner = World::Get().GetRunner();
@@ -52,6 +67,13 @@ void TP_MAKE_THISCALL(HookRegisterPapyrusFunction, BSScript::IVirtualMachine, Na
     {
         RealSetOpen = reinterpret_cast<TSetOpen>(apFunction->functionAddress);
         apFunction->functionAddress = reinterpret_cast<void*>(&HookSetOpen);
+    }
+    else if (
+        _stricmp(apFunction->functionName.AsAscii(), "TeachWord") == 0 && _stricmp(apFunction->typeName.AsAscii(), "Game") == 0 && apFunction->functionAddress &&
+        apFunction->functionAddress != reinterpret_cast<void*>(&HookTeachWord))
+    {
+        RealTeachWord = reinterpret_cast<TTeachWord>(apFunction->functionAddress);
+        apFunction->functionAddress = reinterpret_cast<void*>(&HookTeachWord);
     }
 
     TiltedPhoques::ThisCall(RealRegisterPapyrusFunction, apThis, apFunction);
@@ -134,6 +156,8 @@ void TP_MAKE_THISCALL(HookBindEverythingToScript, BSScript::IVirtualMachine*)
     (*apThis)->BindNativeMethod(new BSScript::IsRemotePlayerFunc("IsRemotePlayer", "SkyrimTogetherUtils", PapyrusFunctions::IsRemotePlayer, BSScript::Variable::kBoolean));
     (*apThis)->BindNativeMethod(new BSScript::IsPlayerFunc("IsPlayer", "SkyrimTogetherUtils", PapyrusFunctions::IsPlayer, BSScript::Variable::kBoolean));
     (*apThis)->BindNativeMethod(new BSScript::DidLaunchSkyrimTogetherFunc("DidLaunchSkyrimTogether", "SkyrimTogetherVerifyLaunchScript", PapyrusFunctions::DidLaunchSkyrimTogether, BSScript::Variable::kBoolean));
+
+    BindCoopNatives(*apThis);
 
     TiltedPhoques::ThisCall(RealBindEverythingToScript, apThis);
 }

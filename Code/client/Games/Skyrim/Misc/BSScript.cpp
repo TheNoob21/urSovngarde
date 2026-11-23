@@ -1,6 +1,8 @@
 #include <Misc/BSScript.h>
 #include <Misc/GameVM.h>
 
+#include <algorithm>
+
 uint64_t BSScript::Object::GetHandle()
 {
     TP_THIS_FUNCTION(TGetHandle, uint64_t, BSScript::Object);
@@ -306,5 +308,83 @@ BSScript::DidLaunchSkyrimTogetherFunc::DidLaunchSkyrimTogetherFunc(const char* a
 bool BSScript::DidLaunchSkyrimTogetherFunc::MarshallAndDispatch(Variable* apBaseVar, IVirtualMachine* apVm, uint32_t aStackID, Variable* apResult, StackFrame* apStackFrame)
 {
     apResult->Set<bool>(true);
+    return true;
+}
+
+int32_t BSScript::NativeArguments::Int(uint32_t aIndex) const noexcept
+{
+    return aIndex < count && pVariables[aIndex] && pVariables[aIndex]->type == Variable::kInteger ? pVariables[aIndex]->data.i : 0;
+}
+
+float BSScript::NativeArguments::Float(uint32_t aIndex) const noexcept
+{
+    return aIndex < count && pVariables[aIndex] && pVariables[aIndex]->type == Variable::kFloat ? pVariables[aIndex]->data.f : 0.f;
+}
+
+bool BSScript::NativeArguments::Bool(uint32_t aIndex) const noexcept
+{
+    return aIndex < count && pVariables[aIndex] && pVariables[aIndex]->type == Variable::kBoolean && pVariables[aIndex]->data.b;
+}
+
+const char* BSScript::NativeArguments::String(uint32_t aIndex) const noexcept
+{
+    // A string variable holds a BSFixedString, whose first member is the pooled characters.
+    const char* pText = aIndex < count && pVariables[aIndex] && pVariables[aIndex]->type == Variable::kString ? pVariables[aIndex]->data.s : nullptr;
+    return pText ? pText : "";
+}
+
+void BSScript::NativeReturn::SetBool(bool aValue) const noexcept
+{
+    pResult->Set<bool>(aValue);
+}
+
+void BSScript::NativeReturn::SetInt(int32_t aValue) const noexcept
+{
+    pResult->Set<int32_t>(aValue);
+}
+
+void BSScript::NativeReturn::SetString(const char* acpValue) const noexcept
+{
+    pResult->Set<const char*>(acpValue ? acpValue : "");
+}
+
+BSScript::GlobalNativeFunc::GlobalNativeFunc(
+    const char* apFunctionName, const char* apClassName, Handler* apHandler, Variable::Type aReturnType, std::initializer_list<Variable::Type> aParameterTypes)
+    : NativeFunction(apFunctionName, apClassName, true, static_cast<uint32_t>(std::min<size_t>(aParameterTypes.size(), kMostParameters)))
+    , m_parameterCount(static_cast<uint32_t>(std::min<size_t>(aParameterTypes.size(), kMostParameters)))
+{
+    pFunction = reinterpret_cast<void*>(apHandler);
+    returnType = aReturnType;
+
+    // Only the type is set: the game's constructor already made the parameter entries, as for the functions above.
+    uint32_t index = 0;
+    for (const Variable::Type type : aParameterTypes)
+    {
+        if (index >= m_parameterCount)
+            break;
+        parameters.data[index++].type = type;
+    }
+}
+
+bool BSScript::GlobalNativeFunc::MarshallAndDispatch(Variable*, IVirtualMachine*, uint32_t, Variable* apResult, StackFrame* apStackFrame)
+{
+    Variable* variables[kMostParameters]{};
+    if (m_parameterCount)
+    {
+        const uint32_t page = apStackFrame->GetPageForFrame();
+        for (uint32_t i = 0; i < m_parameterCount; ++i)
+            variables[i] = apStackFrame->GetStackFrameVariable(i, page);
+    }
+
+    const NativeArguments arguments{variables, m_parameterCount};
+    const NativeReturn result{apResult};
+    // An exception must not cross into the game's VM; the script then gets the default value.
+    try
+    {
+        reinterpret_cast<Handler*>(pFunction)(arguments, result);
+    }
+    catch (...)
+    {
+    }
     return true;
 }

@@ -43,6 +43,9 @@ struct Quest
 struct SpellCast
 {
 };
+struct ReferenceEnable
+{
+};
 } // namespace details
 
 using ScopedReferencesOverride = ScopedOverride<TESObjectREFR>;
@@ -55,3 +58,5 @@ using ScopedInventoryOverride = ScopedOverride<details::Inventory>;
 using ScopedExtraDataOverride = ScopedOverride<details::ExtraData>;
 using ScopedQuestOverride = ScopedOverride<details::Quest>;
 using ScopedSpellCastOverride = ScopedOverride<details::SpellCast>;
+// A disable and enable made here only to reload a reference's model: not a switch for the party.
+using ScopedReferenceEnableOverride = ScopedOverride<details::ReferenceEnable>;

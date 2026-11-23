@@ -94,10 +94,9 @@ struct VRPage final : TiltedPhoques::OverlayApp::RenderProvider
      *
      * @param aVersion The number of the presenter's last picture; set to the new one's.
      * @param aPixels Filled with the picture, BGRA.
-     * @param aContentPercent Set to how much of the page has content, to tell a blank page from a slow one.
      * @return True when a newer picture was copied.
      */
-    bool CopyOverPanelIfNewer(uint64_t& aVersion, std::vector<uint8_t>& aPixels, uint32_t& aContentPercent) noexcept;
+    bool CopyOverPanelIfNewer(uint64_t& aVersion, std::vector<uint8_t>& aPixels) noexcept;
 
     /**
      * Take the browser's last request for a keyboard.

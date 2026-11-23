@@ -5,6 +5,7 @@
 #include <UI/Banner/BannerOverlays.h>
 
 #include <Games/Skyrim/VR/VRRuntime.h>
+#include <Systems/VROverlaySupport.h>
 
 #include <openvr/openvr.h>
 
@@ -21,10 +22,12 @@ constexpr uint32_t kBytesPerPixel = 4;
 /**
  * Get SteamVR's overlays, kept once found.
  *
- * @return The overlay part; null under OpenComposite, and before VR starts.
+ * @return The overlay part; null under OpenComposite, with the overlays forced off, and before VR starts.
  */
 vr::IVROverlay* GetOverlay() noexcept
 {
+    if (!VROverlaySupport::VROverlaysAvailable())
+        return nullptr;
     static vr::IVROverlay* s_pOverlay = nullptr;
     if (!s_pOverlay)
         s_pOverlay = VRRuntime::GetOpenVROverlay();

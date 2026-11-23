@@ -110,6 +110,17 @@ bool MagicItem::HasSummonEffect() const noexcept
     return false;
 }
 
+bool MagicItem::HasSlowOrBeastFormEffect() const noexcept
+{
+    for (const EffectItem* pEffect : listOfEffects)
+    {
+        if (pEffect && pEffect->pEffectSetting && (pEffect->IsSlowEffect() || pEffect->IsWerewolfEffect() || pEffect->IsVampireLordEffect()))
+            return true;
+    }
+
+    return false;
+}
+
 EffectItem* MagicItem::GetEffect(const uint32_t aEffectId) noexcept
 {
     for (EffectItem* pEffect : listOfEffects)

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 //! Marks game code known to fault and recovered by an __except (see the crime alarm in Actor.cpp).
 //! The crash handler ignores access violations inside it.
 namespace CrashGuard
@@ -7,6 +9,10 @@ namespace CrashGuard
 void Enter() noexcept;
 void Leave() noexcept;
 [[nodiscard]] bool Inside() noexcept;
+//! Where the crime alarm's code is: the game's function and the start of it a hook moved elsewhere (see Actor.cpp).
+void SetCrimeAlarm(uintptr_t aBegin, uintptr_t aEnd, uintptr_t aMovedStart) noexcept;
+//! Whether an instruction address is in the crime alarm's code.
+[[nodiscard]] bool InCrimeAlarm(uintptr_t aAddress) noexcept;
 } // namespace CrashGuard
 
 //! Logs where the game is stuck when no frame has finished for 25 s, since a freeze leaves no crash report.
@@ -45,7 +51,6 @@ class CrashHandler
     CrashHandler();
     ~CrashHandler();
 
-    static void RemovePreviousDump(std::filesystem::path path);
     static inline LPTOP_LEVEL_EXCEPTION_FILTER GetOriginalUnhandledExceptionFilter()
     {
         return m_pUnhandled;

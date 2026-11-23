@@ -1,120 +1,91 @@
 #include <TiltedOnlinePCH.h>
 
 #include <SaveLoad.h>
+#include <LoadLatch.h>
+#include <mutex>
 #include <Helpers/ModuleImage.h>
-#include <Helpers/ReadableMemory.h>
 
-// TEMPORARY: logs every save load request with its file and caller.
-// It looks for what sends a connected player to the main menu; this client never loads a save itself.
-TP_THIS_FUNCTION(TSaveLoadManagerLoad, bool, BGSSaveLoadManager, const char* apFileName, bool aCheckForMods, bool aUnk);
-static TSaveLoadManagerLoad* RealSaveLoadManagerLoad = nullptr;
-
-bool TP_MAKE_THISCALL(HookSaveLoadManagerLoad, BGSSaveLoadManager, const char* apFileName, bool aCheckForMods, bool aUnk)
+namespace PlayerSaveContext
 {
-    // Who asked for the load: the game itself, or a plugin.
-    const std::string cCaller = ModuleImage::Where(_ReturnAddress());
-    spdlog::info("SaveLoad: load requested for '{}' (check mods {}, flag {}) from {}", apFileName ? apFileName : "(null)", aCheckForMods, aUnk, cCaller);
-    const bool result = TiltedPhoques::ThisCall(RealSaveLoadManagerLoad, apThis, apFileName, aCheckForMods, aUnk);
-    spdlog::info("SaveLoad: load of '{}' returned {}", apFileName ? apFileName : "(null)", result);
-    return result;
-}
-
-// TEMPORARY: logs when the game builds a queued request of type 0xD0000010 (VR 1.4.15 RVAs below).
-// That request can end at the main menu and the queue hides who built it, so its caller and stack are logged.
-// The save-warning callback (+0x595B60) queues it on response 1, so that response is logged too.
 namespace
 {
-uintptr_t GameBase() noexcept
+std::recursive_mutex s_lock;
+LoadLatch s_latch;
+
+uint64_t CurrentPlayer() noexcept
 {
-    return reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-}
-
-void DescribeAddress(const void* apAddress, char* apOut, const size_t aOutSize) noexcept
-{
-    HMODULE hModule = nullptr;
-    char name[MAX_PATH] = {};
-    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCSTR>(apAddress), &hModule) && hModule &&
-        GetModuleFileNameA(hModule, name, sizeof(name)))
-    {
-        const char* pBase = strrchr(name, 92);
-        _snprintf_s(apOut, aOutSize, _TRUNCATE, "%s+0x%llx", pBase ? pBase + 1 : name, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(apAddress) - reinterpret_cast<uintptr_t>(hModule)));
-        return;
-    }
-    _snprintf_s(apOut, aOutSize, _TRUNCATE, "<0x%llx>", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(apAddress)));
-}
-
-std::string CaptureStack() noexcept
-{
-    void* stack[16] = {};
-    const USHORT count = RtlCaptureStackBackTrace(2, 16, stack, nullptr);
-    std::string frames;
-    for (USHORT i = 0; i < count; ++i)
-    {
-        char frame[160];
-        DescribeAddress(stack[i], frame, sizeof(frame));
-        frames += fmt::format("{}{}", i == 0 ? "" : " < ", frame);
-    }
-    return frames;
-}
-
-std::string FirstWords(const void* apObject, const int aCount) noexcept
-{
-    if (!ReadableMemory::IsReadable(apObject, aCount * 8))
-        return "(unreadable)";
-    std::string words;
-    const uint64_t* pWords = static_cast<const uint64_t*>(apObject);
-    for (int i = 0; i < aCount; ++i)
-        words += fmt::format("{}{:x}", i == 0 ? "" : " ", pWords[i]);
-    return words;
-}
-
-constexpr uintptr_t kRequestCtorRva = 0x594D80;
-constexpr uintptr_t kWarningCallbackRva = 0x595B60;
-
-using TRequestCtor = void*(void* apThis, uint64_t a2, uint64_t a3, uint64_t a4);
-using TWarningCallback = uint64_t(void* apThis, uint64_t aResponse, uint64_t a3, uint64_t a4);
-TRequestCtor* RealRequestCtor = nullptr;
-TWarningCallback* RealWarningCallback = nullptr;
-
-void* HookRequestCtor(void* apThis, uint64_t a2, uint64_t a3, uint64_t a4)
-{
-    char caller[160];
-    DescribeAddress(_ReturnAddress(), caller, sizeof(caller));
-    void* pResult = RealRequestCtor(apThis, a2, a3, a4);
-    spdlog::info("SaveLoad: request built (ctor +0x594D80) this {:x}, args {:x} {:x} {:x}, words after [{}], from {}; stack [{}]", reinterpret_cast<uintptr_t>(apThis), a2, a3, a4,
-                 FirstWords(apThis, 6), caller, CaptureStack());
-    return pResult;
-}
-
-uint64_t HookWarningCallback(void* apThis, uint64_t aResponse, uint64_t a3, uint64_t a4)
-{
-    char caller[160];
-    DescribeAddress(_ReturnAddress(), caller, sizeof(caller));
-    spdlog::info("SaveLoad: warning callback (+0x595B60) this {:x}, response {} (rdx {:x}), words [{}], from {}; stack [{}]", reinterpret_cast<uintptr_t>(apThis), aResponse & 0xFF, aResponse,
-                 FirstWords(apThis, 4), caller, CaptureStack());
-    return RealWarningCallback(apThis, aResponse, a3, a4);
+    // CommonLibSSE-NG BGSSaveLoadManager::currentPlayerID, +0xD0.
+    // CommonLibVR's manager has the same member position (named unk0D0 there).
+    // The singleton itself is independent of the change-flags manager (516851).
+    POINTER_SKYRIMSE(BGSSaveLoadManager*, s_manager, 403340, 516860);
+    BGSSaveLoadManager* pManager = s_manager.Get() ? *s_manager.Get() : nullptr;
+    return pManager ? *reinterpret_cast<const uint64_t*>(reinterpret_cast<const uint8_t*>(pManager) + 0xD0) : 0;
 }
 } // namespace
+
+Snapshot Read() noexcept
+{
+    std::scoped_lock lock(s_lock);
+    return {s_latch.Loading() ? 0 : CurrentPlayer(), s_latch.Generation(), s_latch.Loading()};
+}
+
+uint64_t BeginLoad() noexcept
+{
+    std::scoped_lock lock(s_lock);
+    s_latch.Begin();
+    return s_latch.Generation();
+}
+
+void RefuseLoad(const uint64_t aGeneration) noexcept
+{
+    std::scoped_lock lock(s_lock);
+    s_latch.Refused(aGeneration);
+}
+
+void CompleteLoad() noexcept
+{
+    std::scoped_lock lock(s_lock);
+    s_latch.Complete();
+}
+
+bool RunFor(const Snapshot& acExpected, const std::function<void()>& acWrite) noexcept
+{
+    std::scoped_lock lock(s_lock);
+    if (s_latch.Loading() || acExpected.Loading || !acExpected.PlayerId || s_latch.Generation() != acExpected.Generation || CurrentPlayer() != acExpected.PlayerId)
+        return false;
+    acWrite();
+    return true;
+}
+} // namespace PlayerSaveContext
+
+// A save load blocks the party words until its load event; a request the game refuses sends none.
+TP_THIS_FUNCTION(TSaveLoadManagerLoad, bool, BGSSaveLoadManager, const char* apFileName, int32_t aDeviceId, uint32_t aOutputStats, bool aCheckForMods);
+static TSaveLoadManagerLoad* RealSaveLoadManagerLoad = nullptr;
+
+bool TP_MAKE_THISCALL(HookSaveLoadManagerLoad, BGSSaveLoadManager, const char* apFileName, int32_t aDeviceId, uint32_t aOutputStats, bool aCheckForMods)
+{
+    spdlog::debug(
+        "SaveLoad: load requested for '{}' (device {}, stats {}, check mods {}) from {}", apFileName ? apFileName : "(null)", aDeviceId, aOutputStats, aCheckForMods,
+        ModuleImage::Where(_ReturnAddress()));
+    const uint64_t cLoadGeneration = PlayerSaveContext::BeginLoad();
+    const bool result = TiltedPhoques::ThisCall(RealSaveLoadManagerLoad, apThis, apFileName, aDeviceId, aOutputStats, aCheckForMods);
+    spdlog::debug("SaveLoad: load of '{}' returned {}", apFileName ? apFileName : "(null)", result);
+    if (!result)
+        PlayerSaveContext::RefuseLoad(cLoadGeneration);
+    return result;
+}
 
 static TiltedPhoques::Initializer s_saveLoadHooks(
     []()
     {
-#ifdef SKYRIMVR
-        POINTER_SKYRIMSE(TSaveLoadManagerLoad, s_load, 34819, 34819);
+        POINTER_SKYRIMSE(TSaveLoadManagerLoad, s_load, 35728, 34819);
         if (s_load.Get())
         {
             RealSaveLoadManagerLoad = s_load.Get();
             TP_HOOK(&RealSaveLoadManagerLoad, HookSaveLoadManagerLoad);
         }
         else
-            spdlog::warn("SaveLoad: id 34819 not resolved, load diagnostic off");
-
-        RealRequestCtor = reinterpret_cast<TRequestCtor*>(GameBase() + kRequestCtorRva);
-        TP_HOOK(&RealRequestCtor, HookRequestCtor);
-        RealWarningCallback = reinterpret_cast<TWarningCallback*>(GameBase() + kWarningCallbackRva);
-        TP_HOOK(&RealWarningCallback, HookWarningCallback);
-        spdlog::info("SaveLoad: request constructor and warning callback probes installed at SkyrimVR+0x{:x} and +0x{:x}", kRequestCtorRva, kWarningCallbackRva);
-#endif
+            spdlog::warn("SaveLoad: id 34819 not resolved, a refused load is not seen");
     });
 
 void BGSSaveLoadManager::Save(SaveData* apData)

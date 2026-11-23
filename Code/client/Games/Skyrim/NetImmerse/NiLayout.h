@@ -13,6 +13,7 @@ constexpr uint32_t kNameOffset = 0x10;    // NiObjectNET::name
 constexpr uint32_t kParentOffset = 0x30;  // NiAVObject::parent
 constexpr uint32_t kLocalOffset = 0x48;   // NiAVObject::local
 constexpr uint32_t kWorldOffset = 0x7C;   // NiAVObject::world
+constexpr uint32_t kCollisionObjectOffset = 0x40; // NiAVObject::collisionObject
 #ifdef SKYRIMVR
 constexpr uint32_t kNiAVObjectSize = 0x138;
 #else

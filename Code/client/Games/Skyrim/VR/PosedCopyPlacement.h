@@ -31,6 +31,19 @@ bool IsFrameEndRunning() noexcept;
 void KeepForFrameEnd(uint32_t aFormId, const NiPoint3& acPosition, const NiPoint3& acAngles) noexcept;
 
 /**
+ * Keep a posed rider's place for the frame end, as KeepForFrameEnd does, but taken from its horse there: the horse may be
+ * placed after the rider's step, which would leave the rider on the horse's last place (a step behind it).
+ *
+ * @param aFormId The rider's copy's form id.
+ * @param acPosition Where its step put it, for when the horse is gone by then.
+ * @param acAngles How it turns (x, y, z in radians).
+ * @param aHorseId The horse's form id.
+ * @param acSeat The seat as seen from the horse (SeatPin).
+ * @param aHorseHeading Whether its heading is the horse's (not the rider's own in the saddle), taken from the horse there too.
+ */
+void KeepOnHorseForFrameEnd(uint32_t aFormId, const NiPoint3& acPosition, const NiPoint3& acAngles, uint32_t aHorseId, const NiPoint3& acSeat, bool aHorseHeading) noexcept;
+
+/**
  * Forget a copy's kept place: the interpolation's step for it starts over, and only a place kept in that step is given.
  *
  * @param aFormId The copy's form id.

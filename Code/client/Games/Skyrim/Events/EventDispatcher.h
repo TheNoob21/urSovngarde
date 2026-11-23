@@ -78,8 +78,12 @@ struct TESDeathEvent
     bool isDead;
 };
 
+// As CommonLibSSE has it; the reference is the game's counted pointer, read only while the event is handled.
 struct TESDestructionStageChangedEvent
 {
+    TESObjectREFR* pTarget;
+    uint32_t oldStage;
+    uint32_t newStage;
 };
 
 struct TESEnterBleedoutEvent

@@ -1,4 +1,7 @@
 #include "MagicTarget.h"
+
+#include <Services/GameExtension.h>
+#include <Forms/TESObjectARMO.h>
 #include <Events/HealthChangeEvent.h>
 
 #include <cmath>
@@ -23,6 +26,7 @@
 #include <Forms/SpellItem.h>
 #include <Forms/EnchantmentItem.h>
 #include <Forms/ActorValueInfo.h>
+#include <Services/CharacterService.h>
 
 TP_THIS_FUNCTION(TAddTarget, bool, MagicTarget, MagicTarget::AddTargetData& arData);
 TP_THIS_FUNCTION(TCheckAddEffectTargetData, bool, MagicTarget::AddTargetData, void* arArgs, float afResistance);
@@ -117,6 +121,32 @@ void MagicTarget::DispelAllSpells(bool aNow) noexcept
     TiltedPhoques::ThisCall(dispelAllSpells, this, aNow);
 }
 
+void MagicTarget::VisitEffects(ForEachActiveEffectVisitor& arVisitor) noexcept
+{
+    TP_THIS_FUNCTION(TVisitEffects, void, MagicTarget, ForEachActiveEffectVisitor& arVisitor);
+    POINTER_SKYRIMSE(TVisitEffects, s_visitEffects, 34540, 34540);
+    TiltedPhoques::ThisCall(s_visitEffects, this, arVisitor);
+}
+
+TiltedPhoques::Vector<ActiveEffect*> MagicTarget::GetActiveEffects() noexcept
+{
+    struct Collector : ForEachActiveEffectVisitor
+    {
+        Result Accept(ActiveEffect* apEffect) override
+        {
+            if (apEffect)
+                Effects.push_back(apEffect);
+            return Result::kContinue;
+        }
+
+        TiltedPhoques::Vector<ActiveEffect*> Effects;
+    };
+
+    Collector collector;
+    VisitEffects(collector);
+    return std::move(collector.Effects);
+}
+
 bool MagicTarget::AddTarget(AddTargetData& arData, float aCasterPerkFactor, bool aApplyStaminaPerkBonus) noexcept
 {
     // The factor comes from another game: one that no perk could give (not a number, below 0, over 10 times) is not applied.
@@ -188,6 +218,11 @@ bool TP_MAKE_THISCALL(HookAddTarget, MagicTarget, MagicTarget::AddTargetData& ar
 
     if (arData.pEffectItem->IsVampireLordEffect())
         pTargetActorEx->GraphDescriptorHash = AnimationGraphDescriptor_VampireLordBehavior::m_key;
+
+    if (pTargetActorEx->IsRemote() && (!arData.pCaster || arData.pCaster == pTargetActor) && arData.pSource)
+        if (auto* armor = Cast<TESObjectARMO>(arData.pSource);
+            armor && GameExtension::AllowsEffect(armor->formID, armor->slotType, arData.pSpell->formID, arData.pEffectItem->pEffectSetting->formID))
+            return TiltedPhoques::ThisCall(RealAddTarget, apThis, arData);
 
     if (ScopedSpellCastOverride::IsOverriden())
         return TiltedPhoques::ThisCall(RealAddTarget, apThis, arData);
@@ -297,6 +332,10 @@ bool TP_MAKE_THISCALL(HookAddTarget, MagicTarget, MagicTarget::AddTargetData& ar
         ActorExtension* pCasterExtension = arData.pCaster->GetExtension();
         if (pCasterExtension->IsLocalPlayer())
         {
+            // A body another game runs is raised here once that game hands it over, so that this game's AI leads it.
+            if (World::Get().GetCharacterService().ClaimToRaise(pTargetActor, arData))
+                return false;
+
             // A raise on a copy is sent on once the game here finds the body one the spell can raise, and is not run here.
             // Only the owner's game runs it (the other games leave it, MagicService::OnNotifyAddTarget); the copy gets up when that game says it lives.
             if (MagicTarget::IsRaiseOnCopy(pTargetActor, arData.pEffectItem))
@@ -318,7 +357,9 @@ bool TP_MAKE_THISCALL(HookAddTarget, MagicTarget, MagicTarget::AddTargetData& ar
         else if (pCasterExtension->IsRemotePlayer())
         {
             // Send out a HitEvent because TakeDamage is never triggered.
-            World::Get().GetRunner().Trigger(HitEvent(arData.pCaster->formID, pTargetActor->formID));
+            // Not for another player's healing or buff spell: its effect comes from its owner's game, and it is no attack.
+            if (MagicSystem::CopyEffectIsHit(arData.pSpell->IsHealingSpell(), arData.pSpell->IsBuffSpell()))
+                World::Get().GetRunner().Trigger(HitEvent(arData.pCaster->formID, pTargetActor->formID));
             return false;
         }
     }
@@ -334,6 +375,11 @@ bool TP_MAKE_THISCALL(HookAddTarget, MagicTarget, MagicTarget::AddTargetData& ar
     {
         return false;
     }
+}
+
+bool MagicTarget::AddTargetAsGame(AddTargetData& arData) noexcept
+{
+    return HookAddTarget(this, arData);
 }
 
 bool TP_MAKE_THISCALL(HookCheckAddEffectTargetData, MagicTarget::AddTargetData, void* arArgs, float afResistance)

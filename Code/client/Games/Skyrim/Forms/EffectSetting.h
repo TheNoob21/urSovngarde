@@ -8,6 +8,13 @@
 
 struct EffectSetting : TESForm
 {
+    enum EffectFlag : uint32_t
+    {
+        kHostile = 1 << 0,
+    };
+
+    bool IsHostile() const noexcept { return (flags & kHostile) != 0; }
+
     TESFullName fullName;
     BGSMenuDisplayObject menuDisplayObject;
     BGSKeywordForm keywordForm;
@@ -20,19 +27,27 @@ struct EffectSetting : TESForm
     uint32_t unk48;
     uint16_t unk4C;
     uint8_t pad4E[2];
-    void* unk50;
+    void* pLight;
     uint32_t unk54;
-    void* unk58;
-    void* unk5C;
+    void* pEffectShader;
+    void* pEnchantShader;
     uint8_t unk60[0x18];
     EffectArchetypes::ArchetypeID eArchetype;
     uint32_t primaryActorValue;
     void* unk80[2];
     uint32_t castType;
     uint32_t deliveryType;
+    uint32_t secondaryActorValue;
+    uint32_t padE4;
+    void* pCastingArt;
+    void* pHitEffectArt;
     // more stuff
 };
 
+static_assert(offsetof(EffectSetting, flags) == 0x68);
 static_assert(offsetof(EffectSetting, eArchetype) == 0xC0);
 static_assert(offsetof(EffectSetting, primaryActorValue) == 0xC4);
 static_assert(offsetof(EffectSetting, castType) == 0xD8);
+static_assert(offsetof(EffectSetting, pLight) == 0x88);
+static_assert(offsetof(EffectSetting, pEffectShader) == 0x98);
+static_assert(offsetof(EffectSetting, pHitEffectArt) == 0xF0);

@@ -32,6 +32,11 @@ bool ActorExtension::IsFollowerCopy() const noexcept
     return onlineFlags & kFollowerCopy;
 }
 
+bool ActorExtension::IsOthersFollower() const noexcept
+{
+    return (onlineFlags & (kFollowerCopy | kOthersFollower)) != 0;
+}
+
 bool ActorExtension::IsHiddenHere() const noexcept
 {
     return onlineFlags & kHiddenHere;
@@ -66,6 +71,14 @@ void ActorExtension::SetFollowerCopy(bool aSet) noexcept
         onlineFlags &= ~kFollowerCopy;
 }
 
+void ActorExtension::SetOthersFollower(bool aSet) noexcept
+{
+    if (aSet)
+        onlineFlags |= kOthersFollower;
+    else
+        onlineFlags &= ~kOthersFollower;
+}
+
 void ActorExtension::SetHiddenHere(bool aSet) noexcept
 {
     if (aSet)
@@ -74,10 +87,14 @@ void ActorExtension::SetHiddenHere(bool aSet) noexcept
         onlineFlags &= ~kHiddenHere;
 }
 
-/**
- * Sets the "OtherGame" flag for the actor.
- * @param aSet The value to set the flag to.
- */
+void ActorExtension::ForgetCopyBleedout() noexcept
+{
+    OwnerWordOfCopy.store(0, std::memory_order_relaxed);
+    KneelsInGraph.store(false, std::memory_order_relaxed);
+    EngineStopPlayed.store(0, std::memory_order_relaxed);
+    OwnerFallTick.store(0, std::memory_order_relaxed);
+}
+
 void ActorExtension::SetOtherGame(bool aSet) noexcept
 {
     if (aSet)

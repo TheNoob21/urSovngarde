@@ -129,7 +129,6 @@ struct PlayerCharacter : Actor
      */
     bool IsSleepingOrWaiting() const noexcept;
 
-#ifdef SKYRIMVR
     //! Whether the game's lock on the world map's marker list is known; without it the list is never touched.
     static bool CanEditMapMarkers() noexcept;
     //! Puts a reference's handle on the world map's marker list, or takes it off.
@@ -137,7 +136,6 @@ struct PlayerCharacter : Actor
     bool AddMapMarker(uint32_t aHandle) noexcept;
     bool RemoveMapMarker(uint32_t aHandle) noexcept;
     bool HasMapMarker(uint32_t aHandle) noexcept;
-#endif
 
     struct Objective
     {
@@ -152,9 +150,16 @@ struct PlayerCharacter : Actor
     };
 
 #ifndef SKYRIMVR
-    uint8_t pad1[0x590 - sizeof(Actor)];
+    uint8_t pad1[0x508 - sizeof(Actor)];
+    // Handles of the markers the world map and the compass show, guarded by the game's lock (see AddMapMarker).
+    // AE: PlayerCharacter's marker list functions (ids 40671-40673) and MapMenu's gathering (53108) all use +0x508.
+    GameArray<uint32_t> currentMapMarkers;
+    uint8_t pad520[0x590 - 0x520];
     GameArray<ObjectiveInstance> objectives;
-    uint8_t pad588[0x9B0 - 0x598];
+    uint8_t pad588[0x8C8 - 0x598];
+    // Handle of what the player holds with the grab key, 0 when nothing (what Papyrus' Game.GetPlayerGrabbedRef reads).
+    uint32_t grabbedObjectHandle;
+    uint8_t pad8CC[0x9B0 - 0x8CC];
     Skills** pSkills;
     uint8_t pad9B8[0xAC8 - 0x9B8];
     TESForm* locationForm;
@@ -193,7 +198,9 @@ struct PlayerCharacter : Actor
 };
 
 #ifndef SKYRIMVR
+static_assert(offsetof(PlayerCharacter, currentMapMarkers) == 0x508);
 static_assert(offsetof(PlayerCharacter, objectives) == 0x590);
+static_assert(offsetof(PlayerCharacter, grabbedObjectHandle) == 0x8D8);
 static_assert(offsetof(PlayerCharacter, pSkills) == 0x9C0);
 static_assert(offsetof(PlayerCharacter, locationForm) == 0xAD8);
 static_assert(offsetof(PlayerCharacter, chargenFlags) == 0xB12);
