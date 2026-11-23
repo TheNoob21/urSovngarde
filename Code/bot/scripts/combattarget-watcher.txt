@@ -1,0 +1,42 @@
+# The watching half of the combat target test: is each fight of the other bot's NPCs told here, at its epoch, and only those?
+#
+#   powershell -ExecutionPolicy Bypass -File Tools\VR\run-bot-tests.ps1 -Pair combattarget
+#
+# The actor runs a bear (A, 23A8A) and Anoriath (B, 13B97) and says, 3 s apart: A fights B, A fights this bot, A fights
+# nobody, then A fights B at a stale epoch, which the server must drop.
+log combattarget watcher
+waitfor connected 45
+collect spawn ownership
+record combattarget watcher
+
+waitfor known other 40
+waitfor known base:23A8A 40
+waitfor known base:13B97 40
+
+log A fights B, at the epoch the actor runs it at
+waitfor combattarget base:23A8A base:13B97 30
+expect combattarget base:23A8A base:13B97
+
+log A fights this bot's character
+waitfor combattarget base:23A8A me 10
+expect combattarget base:23A8A me
+
+log A fights nobody
+waitfor combattarget base:23A8A none 10
+expect combattarget base:23A8A none
+
+log the stale word that follows is not passed on
+wait 6
+expect combattarget base:23A8A none
+expect combatwords == 3
+
+log this bot says A fights B, though it does not run A: the server drops it, and the actor hears nothing
+npcfight base:23A8A base:13B97
+wait 4
+expect combatwords == 3
+expect connected
+
+record off
+report bot-combattarget-watcher.txt
+log done
+stop

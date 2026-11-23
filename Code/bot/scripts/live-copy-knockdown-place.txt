@@ -1,0 +1,91 @@
+# A copy of an NPC thrown to the floor must come to lie where its owner's NPC fell, moved only while the player looks away.
+#
+#   python Tools\VR\live-check.py live-copy-knockdown-place
+#   python Tools\VR\live-check.py --expect-fail live-copy-knockdown-place     on a build without the fix: must be RED
+#   set LIVE_CHECK_DEVBENCH=http://127.0.0.1:8922 first for the flat rig (Tools\Flat\flat-rig.ps1 up)
+#
+# The owner's push (PushActorAway, a blast) is not replayed, only its "Ragdoll" action, so the copy collapses where it
+# stands while the owner's NPC lands elsewhere. A knocked copy's ragdoll at rest, its owner's still down more than 64 units
+# away, is put there once; never in view, so the player must look away for it to happen.
+# The recording is live-copy-knockdown's: a Lydia (base A2C8E, made essential) knocked into bleedout at 3 s, pushed over at
+# 7 s, stood up at 13 s and set on the player at 15 s. live-copy-knockdown keeps the view on the copy throughout, for its
+# slide; this one has three phases while the bot replays:
+#   0-9 s, in view: the copy falls and comes to rest; nothing may be moved (the visible phase).
+#   9-14 s, looked away, while the owner's NPC still lies: the hidden interval, when the copy may be put where it fell.
+#   from 14 s, in view again: the copy gets up and follows; judged after the replay.
+# The driver runs the phases with its own sleeps, so all of them are written before the bot's "replay", which goes on meanwhile.
+#
+# A run counts only when (REQUIRE): the recording holds the owner's fall, the owner's NPC really moved while down, the
+# copy is the owner's kind, the player saw the copy as the replay began and did not see it in the hidden interval.
+# Pass rules:
+#   - visible phase: no "KnockDown: ... its ragdoll was put there" and no "CorpseDiag: ... moved there" line;
+#   - the client says the copy's ragdoll was put where its owner's NPC fell;
+#   - "down copy like original 64": it lay down within 64 units of where the original did, from where each stood;
+#   - "up copy like original 3000": it got up about as long after lying down as the original;
+#   - on its feet at the end, and the game alive.
+# RED on 826b0f3e (flat and VR): no "put there" line, and "down" fails (the copy collapsed where it stood).
+# GREEN: every check ok, three runs of three, on each rig.
+log live copy knockdown place
+waitfor connected 45
+expect known me
+waitfor known other 40
+wait 5
+
+log DO god on
+log -- a Lydia ahead of the player, essential so she goes down instead of dying (the bot's below shares the base)
+log DO papyrus ActorBase SetEssential A2C8E b:true
+log DO place A2C8E essential
+wait 8
+
+log -- the game knocks her down, throws her over, stands her up and sets her on the player while the bot records it
+log DO record original placed 28
+log DO sleep 3
+log DO papyrus Actor DamageActorValue placed s:Health f:100000
+log DO sleep 4
+log DO papyrus ObjectReference PushActorAway 14 placed f:8
+log DO sleep 6
+log DO papyrus Actor RestoreActorValue placed s:Health f:100000
+log DO combat on
+log DO sleep 2
+log DO papyrus Actor StartCombat placed 14
+capture newest 28
+log DO combat off
+log REQUIRE bot logged Captured action names of \w+: .*\bRagdoll\b
+log REQUIRE logged DownedTravel: own NPC \w+ moved \d+ units in \d+ ms while down
+
+log -- the bot brings its own Lydia and replays the recording on her; the game shows a copy of her
+npc temp A2C8E
+waitfor owned == 1 20
+wait 6
+npclife alive 0
+wait 3
+log -- the visible phase: the player looks at the copy while it falls and comes to rest
+log DO look at npc 500 hold 8500
+wait 1
+log REQUIRE view npc
+log DO record copy npc 34
+log DO logmark
+log DO sleep 8
+log CHECK absent KnockDown: NPC copy \w+ lay \d+ units from where its owner's NPC fell
+log CHECK absent CorpseDiag: \w+'s ragdoll lay \d+ units from where its owner's corpse is; moved there
+log -- the hidden interval: the player looks away while the owner's NPC still lies
+log DO look away npc 500 hold 4500
+log DO sleep 1
+log REQUIRE view npc away
+log DO sleep 4
+log -- in view again: the copy gets up and follows
+log DO look at npc 500 hold 20000
+replay npc
+wait 3
+log SHOT after of npc
+log REQUIRE absent Base form differs
+log CHECK logged KnockDown: NPC copy \w+ lay \d+ units from where its owner's NPC fell; its ragdoll was put there
+log CHECK down copy like original 64
+log CHECK up copy like original 3000
+log CHECK npc standing
+log CHECK game alive
+log DO papyrus ActorBase SetEssential A2C8E b:false
+log DO god off
+wait 3
+log done
+stop

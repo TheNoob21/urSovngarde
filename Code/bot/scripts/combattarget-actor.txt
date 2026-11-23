@@ -1,0 +1,71 @@
+# The acting half of the combat target test: an NPC this bot runs fights someone, and the other games' copies are told.
+#
+#   powershell -ExecutionPolicy Bypass -File Tools\VR\run-bot-tests.ps1 -Pair combattarget
+#   python Tools\VR\live-check.py combattarget-actor        (against a game, which is then "other")
+#
+# A game reads whom its own NPCs fight every 250 ms and sends a change at once (RequestCombatTarget); this bot sends
+# one word per "npcfight", with no heartbeat. The server passes a word on only from the NPC's owner at its epoch, to
+# every other player near the NPC, never back to the sender.
+# A is a bear and B is Anoriath, both temporary: a game that leads the party does not claim them before the bot lets go.
+# The CHECK lines are for a game on the other side; between two bots they are only logged, and the watcher checks the wire.
+# Not covered here: the latency (no clock is shared with the watcher), and a game that arrives late (the bot sends no heartbeat).
+log combattarget actor
+waitfor connected 45
+collect spawn ownership
+record combattarget actor
+waitfor players >= 1 30
+expect known me
+waitfor known other 40
+stay
+ownership refuse
+log DO logmark
+wait 2
+
+log -- two NPCs of this bot's next to the other player: a bear (A) and Anoriath (B)
+npc temp 23A8A
+waitfor owned == 1 20
+npc temp 13B97
+waitfor owned == 2 20
+wait 6
+
+log -- A fights B
+npcfight first second
+wait 3
+log CHECK logged Combat: copy FF[0-9A-F]+ tracks FF[0-9A-F]+, as at its owner
+
+log -- A fights the other player
+npcfight first other
+wait 3
+log CHECK logged Combat: copy FF[0-9A-F]+ tracks this game's player, as at its owner
+
+log -- A's fight ends
+npcfight first none
+wait 3
+log CHECK logged Combat: copy FF[0-9A-F]+ no longer tracks server character [0-9A-F]+: its owner's fight ended
+
+log -- A fights B again, at an epoch the server does not hold: dropped, not passed on
+npcfight first second stale
+wait 3
+
+log -- the watcher now says A fights B, though it does not run A: the server drops it, so nothing comes back here
+wait 14
+expect combatwords == 0
+
+log -- a third NPC registered out of the other player's range, then back: A fights it, and the other game has no copy of it
+teleport away
+wait 3
+npc temp 23A90
+waitfor owned == 3 20
+teleport back
+wait 6
+npcfight first third
+wait 3
+log CHECK logged Combat: copy FF[0-9A-F]+ kept, target server character [0-9A-F]+ not here
+
+npcfight first none
+wait 2
+expect connected
+record off
+report bot-combattarget-actor.txt
+log done
+stop

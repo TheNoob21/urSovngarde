@@ -1,0 +1,85 @@
+# A copy of an essential NPC that went into its own bleedout here must get up once its owner's NPC is up, even when the
+# owner's "bleedOutStop" never takes on it.
+#
+#   python Tools\VR\live-check.py live-copy-essential-up
+#   python Tools\VR\live-check.py --expect-fail live-copy-essential-up     on a build without the fix: must be RED
+#   set LIVE_CHECK_DEVBENCH=http://127.0.0.1:8922 first for the flat rig (Tools\Flat\flat-rig.ps1 up)
+#   live-copy-essential-up-dead is its negative control: the same, with the owner's NPC dead instead of up.
+#
+# Play, 2026-11-06 18:00-18:15 (VR_TODO "An essential NPC copy stays down"): Lydia's copy took her owner's low health,
+# went into its own bleedout (life state 8, knock state 5), and her owner's bleedOutStop was refused as an action and as
+# a graph event. Copies finish no bleedout by themselves, and every get-up repair skipped a copy that bleeds out, so she
+# lay there for good while her owner's Lydia fought on.
+# As live-copy-bleedout, the game places a Lydia (base A2C8E, made essential), knocks her down and stands her up, and sets
+# her on the player so that her owner sends actions with her up, while the bot records it. The bot's own Lydia plays the
+# recording without its bleedOutStop: the deterministic form of "refused". Then the owner's health comes back.
+#
+# A run counts only when (REQUIRE): the recording holds the owner's get-up, the owner's NPC was down, the copy is the
+# owner's kind, it lay down and bled out here. It is then judged, 5 s after the recording's last action: on its feet,
+# no longer bleeding out, alive, and it got up where the owner's NPC did (from where each stood).
+log live copy essential up
+waitfor connected 45
+expect known me
+waitfor known other 40
+wait 5
+
+log DO god on
+log -- a Lydia ahead of the player, essential so she goes down instead of dying (the bot's below shares the base)
+log DO papyrus ActorBase SetEssential A2C8E b:true
+log DO place A2C8E essential
+wait 8
+
+log -- the game knocks her down, stands her up again and sets her on the player while the bot records it
+log DO record original placed 24
+log DO sleep 3
+log DO papyrus Actor DamageActorValue placed s:Health f:100000
+log DO sleep 9
+log DO papyrus Actor RestoreActorValue placed s:Health f:100000
+log DO sleep 3
+log DO combat on
+log DO papyrus Actor StartCombat placed 14
+capture newest 22
+log DO combat off
+log DO papyrus Actor IsBleedingOut placed
+log REQUIRE bot logged Captured action names of \w+: .*\bbleedOutStop\b
+log REQUIRE logged DownedTravel: own NPC \w+ moved \d+ units in \d+ ms while down \(life state 7
+
+log -- the bot brings its own Lydia and replays the recording on her, without its bleedOutStop
+npc temp A2C8E
+waitfor owned == 1 20
+wait 6
+# The sync health floor keeps a copy alive at 1. Prove its native bleedout immediately after damage.
+# A later owner action can erase that life word while its graph remains down.
+log DO record copy npc 40
+npclife alive 1
+wait 1
+log DO papyrus Actor DamageActorValue npc s:Health f:100000
+wait 1
+log REQUIRE npc bleedout true
+wait 3
+# The client poses no body out of view, and the bot stands 200 units east of the player, behind the headset on the rig's save.
+log DO look at npc 500 hold 36000
+wait 1
+log REQUIRE view npc
+# "DO watch" holds the driver for its whole time, so the recording and the bleedout check come before it.
+# Down in the recording by then: the copy bleeds out here.
+log DO sleep 6
+log DO watch npc 26
+replay npc 1 skip bleedOutStop
+# The owner's health back, as its value tick would send it once she is up.
+npclife alive 100000
+wait 5
+log SHOT after of npc
+log REQUIRE absent Base form differs
+# A bleedout kneels as well as lies: require the body to stay down for a while, apart from the check above.
+log REQUIRE npc was down
+log CHECK npc standing
+log CHECK npc bleedout false
+log CHECK npc alive
+log CHECK place copy like original 64
+log CHECK game alive
+log DO papyrus ActorBase SetEssential A2C8E b:false
+log DO god off
+wait 3
+log done
+stop

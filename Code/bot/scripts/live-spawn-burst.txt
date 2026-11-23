@@ -41,6 +41,9 @@ log DO papyrus ObjectReference MoveTo 14 4AFD9 f:60 f:0 f:0 b:false
 wait 40
 log CHECK game alive
 log CHECK logged Spawn Actor: \w+, and NPC Bear
+log -- the copies were made, and none made, moved or freed by the client's own passes while a loading screen was up
+log CHECK logged CopyLife: (made|placed \(from its spawn\)) [0-9A-F]+; thread
+log CHECK absent CopyLife: (made|deleted \(removed\)|deleted \(the game let go of it\)|freed after its wait|moved \(waiting for its 3D\)|ragdoll moved) [0-9A-F]+; thread \d+[^,]*, loading screen up
 wait 3
 
 log DO god off

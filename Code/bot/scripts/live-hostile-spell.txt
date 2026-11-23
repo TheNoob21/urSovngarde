@@ -1,0 +1,69 @@
+# An NPC turns on another player whose hostile spell does no damage, as it does for a hit; a frenzy is left to the game.
+#
+#   python Tools\VR\live-check.py live-hostile-spell
+#   python Tools\VR\live-check.py --expect-fail live-hostile-spell     on a build without the fix: must be RED
+#
+# This game places an Anoriath of its own, who is no enemy of anyone. The bot's character casts spells on him, as the
+# other player's game sends them: an AddTarget, and no health change, because none of these does damage.
+# Before, the effect was applied here and the caster stayed out of his fight: he could be paralysed again and again.
+# Skyrim.esm ids, read from the plugin: Heal Other 12FD2 (RestoreHealthFFActor 1CEA7, not hostile), Paralyze 5AD5F
+# (ParalysisFFAimed 1EA6E, hostile), Fury 4DEEB (InfluenceAggUpFFAimed 4DEE6, hostile, frenzy).
+#
+# Pass rules, in order:
+# 1. REQUIRE: the placed Anoriath is here and fights nobody, so what follows starts from peace.
+# 2. A heal (not hostile) starts no fight.
+# 3. A frenzy starts no fight with the caster: it decides whom he fights itself.
+# 4. Paralysis (hostile, no damage) puts the bot's character into his fight: the client says so and he fights the copy.
+log live hostile spell
+waitfor connected 45
+collect spawn ownership
+expect known me
+waitfor known other 40
+wait 5
+stay
+ownership refuse
+log DO logmark
+log DO god on
+log DO combat on
+wait 2
+
+log -- this game places an Anoriath
+log DO place 13B97
+wait 6
+log REQUIRE placed fights none
+
+log -- a heal from the bot: no fight
+effect base:13B97 12FD2 1CEA7 20
+wait 3
+log CHECK absent failed to retrieve (spell|effect)
+log CHECK absent Combat: actor FF[0-9A-F]+ now also fights player
+log CHECK placed fights none
+
+log -- a frenzy from the bot: left to the game, no fight with the bot's character
+effect base:13B97 4DEEB 4DEE6 50
+wait 3
+log CHECK absent Combat: actor FF[0-9A-F]+ now also fights player
+log DO papyrus ObjectReference Disable placed b:false
+wait 2
+
+log -- a fresh Anoriath, since the frenzy lasts: paralysis from the bot, and he fights the bot's character
+log DO place 13B97
+wait 6
+log REQUIRE placed fights none
+log DO logmark
+effect base:13B97 5AD5F 1EA6E 0
+wait 3
+log CHECK absent failed to retrieve (spell|effect)
+log CHECK logged Combat: actor FF[0-9A-F]+ now also fights player \d+ \(copy [0-9A-F]+\), which attacked it
+log CHECK placed fights copy
+
+log DO papyrus Actor StopCombat placed
+wait 2
+log DO papyrus ObjectReference Disable placed b:false
+log DO combat off
+wait 2
+log CHECK game alive
+log DO god off
+wait 2
+log done
+stop

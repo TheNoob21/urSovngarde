@@ -3,6 +3,7 @@
 #
 #   python Tools\VR\live-check.py live-copy-knockdown
 #   python Tools\VR\live-check.py --expect-fail live-copy-knockdown     on a build without the fix: must be RED
+#   set LIVE_CHECK_DEVBENCH=http://127.0.0.1:8922 first for the flat rig (Tools\Flat\flat-rig.ps1 up)
 #
 # Players saw downed NPCs lie flat and slide along behind their owner once the owner's NPC had stood up and walked on.
 # live-copy-bleedout covers a plain bleedout; here the owner's NPC is also thrown to the floor while it is down.
@@ -14,6 +15,9 @@
 # A run counts only when (REQUIRE): the recording holds the owner's fall, the owner's NPC really moved while down, the
 # copy is the owner's kind, and the copy lay flat at some point. It is then judged on two things: the lying copy was not
 # carried along the floor, and it is on its feet at the end.
+# Both bodies are also recorded ("DO record"): the copy must get up about as long after going down as the original ("up").
+# The view stays on the copy throughout, for the slide; a copy's ragdoll is put where its owner's fell only out of view,
+# so where it lies down is judged by live-copy-knockdown-place, which looks away at the right moment.
 log live copy knockdown
 waitfor connected 45
 expect known me
@@ -27,6 +31,7 @@ log DO place A2C8E essential
 wait 8
 
 log -- the game knocks her down, throws her over, stands her up and sets her on the player while the bot records it
+log DO record original placed 28
 log DO sleep 3
 log DO papyrus Actor DamageActorValue placed s:Health f:100000
 log DO sleep 4
@@ -47,13 +52,18 @@ npc temp A2C8E
 waitfor owned == 1 20
 wait 6
 # No health left, as a hero beaten down in a fight: the copy goes down by itself, as in live-copy-bleedout.
-npclife alive 0
+npclife alive 1
+wait 1
+log DO papyrus Actor DamageActorValue npc s:Health f:100000
+wait 1
+log REQUIRE npc bleedout true
 wait 3
 # The copy's pose through the whole replay and a few seconds after it, judged below.
 # The client poses no body out of view, and the bot stands 200 units east of the player, behind the headset on the rig's save.
 log DO look at npc 500 hold 36000
 wait 1
 log REQUIRE view npc
+log DO record copy npc 34
 log DO watch npc 34
 replay npc
 wait 3
@@ -67,6 +77,8 @@ log CHECK npc standing
 # An NPC runs at about 400 units a second; a jump of even 20 units in one frame is over 1000.
 # Measured each frame by the client: the "DO watch npc" samples are too far apart to see a jump.
 log CHECK logged KnockDown: NPC copy \w+ moved at most [0-9]{1,3} units a second in its first \d+ ms up
+# It got up about as long after it went down as its owner's NPC did.
+log CHECK up copy like original 3000
 log CHECK game alive
 log DO papyrus ActorBase SetEssential A2C8E b:false
 log DO god off

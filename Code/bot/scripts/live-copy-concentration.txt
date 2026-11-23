@@ -1,0 +1,117 @@
+# Another player's concentration spell, dual cast and bow draw, played on its copy here.
+#
+#   python Tools\VR\live-check.py live-copy-concentration
+#
+# On 2026-11-14 a VR game took a flat player's first Flames start and refused the next four:
+#   ReplayDiag: refused 'MLh_SpellAimedConcentrationStart' on FF000914 ... action 13004 ... idle 13469
+# The bot sends what a flat client sends: the start action (no graph variables, the weapon drawn), the cast, the release and the stop.
+# Each round is more than 10 s from the last, as ReplayDiag names one refusal per 10 s.
+# First a control: the same start while the copy has no spell drawn must be refused, so a refusal is seen when there is one.
+log live copy concentration
+waitfor connected 45
+expect known me
+waitfor known other 40
+wait 5
+stay
+infront 150
+wait 3
+log DO logmark
+
+log -- control: a spell start with nothing drawn
+action 13004 13469 MLh_SpellAimedConcentrationStart
+wait 12
+log REQUIRE logged ReplayDiag: refused 'MLh_SpellAimedConcentrationStart'
+
+log -- Flames in the left hand, drawn
+equip 12FCD left spell
+wait 3
+draw on
+wait 8
+log DO logmark
+log DO papyrus ObjectReference GetAnimationVariableInt copy s:iLeftHandType
+
+log -- round 1
+action 13004 13469 MLh_SpellAimedConcentrationStart
+wait 1
+log DO papyrus ObjectReference GetAnimationVariableBool copy s:IsCastingLeft
+cast 12FCD left
+wait 3
+log REQUIRE logged Remote spell cast: caster \w+, spell 12FCD, source 0
+action 13451 13465 MLh_SpellRelease_Event
+cast 12FCD stop left
+wait 9
+log -- round 2
+action 13004 13469 MLh_SpellAimedConcentrationStart
+wait 1
+log DO papyrus ObjectReference GetAnimationVariableBool copy s:IsCastingLeft
+cast 12FCD left
+wait 3
+action 13451 13465 MLh_SpellRelease_Event
+cast 12FCD stop left
+wait 9
+log -- round 3
+action 13004 13469 MLh_SpellAimedConcentrationStart
+wait 1
+log DO papyrus ObjectReference GetAnimationVariableBool copy s:IsCastingLeft
+cast 12FCD left
+wait 3
+action 13451 13465 MLh_SpellRelease_Event
+cast 12FCD stop left
+wait 12
+log CHECK absent ReplayDiag: refused 'MLh_SpellAimedConcentrationStart'
+log CHECK absent ReplayDiag: refused 'MLh_SpellRelease_Event'
+
+log -- Healing Hands: its cast now reaches the copy too
+log DO logmark
+equip 4D3F2 left spell
+wait 4
+action 13004 13469 MLh_SpellAimedConcentrationStart
+wait 1
+cast 4D3F2 left
+wait 3
+action 13451 13465 MLh_SpellRelease_Event
+cast 4D3F2 stop left
+wait 12
+log CHECK bot logged \[script\] spell 4D3F2 cast at the host
+log CHECK absent ReplayDiag: refused 'MLh_SpellAimedConcentrationStart'
+
+log -- dual cast: Flames in both hands
+log DO logmark
+equip 12FCD left spell
+equip 12FCD spell
+wait 4
+action 50C96 35B9A DualMagic_SpellAimedConcentrationStart
+wait 1
+log DO papyrus ObjectReference GetAnimationVariableBool copy s:IsCastingDual
+cast 12FCD dual
+wait 3
+log CHECK logged Remote spell cast: caster \w+, spell 12FCD, source 0, dual true
+cast 12FCD stop left
+wait 12
+log CHECK absent ReplayDiag: refused 'DualMagic_SpellAimedConcentrationStart'
+
+log -- a bow: draw and release, as a flat archer's game sends them
+log DO logmark
+draw off
+wait 3
+additem 13985 1
+additem 1397D 20
+wait 2
+equip 13985 both
+equip 1397D
+wait 3
+draw on
+wait 8
+action 13005 5177C bowAttackStart
+wait 1
+log DO papyrus ObjectReference GetAnimationVariableBool copy s:bBowDrawn
+wait 2
+action 13454 1455C attackRelease
+wait 12
+log CHECK absent ReplayDiag: refused 'bowAttackStart'
+log CHECK absent ReplayDiag: refused 'attackRelease'
+draw off
+wait 2
+log CHECK game alive
+log done
+stop

@@ -1,0 +1,2 @@
+# Synthetic content shared by the headless CI players. Use measured files when joining a player's game.
+Skyrim.esm	100 0 0

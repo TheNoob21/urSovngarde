@@ -24,6 +24,7 @@ npc temp A2C8E
 waitfor owned == 1 20
 wait 8
 log CHECK npc alive
+wait 3
 
 log -- her owner reports her dead
 npclife dead 0

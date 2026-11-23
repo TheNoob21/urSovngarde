@@ -1,0 +1,63 @@
+# The negative control of live-copy-essential-up: a copy whose owner's NPC died must not be stood up, even when the
+# owner's actions that arrive after its death say it was up.
+#
+#   python Tools\VR\live-check.py live-copy-essential-up-dead
+#   set LIVE_CHECK_DEVBENCH=http://127.0.0.1:8922 first for the flat rig (Tools\Flat\flat-rig.ps1 up)
+#
+# The same recording as live-copy-essential-up, but the owner says its Lydia is dead while her copy bleeds out here,
+# before the replay: the actions that follow, recorded with her up, arrive at a copy whose owner says dead.
+# The get-up that takes a bleeding-out copy out when its owner is up must never fire then. An essential copy dies on
+# its owner's word (live-protected-copy-dies), and a dead copy plays nothing more.
+# It passes on a build without the fix too: it guards the fix, it does not test for a bug.
+log live copy essential up dead
+waitfor connected 45
+expect known me
+waitfor known other 40
+wait 5
+
+log DO god on
+log -- a Lydia ahead of the player, essential so she goes down instead of dying (the bot's below shares the base)
+log DO papyrus ActorBase SetEssential A2C8E b:true
+log DO place A2C8E essential
+wait 8
+
+log -- the game knocks her down, stands her up again and sets her on the player while the bot records it
+log DO sleep 3
+log DO papyrus Actor DamageActorValue placed s:Health f:100000
+log DO sleep 9
+log DO papyrus Actor RestoreActorValue placed s:Health f:100000
+log DO sleep 3
+log DO combat on
+log DO papyrus Actor StartCombat placed 14
+capture newest 22
+log DO combat off
+log REQUIRE bot logged Captured action names of \w+: .*\bbleedOutStop\b
+
+log -- the bot brings its own Lydia; she goes down here, then her owner says she died, then the recording plays
+npc temp A2C8E
+waitfor owned == 1 20
+wait 6
+npclife alive 1
+wait 1
+log DO papyrus Actor DamageActorValue npc s:Health f:100000
+wait 1
+log REQUIRE npc bleedout true
+wait 3
+log DO look at npc 500 hold 36000
+wait 1
+log REQUIRE view npc
+npclife dead 0
+wait 3
+log DO logmark
+replay npc 1 skip bleedOutStop
+wait 5
+log SHOT after of npc
+log REQUIRE absent Base form differs
+log CHECK npc dead
+log CHECK absent KnockDown: NPC copy \w+ .* taken out of its bleedout
+log CHECK game alive
+log DO papyrus ActorBase SetEssential A2C8E b:false
+log DO god off
+wait 3
+log done
+stop

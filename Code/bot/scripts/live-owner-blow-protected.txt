@@ -1,0 +1,46 @@
+# Another player's killing blow on a protected or essential NPC this game runs only puts it down: the game lets only its own player
+# kill a protected NPC, and nobody an essential one. It never dies here from that blow, and no death goes out.
+#
+#   python Tools\VR\live-check.py live-owner-blow-protected
+#
+# Here this game places a Lydia, protected, and the bot hits her for more than her health; then an essential one, the same.
+log live owner blow protected
+waitfor connected 45
+collect death
+expect known me
+waitfor known other 40
+wait 5
+stay
+
+log -- a protected Lydia this game owns, beside the player
+log DO papyrus ActorBase SetEssential A2C8E b:false
+log DO papyrus ActorBase SetProtected A2C8E b:true
+log DO place A2C8E
+wait 8
+log DO logmark
+hit base:A2C8E -2000
+wait 4
+log CHECK logged Death sync: player \d+'s blow of 2000 on this game's NPC
+log CHECK absent Death sync: health broadcast killed actor
+log CHECK absent Death sync: local actor \w+ is now dead
+log DO papyrus Actor IsDead placed
+log DO papyrus Actor IsBleedingOut placed
+
+log -- an essential Lydia, the same blow
+log DO papyrus ActorBase SetProtected A2C8E b:false
+log DO papyrus ActorBase SetEssential A2C8E b:true
+log DO place A2C8E
+wait 8
+log DO logmark
+hit base:A2C8E -2000
+wait 4
+log CHECK logged Death sync: player \d+'s blow of 2000 on this game's NPC
+log CHECK absent Death sync: health broadcast killed actor
+log CHECK absent Death sync: local actor \w+ is now dead
+log DO papyrus Actor IsDead placed
+log DO papyrus Actor IsBleedingOut placed
+log DO papyrus ActorBase SetEssential A2C8E b:false
+log CHECK game alive
+wait 2
+log done
+stop

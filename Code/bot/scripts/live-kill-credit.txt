@@ -1,0 +1,45 @@
+# This player's blow killed an NPC another player's game runs: the copy here dies with this player as its killer.
+#
+#   python Tools\VR\live-check.py live-kill-credit
+#   python Tools\VR\live-check.py --expect-fail live-kill-credit     on a build without the fix: must be RED
+#
+# The owner's game kills it with no killer and says who struck the blow; the killer's game then counts the kill as its player's
+# (kill stats, any bounty, scripts asking who killed it). A death with no killer named credits nobody here.
+# Here the bot owns two Lydias, plain ones, reports one dead by this player's blow and the other dead with no killer.
+log live kill credit
+waitfor connected 45
+collect death
+expect known me
+waitfor known other 40
+wait 5
+stay
+
+log -- a plain Lydia
+log DO papyrus ActorBase SetEssential A2C8E b:false
+log DO papyrus ActorBase SetProtected A2C8E b:false
+
+log -- a death with no killer: nobody is credited here
+npc temp A2C8E
+waitfor owned == 1 20
+wait 8
+log CHECK npc alive
+wait 3
+npclife dead 0
+wait 6
+log CHECK npc dead
+log CHECK absent Death sync: remote actor \w+ set dead by its owner, killed here by this player
+
+log -- a death by this player's blow: this player is its killer here
+npc temp A2C8E
+waitfor owned == 2 20
+wait 8
+log CHECK npc alive
+wait 3
+npclife dead 0 byother
+wait 6
+log CHECK npc dead
+log CHECK logged Death sync: remote actor \w+ set dead by its owner, killed here by this player, whose blow it was \(now dead: true\)
+log CHECK game alive
+wait 2
+log done
+stop

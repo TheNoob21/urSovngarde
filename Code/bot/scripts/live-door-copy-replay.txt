@@ -2,7 +2,8 @@
 #
 #   python Tools\VR\live-check.py live-door-copy-replay
 #
-# A game replays such a use on the copy, and the refusal of a copy's own door use stops it (live-door-copy-load).
+# A game does not replay such a use on the copy: the replay's Activate would pass by the refusal of a copy's own door use
+# (live-door-copy-load), and a copy standing at the door went straight through (a player seen twice at Windhelm's gate).
 # The owner's next report moves or removes the copy (live-copy-through-door).
 # Here the bot's NPC copy stands beside the player, and the bot says that NPC used Mistwatch's upper door.
 # The copy must stay loaded where it is. The bot then says nothing more of it, where a real owner's report would follow.
@@ -27,8 +28,7 @@ activate 3F558 by npc
 wait 3
 log CHECK npc 3d
 log CHECK moved start atmost 300
-log CHECK logged Door 3F558: [0-9A-F]+ activated it in another game from state 3; done here too
-log CHECK logged DoorCopy: load door 3F558 not used by [0-9A-F]+, a copy of another game's actor
+log CHECK logged DoorCopy: load door 3F558 used by [0-9A-F]+ in its owner's game; not used here
 wait 3
 log CHECK game alive
 log DO god off

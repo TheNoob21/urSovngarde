@@ -1,0 +1,64 @@
+# Does a merchant's chest kept outside the shop follow the other game while the player trades?
+#
+#   python Tools\VR\live-check.py live-vendor-chest
+#
+# Carlotta (1A675) sells from chest ABB41, which lies under her stall in Whiterun, not in her house (165B1).
+# Only the containers of the player's own cell were shared, so her wares and gold were each game's own.
+# Speaking to her now shares the chest under the player's cell. The bot stands in the same house as the other game:
+# an item it puts in, and then the whole chest it sends (as a game does after a restock), must reach the game's chest.
+# The items are real in this session and gone with it: nothing is saved.
+log live vendor chest
+waitfor connected 45
+expect known me
+waitfor known other 40
+wait 5
+stay
+
+log DO god on
+wait 3
+log -- into Carlotta's house (a marker there), and she comes too, whatever the hour
+log DO papyrus ObjectReference MoveTo 14 1F88F f:0 f:0 f:0 b:false
+wait 30
+log DO papyrus ObjectReference MoveTo 1A675 14 f:80 f:0 f:0 b:false
+wait 5
+log CHECK game alive
+cell 165B1
+wait 4
+
+log -- the player speaks to her: her chest is shared
+log CHECK ref ABB41 count 5ACE4 0
+log DO papyrus ObjectReference Activate 1A675 14 b:false
+wait 4
+log CHECK logged VendorChest: merchant chest ABB41 shared while this player trades
+objectlookup ABB41 cell 165B1
+wait 3
+log CHECK bot logged Object [0-9A-F]+:ABB41 has server id
+
+log -- the other game puts 3 iron ingots in her chest
+chestitem ABB41 5ACE4 3
+wait 3
+log CHECK ref ABB41 count 5ACE4 3
+
+log -- the other game sends her whole chest, as after a restock
+chestwhole ABB41 F 750 5ACE4 7
+wait 3
+log CHECK ref ABB41 count 5ACE4 7
+log CHECK ref ABB41 count F 750
+log CHECK logged VendorChest: ABB41 set as another game sent it whole
+
+log -- the conversation ends
+log DO key escape 200
+wait 2
+log DO key escape 200
+wait 2
+log CHECK game alive
+
+log -- back
+cell out
+log DO papyrus ObjectReference MoveTo 14 4AFD9 f:-32 f:-911 f:262 b:false
+wait 40
+log CHECK game alive
+log DO god off
+wait 3
+log done
+stop

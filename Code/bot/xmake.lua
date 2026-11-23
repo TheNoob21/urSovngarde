@@ -4,7 +4,7 @@
 target("STBot")
     set_kind("binary")
     set_group("Tests")
-    add_includedirs(".", "../encoding")
+    add_includedirs(".", "../encoding", "../common")
     add_headerfiles("*.h")
     add_files("*.cpp")
     -- The version, read from the one file the build sets it on (root xmake.lua).

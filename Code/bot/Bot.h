@@ -1,3 +1,4 @@
+#include "BotManifest.h"
 #pragma once
 
 // A headless Skyrim Together player. It speaks the client protocol (authenticate, assign a player character, send
@@ -17,6 +18,8 @@
 #include <Messages/AssignCharacterResponse.h>
 #include <Messages/CharacterSpawnRequest.h>
 #include <Structs/GameId.h>
+#include <Structs/NpcFurnitureWord.h>
+#include <Structs/NpcHeadTrackWord.h>
 #include <Structs/GridCellCoords.h>
 #include <Structs/ReferenceUpdate.h>
 #include <Structs/Inventory.h>
@@ -26,6 +29,7 @@
 #include <glm/vec3.hpp>
 
 #include <chrono>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -46,6 +50,7 @@ struct BotOptions
     std::string Name = "Bot";
     std::optional<glm::vec2> Start; // where to look for the host first; else read from HostLog
     std::string HostLog;            // the host's tp_client.log, for the position guess
+    std::vector<BotManifest::Entry> Manifest;
     float Spacing = 200.f;          // spawn this far from the host (game units)
     //! Tell the server this bot plays flat Skyrim, so games apply the rules between a flat and a VR player to it.
     bool Flat = false;
@@ -90,6 +95,8 @@ struct KnownActor
     //! transfer advances it. Handing an actor back with a stale epoch is silently ignored -- three separate bugs
     //! in this family were the same mistake (2026-09-26) -- so the number has to be stored, not guessed.
     uint32_t OwnershipEpoch{};
+    //! The epoch this bot ran it at before it was handed on, for `npclife dead previous`; 0 if never ours.
+    uint32_t PreviousEpoch{};
     //! Where its owner's game last reported it (ServerReferencesMoveRequest), for `markpos` and `movedfrommark`.
     glm::vec3 Position{};
     bool PositionKnown{};
@@ -99,6 +106,8 @@ struct KnownActor
     //! What this actor was last seen equipping, by base form id. Empty once it unequips. Last, so that
     //! KnownActor{serverId} still initialises the id.
     std::vector<uint32_t> Equipped;
+    //! The follower player named by the latest spawn/assignment; never inferred from a claim.
+    uint32_t FollowerOfPlayerId{};
 };
 
 //! What a run is allowed to record. A test that collects everything drowns in movement, so a script says what it
@@ -187,7 +196,7 @@ private:
     void SendPresence() noexcept;
     void SendDeath(bool aDead) noexcept;
     //! An NPC this bot owns dies or comes back to life, as its owner's game reports it (death state and health).
-    void SendNpcLife(KnownActor& aNpc, bool aDead, float aHealth) noexcept;
+    void SendNpcLife(KnownActor& aNpc, bool aDead, float aHealth, uint32_t aKillerPlayerId = 0) noexcept;
     void SendHit(uint32_t aTargetId, float aDelta, uint64_t aTick = 0) noexcept;
     void SendEquip(uint32_t aBaseId, uint32_t aSlot, bool aUnequip, bool aSpell) noexcept;
 
@@ -211,6 +220,10 @@ private:
     uint32_t OtherPlayerId() const noexcept;
     //! A script's target: "other" (the other player's character), "base:<hex>" (the newest NPC copy of that base) or a server id; kNoId if none.
     uint32_t TargetId(const std::string& acWho) const noexcept;
+    //! An NPC named in a script: first, second or third, the NPCs this bot registered in that order, or as TargetId has it.
+    const KnownActor* NpcNamed(const std::string& acWho) const noexcept;
+    //! Whom an NPC fights, named in a script: none (0), me, an NPC as NpcNamed has it, or as TargetId has it.
+    uint32_t FightTargetId(const std::string& acWho) const noexcept;
     //! "ref:<hex>": the actor the server sent for that placed reference, the newest if it sent more than one; null if none.
     //! Checks and commands find it the same way.
     const KnownActor* ActorOfRef(const std::string& acWord) const noexcept;
@@ -236,6 +249,8 @@ private:
     Clock::time_point m_connectAt{};
 
     uint32_t m_playerId{};
+    //! Another player the server reported whereabouts for, for `npclife dead <health> byother`.
+    uint32_t m_otherPlayerId{};
     uint32_t m_skyrimModId{};
     uint32_t m_cookie{};
     uint32_t m_serverId{};
@@ -278,6 +293,8 @@ private:
     std::map<uint32_t, GameId> m_npcCookies;
     //! The server id of the NPC this bot registered last, for "mynpc": still found once another game runs it.
     uint32_t m_lastNpcId{0xFFFFFFFF};
+    //! Where the last grant to this bot said its NPC's last owner had it (`expect seed`); unset when it carried none.
+    std::optional<glm::vec3> m_lastSeed;
     std::string m_serverVersion;
 
     glm::vec3 m_position{};
@@ -317,12 +334,32 @@ private:
     std::string m_lastRefusal{"none"};
     //! The caster's perk factors of the effects other games applied (NotifyAddTarget), by spell and effect base id, in arrival order.
     std::map<uint32_t, std::map<uint32_t, std::vector<float>>> m_addTargets;
+    //! The last word other games sent about each NPC's fight (NotifyCombatTarget), by the NPC's server id: what `combattarget` asserts.
+    struct HeardFight
+    {
+        uint32_t TargetId{};
+        uint32_t OwnershipEpoch{};
+    };
+    std::map<uint32_t, HeardFight> m_combatTargets;
+    //! How many such words came in all, for `combatwords`.
+    size_t m_combatWords{};
+    //! The horse this bot's player last said it rode (`mount`), for `dismount`; kNoId if none.
+    uint32_t m_mountedOn{0xFFFFFFFFu};
+    //! The last word other games sent about where each NPC sits (NotifyNpcFurniture), by the NPC's server id.
+    std::map<uint32_t, NpcFurnitureWord> m_npcSeats;
+    //! How many such words came in all, for `seatwords`.
+    size_t m_seatWords{};
+    //! How many words other games sent about where their NPCs look (NotifyNpcHeadTrack), for `lookwords`, and how many of them looked.
+    size_t m_lookWords{};
+    size_t m_lookingWords{};
     //! Items lying in the world as the server has told this bot, by the server's id: what `drops` counts and
     //! `pickup any` takes. The server sends one when an item is dropped in range and again on entering its cell.
     std::map<uint32_t, GameId> m_drops;
     // This bot's own drop: the first new item of the base it last dropped. Items already lying there (a save with drops
     // of its own) have lower ids or come first, so "the first known item" is not necessarily this bot's.
-    GameId m_pendingDropBase{};
+    //! The request id of this bot's last drop, until the server's reply naming it comes; 0 when none waits.
+    uint32_t m_pendingDropRequest{};
+    uint32_t m_dropRequests{};
     uint32_t m_ownDrop = UINT32_MAX;
     uint32_t DropToHandle() const noexcept { return m_drops.count(m_ownDrop) ? m_ownDrop : m_drops.begin()->first; }
     uint32_t m_dropRemovals{};
@@ -364,6 +401,8 @@ private:
     std::map<uint32_t, uint8_t> m_doorStates;
     //! Each Skyrim.esm reference's lock as another game last set it, for "report".
     std::map<uint32_t, bool> m_locks;
+    //! The server id the server gave each Skyrim.esm container or door (base id) in an AssignObjectsResponse, for "chestitem".
+    std::map<uint32_t, uint32_t> m_objectServerIds;
     std::vector<std::pair<uint32_t, std::string>> m_names; // player id -> username
 
     size_t m_pc = 0;
@@ -424,6 +463,8 @@ private:
     bool m_healthRestorePending = false;
     uint32_t m_reconnects{};
     bool m_leftParty = false;
+    // The party as the bot has seen it; only the additem ref:<hex> selector reads it.
+    std::vector<uint32_t> m_inventoryPartyMembers;
 
     // Testing controls. The point of these is that a run says pass or fail by itself, and collects only what the
     // script asked for, instead of leaving someone to read a log afterwards and guess.
@@ -435,5 +476,6 @@ private:
     std::vector<std::string> m_events;
     uint64_t m_suppressed = 0;
     uint32_t m_checksPassed = 0;
+    std::string m_extensionCapture;
     std::vector<std::string> m_failures;
 };

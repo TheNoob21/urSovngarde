@@ -1,7 +1,8 @@
 // STBot: a headless Skyrim Together player driven by a script. See Bot.h and VR_TODO.md section 6.1.
 //
-//   STBot <script> [--server host:port] [--password X] [--name X] [--x N --y N] [--hostlog path] [--spacing N] [--flat]
+//   STBot <script> [--server host:port] [--password X] [--name X] [--x N --y N] [--hostlog path] [--spacing N] [--flat] [--manifest path]
 //
+// Manifest rows: plugin name, TAB, file size, load index and light flag (0 or 1), separated by whitespace.
 // The script is one command per line, '#' starts a comment:
 //   log <text>                      print
 //   wait <seconds>
@@ -129,6 +130,7 @@ int main(int argc, char** argv)
     std::optional<float> x;
     std::optional<float> y;
 
+    std::string manifestPath;
     for (int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -159,6 +161,8 @@ int main(int argc, char** argv)
             options.Password = value;
         else if (arg == "--name" && next(value))
             options.Name = value;
+        else if (arg == "--manifest" && next(value))
+            manifestPath = value;
         else if (arg == "--hostlog" && next(value))
             options.HostLog = value;
         else if (arg == "--worldspace" && next(value))
@@ -200,12 +204,22 @@ int main(int argc, char** argv)
             scriptPath = arg;
     }
 
+    if (!manifestPath.empty())
+    {
+        std::ifstream manifest(manifestPath);
+        if (!manifest || !BotManifest::Read(manifest, options.Manifest))
+        {
+            spdlog::debug("Cannot read bot manifest {}", manifestPath);
+            return 2;
+        }
+    }
+
     if (x && y)
         options.Start = glm::vec2(*x, *y);
 
     if (scriptPath.empty())
     {
-        spdlog::error("Usage: STBot <script> [--server host:port] [--password X] [--name X] [--x N --y N] [--hostlog path] [--spacing N] [--flat] [--version]");
+        spdlog::error("Usage: STBot <script> [--server host:port] [--password X] [--name X] [--x N --y N] [--hostlog path] [--spacing N] [--flat] [--manifest path] [--version]");
         return 2;
     }
 

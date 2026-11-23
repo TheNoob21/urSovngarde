@@ -1,0 +1,81 @@
+# A copy's body must come to rest where the original's did, and lie as it does, after a death in a fight.
+#
+#   python Tools\VR\live-check.py live-copy-death-pose
+#   python Tools\VR\live-check.py --expect-fail live-copy-death-pose     on a build without the fix: must be RED
+#   set LIVE_CHECK_DEVBENCH=http://127.0.0.1:8922 first for the flat rig (Tools\Flat\flat-rig.ps1 up)
+#
+# As live-death-replay-blast: the original, a mage this game runs, dies by the player's Fire Storm (7A82B), which throws
+# its ragdoll; its copy gets the recording and the death but no blast, so it falls where it stands.
+# Each game drops a body with its own ragdoll. On flat nothing ever moved the copy's ragdoll to where the owner's body
+# lies, and on neither build was the copy laid out in the owner's pose (it kept its own fallen pose, moved by one offset).
+# The fix: the copy's ragdoll is moved to where the owner's corpse lies, out of view, on flat too, and once the owner's
+# bones stop coming it settles once into the owner's last pose.
+#
+# A run counts only when (REQUIRE): the recording holds the death and the owner sent the body's bones (without them the
+# pose part means nothing), the copy stood before it died, and the player saw it when the replay began.
+# It is then judged on: nothing moved in view, the copy came to rest within 64 units of where the original did (from
+# where each stood), it lies laid out as the original does, the client says its ragdoll now lies near the owner's corpse,
+# and it lies still.
+#
+# Calibration, before any fix code: three runs on 826b0f3e. If any run's pose mean is below 20, the blast did not make
+# the poses differ and "pose" proves nothing; the original then dies by two Fire Storms. Two runs of live-death-replay
+# give the noise floor; the 15-unit limit stays only if that floor is under 10.
+log live copy death pose
+waitfor connected 45
+expect known me
+waitfor known other 40
+wait 5
+log DO god on
+
+log -- the original: a mage this game runs, 150 units ahead, low on health
+log DO place 753CB
+wait 8
+log DO papyrus Actor SetRestrained placed b:true
+log DO papyrus Actor ForceActorValue placed s:Health f:10
+wait 3
+
+log -- a Fire Storm kills it while this game samples it and the bot records what this game sends of it
+log DO record original placed 16
+log DO sleep 2
+log DO papyrus Spell Cast 7A82B 14 14
+capture newest 12
+log REQUIRE bot logged info\] Captured the death of
+log REQUIRE bot logged Captured \d+ updates of \w+: .*\([1-9]\d* with bones
+log SHOT original of placed
+
+log -- the copy: a mage of the bot's own plays the recording, and this game shows it as a copy
+npc captured
+waitfor owned == 1 20
+wait 8
+log REQUIRE npc standing
+wait 4
+# The client poses no body out of view, and the bot's mage stands 200 units east of the player, often behind the headset.
+# Held through the replay and up to the check that nothing moved in view.
+log DO look at npc 500 hold 18000
+wait 1
+log REQUIRE view npc
+log DO logmark
+log DO record copy npc 33
+replay npc
+wait 6
+# In view, nothing jumps: the ragdoll waits until the player looks away.
+log CHECK absent CorpseDiag: \w+'s ragdoll lay \d+ units from where its owner's corpse is; moved there
+
+log -- the player looks away, so the copy's ragdoll can be put where its owner's corpse lies, then looks back
+log DO look away npc 500 hold 8000
+wait 9
+log DO look at npc 500 hold 8000
+wait 6
+log SHOT copy of npc
+log CHECK npc dead
+log CHECK place copy like original 64
+log CHECK pose copy like original 15
+log CHECK logged CorpseDiag: \w+'s ragdoll now lies ([0-9]|[1-5][0-9]) units from where its owner's corpse is
+# Its last 4 s, with the player looking at it again: once moved and settled, it lies still.
+log CHECK still copy 30 last 4
+log CHECK smooth all
+wait 4
+log CHECK game alive
+log DO god off
+log done
+stop
