@@ -49,8 +49,9 @@ const std::vector<uint32_t> kThreePlayers{kPlayer1, kPlayer2, kPlayer3};
 
 TEST_CASE("a time skip step keeps its step and hours", "[sleep_vote]")
 {
-    const auto cStep = GENERATE(RequestTimeSkip::Step::kConfirm, RequestTimeSkip::Step::kWithdraw, RequestTimeSkip::Step::kWithdrawCombat, RequestTimeSkip::Step::kAwake,
-                                RequestTimeSkip::Step::kDropCrossed);
+    const auto cStep = GENERATE(
+        RequestTimeSkip::Step::kConfirm, RequestTimeSkip::Step::kWithdraw, RequestTimeSkip::Step::kWithdrawCombat, RequestTimeSkip::Step::kAwake,
+        RequestTimeSkip::Step::kDropCrossed, RequestTimeSkip::Step::kAway, RequestTimeSkip::Step::kBack);
     RequestTimeSkip request{};
     request.SkipStep = cStep;
     request.Hours = 7.75f;
@@ -501,4 +502,92 @@ TEST_CASE("a change told at once leaves nothing to tell later", "[sleep_vote]")
     vote.Confirm(kPlayer1, 4.f, kOpenedAt + 6000);
 
     REQUIRE(vote.TakeChangesDue(kOpenedAt + 20000).empty());
+}
+
+TEST_CASE("a player loading or at the main menu holds the vote only for the grace", "[sleep_vote]")
+{
+    SleepVote vote;
+    vote.MarkAway(kPlayer2, kOpenedAt);
+    vote.Confirm(kPlayer1, 8.f, kOpenedAt);
+
+    // Within the grace, a door's loading screen say, the vote still waits for player 2.
+    REQUIRE(vote.ListVoters(kTwoPlayers, kOpenedAt + SleepVote::kAwayGraceMs - 1) == kTwoPlayers);
+    REQUIRE(vote.TakeNewlyAway(kOpenedAt + SleepVote::kAwayGraceMs - 1).empty());
+
+    const uint64_t cLater = kOpenedAt + SleepVote::kAwayGraceMs;
+    const auto cVoters = vote.ListVoters(kTwoPlayers, cLater);
+    REQUIRE(cVoters == std::vector<uint32_t>{kPlayer1});
+    REQUIRE(vote.GetStanding(cVoters, cLater) == SleepVote::Standing::kAgreed);
+    REQUIRE(vote.ListMissing(cVoters).empty());
+}
+
+TEST_CASE("a player away is taken once per time away", "[sleep_vote]")
+{
+    SleepVote vote;
+    vote.MarkAway(kPlayer2, kOpenedAt);
+    const uint64_t cLater = kOpenedAt + SleepVote::kAwayGraceMs;
+
+    REQUIRE(vote.TakeNewlyAway(cLater) == std::vector<uint32_t>{kPlayer2});
+    REQUIRE(vote.TakeNewlyAway(cLater + 1000).empty());
+
+    REQUIRE(vote.MarkBack(kPlayer2));
+    REQUIRE(vote.ListVoters(kTwoPlayers, cLater) == kTwoPlayers);
+
+    vote.MarkAway(kPlayer2, cLater);
+    REQUIRE(vote.TakeNewlyAway(cLater + SleepVote::kAwayGraceMs) == std::vector<uint32_t>{kPlayer2});
+}
+
+TEST_CASE("saying away again keeps the first time", "[sleep_vote]")
+{
+    SleepVote vote;
+    REQUIRE(vote.MarkAway(kPlayer2, kOpenedAt));
+    REQUIRE_FALSE(vote.MarkAway(kPlayer2, kOpenedAt + 10000));
+
+    REQUIRE(vote.ListVoters(kTwoPlayers, kOpenedAt + SleepVote::kAwayGraceMs) == std::vector<uint32_t>{kPlayer1});
+}
+
+TEST_CASE("coming back within the grace leaves nothing to tell", "[sleep_vote]")
+{
+    SleepVote vote;
+    vote.MarkAway(kPlayer2, kOpenedAt);
+
+    REQUIRE_FALSE(vote.MarkBack(kPlayer2));
+    REQUIRE_FALSE(vote.MarkBack(kPlayer2));
+    REQUIRE(vote.TakeNewlyAway(kOpenedAt + SleepVote::kAwayGraceMs).empty());
+}
+
+TEST_CASE("an away player stays away across votes and is forgotten on leaving", "[sleep_vote]")
+{
+    SleepVote vote;
+    vote.MarkAway(kPlayer2, kOpenedAt);
+    vote.Confirm(kPlayer1, 8.f, kOpenedAt);
+    vote.Close(kOpenedAt + 100);
+
+    REQUIRE(vote.ListVoters(kTwoPlayers, kOpenedAt + SleepVote::kAwayGraceMs) == std::vector<uint32_t>{kPlayer1});
+
+    vote.Forget(kPlayer2);
+    REQUIRE(vote.ListVoters(kTwoPlayers, kOpenedAt + SleepVote::kAwayGraceMs) == kTwoPlayers);
+}
+
+TEST_CASE("a vote whose every voter is away still runs out against the connected players", "[sleep_vote]")
+{
+    SleepVote vote;
+    vote.Confirm(kPlayer1, 8.f, kOpenedAt);
+    vote.MarkAway(kPlayer1, kOpenedAt);
+    vote.MarkAway(kPlayer2, kOpenedAt);
+    const uint64_t cRunOut = kOpenedAt + SleepVote::kTimeoutMs;
+
+    REQUIRE(vote.ListVoters(kTwoPlayers, cRunOut).empty());
+    REQUIRE(vote.GetStanding(kTwoPlayers, cRunOut) == SleepVote::Standing::kTimedOut);
+}
+
+TEST_CASE("a word of being back with no word of being away changes nothing", "[sleep_vote]")
+{
+    SleepVote vote;
+    vote.Confirm(kPlayer1, 8.f, kOpenedAt);
+
+    REQUIRE_FALSE(vote.MarkBack(kPlayer2));
+    REQUIRE(vote.ListVoters(kTwoPlayers, kOpenedAt + SleepVote::kAwayGraceMs) == kTwoPlayers);
+    REQUIRE(vote.TakeNewlyAway(kOpenedAt + SleepVote::kAwayGraceMs).empty());
+    REQUIRE(vote.GetStanding(kTwoPlayers, kOpenedAt + 100) == SleepVote::Standing::kWaiting);
 }

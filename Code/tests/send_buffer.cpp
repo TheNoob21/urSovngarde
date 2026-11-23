@@ -26,6 +26,7 @@ AuthenticationRequest LargeListRequest()
     request.Token = "token";
     request.Version = "v1.9.5";
     request.Protocol = "0a1b2c3d";
+    request.ContentSizes.GameEdition = ModContentSizes::Edition::kVR;
     for (uint16_t i = 0; i < 1992; ++i)
     {
         Mods::Entry entry{};
@@ -34,6 +35,7 @@ AuthenticationRequest LargeListRequest()
         entry.IsLite = cLite;
         entry.Filename = String("A Plugin Name As Long As Most In The List - ") + std::to_string(i).c_str() + ".esp";
         request.UserMods.ModList.push_back(entry);
+        request.ContentSizes.Sizes.push_back(100000 + i);
     }
     request.Username = "Witch Queen";
     request.WorldSpaceId.ModId = 0;
@@ -76,6 +78,7 @@ TEST_CASE("the connect request of a 2000-plugin list is sent whole, the way the 
     const auto pReceived = CastUnique<AuthenticationRequest>(std::move(pMessage));
 
     CHECK(pReceived->UserMods.ModList.size() == cSent.UserMods.ModList.size());
+    CHECK(pReceived->ContentSizes == cSent.ContentSizes);
     CHECK(pReceived->UserMods.ModList.back().Filename == cSent.UserMods.ModList.back().Filename);
     CHECK(pReceived->Username == cSent.Username);
     CHECK(pReceived->CellId == cSent.CellId);

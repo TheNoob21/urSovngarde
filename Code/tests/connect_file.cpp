@@ -3,6 +3,8 @@
 #include <Services/ConnectFile.h>
 
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 
 using ConnectFile::Contents;
@@ -74,6 +76,7 @@ TEST_CASE("the second line is the password", "[connectfile]")
     const Contents contents = Parsed("203.0.113.10:10578\r\nsecret\r\n");
     CHECK(contents.Password == "secret");
     CHECK_FALSE(contents.AutoConnect);
+    CHECK_FALSE(contents.AutoConnectSet);
 }
 
 TEST_CASE("a setting is never taken for a password", "[connectfile]")
@@ -81,6 +84,7 @@ TEST_CASE("a setting is never taken for a password", "[connectfile]")
     const Contents onSecondLine = Parsed("203.0.113.10:10578\r\nautoconnect=on\r\n");
     CHECK(onSecondLine.Password.empty());
     CHECK(onSecondLine.AutoConnect);
+    CHECK(onSecondLine.AutoConnectSet);
 
     const Contents afterEmptyLine = Parsed("203.0.113.10:10578\r\n\r\nautoconnect=on\r\n");
     CHECK(afterEmptyLine.Password.empty());
@@ -91,6 +95,39 @@ TEST_CASE("a setting is never taken for a password", "[connectfile]")
     CHECK(afterPassword.AutoConnect);
 
     CHECK_FALSE(Parsed("203.0.113.10:10578\r\nautoconnect=off\r\n").AutoConnect);
+}
+
+TEST_CASE("explicit standalone connection settings preserve case and unset distinctions", "[connectfile]")
+{
+    const auto absent = Parsed("server.example\nSecretPassword\n");
+    CHECK_FALSE(absent.AutoConnectSet);
+    CHECK(absent.Password == "SecretPassword");
+    const auto enabled = Parsed("server.example\n\xEF\xBB\xBF AuToCoNnEcT=ON \r\n");
+    CHECK(enabled.AutoConnectSet);
+    CHECK(enabled.AutoConnect);
+    CHECK(enabled.Password.empty());
+    for (const auto* value : {"off", "OFF", "invalid"})
+    {
+        const auto disabled = Parsed(std::string("server.example\nAUTOCONNECT=") + value + "\nSecretPassword\n");
+        CHECK(disabled.AutoConnectSet);
+        CHECK_FALSE(disabled.AutoConnect);
+        CHECK(disabled.Password == "SecretPassword");
+    }
+}
+
+TEST_CASE("reusing connection contents preserves player-file priority", "[connectfile]")
+{
+    TwoFiles files;
+    Write(files.Mod, "mod.example\nautoconnect=on\n");
+    Contents contents;
+    REQUIRE(ConnectFile::Load(files.Player, files.Mod, contents));
+    REQUIRE(contents.FromMod);
+    Write(files.Player, "player.example\nautoconnect=off\n");
+    REQUIRE(ConnectFile::Load(files.Player, files.Mod, contents));
+    CHECK_FALSE(contents.FromMod);
+    CHECK(contents.AutoConnectSet);
+    CHECK_FALSE(contents.AutoConnect);
+    CHECK(contents.Address == "player.example:10578");
 }
 
 TEST_CASE("a file with nothing on its first line names no server", "[connectfile]")
@@ -156,4 +193,27 @@ TEST_CASE("no file names no server", "[connectfile]")
     TwoFiles files;
     Contents contents;
     CHECK_FALSE(ConnectFile::Load(files.Player, files.Mod, contents));
+}
+
+TEST_CASE("an unreadable file is kept aside as .bad, replacing an older one, so that a new one can start", "[connectfile]")
+{
+    TwoFiles files;
+    const std::filesystem::path cServers = files.Folder / "servers.txt";
+    const std::filesystem::path cBad = files.Folder / "servers.txt.bad";
+    Write(cBad.string(), "an older bad file");
+    // Cut short by a power loss: not a saved server list any more.
+    Write(cServers.string(), "servers-v1\n4\n");
+
+    std::error_code error;
+    REQUIRE(ConnectFile::SetAside(cServers, error));
+    CHECK_FALSE(error);
+    CHECK_FALSE(std::filesystem::exists(cServers));
+    REQUIRE(std::filesystem::exists(cBad));
+    std::ifstream kept(cBad, std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(kept)), std::istreambuf_iterator<char>());
+    CHECK(text == "servers-v1\n4\n");
+
+    // Nothing to set aside is an error, never a crash.
+    CHECK_FALSE(ConnectFile::SetAside(files.Folder / "missing.txt", error));
+    CHECK(error);
 }

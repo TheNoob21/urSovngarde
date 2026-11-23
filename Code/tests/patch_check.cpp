@@ -68,6 +68,34 @@ TEST_CASE("A patch accepts a call only when it leads to code", "[patchcheck]")
     CHECK_FALSE(PatchCheck::IsCall(nullptr));
 }
 
+TEST_CASE("A call swap accepts only the expected call or another plugin's swap", "[patchcheck]")
+{
+    Pages pages;
+    REQUIRE(pages.Code());
+    uint8_t* pAt = pages.Code();
+    // The "image" is the first half of the code page.
+    const auto cBegin = reinterpret_cast<uintptr_t>(pages.Code());
+    const auto cEnd = cBegin + Pages::cPage / 2;
+    const uint8_t* pExpected = pages.Code() + 0x100;
+
+    PutCall(pAt, pExpected);
+    CHECK(PatchCheck::IsCallTo(pAt, pExpected, cBegin, cEnd));
+
+    // Another function of the image: a different call, left alone.
+    PutCall(pAt, pages.Code() + 0x200);
+    CHECK_FALSE(PatchCheck::IsCallTo(pAt, pExpected, cBegin, cEnd));
+
+    // Code outside the image: another plugin swapped the call first.
+    PutCall(pAt, pages.Code() + 0xC00);
+    CHECK(PatchCheck::IsCallTo(pAt, pExpected, cBegin, cEnd));
+
+    // Not code, or no expected function.
+    PutCall(pAt, pages.Data() + 0x100);
+    CHECK_FALSE(PatchCheck::IsCallTo(pAt, pExpected, cBegin, cEnd));
+    PutCall(pAt, pExpected);
+    CHECK_FALSE(PatchCheck::IsCallTo(pAt, nullptr, cBegin, cEnd));
+}
+
 TEST_CASE("A patch accepts only the bytes it expects", "[patchcheck]")
 {
     // mov rbx, [rsp+0x58], the projectile handle read.

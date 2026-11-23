@@ -107,6 +107,29 @@ TEST_CASE("a claim says whether it is for the claimant's own follower, or for a 
     }
 }
 
+TEST_CASE("a claim says whether its player is getting on a party member's horse", "[clash][mount]")
+{
+    RequestOwnershipClaim claim{};
+    claim.ServerId = 0x1A;
+    claim.ExpectedOwnershipEpoch = 3;
+    claim.ForRiding = true;
+    Buffer buffer(32);
+    Buffer::Writer writer(&buffer);
+    claim.SerializeRaw(writer);
+    Buffer::Reader reader(&buffer);
+    RequestOwnershipClaim back{};
+    back.DeserializeRaw(reader);
+    REQUIRE(back.ForRiding);
+    REQUIRE_FALSE(back.Follower);
+    REQUIRE_FALSE(back.KillingBlow);
+    REQUIRE(back.ExpectedOwnershipEpoch == 3);
+    REQUIRE(back == claim);
+
+    auto ordinary = claim;
+    ordinary.ForRiding = false;
+    REQUIRE_FALSE(ordinary == claim);
+}
+
 TEST_CASE("a game says who became its player's follower, and the server says whose a character is", "[clash]")
 {
     for (const bool cIsFollower : {false, true})

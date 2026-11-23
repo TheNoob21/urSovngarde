@@ -1,8 +1,10 @@
 #include <catch2/catch.hpp>
 
 #include "../client/Systems/PlaybackClock.h"
+#include "../client/Services/SendGrid.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <random>
 #include <vector>
@@ -15,8 +17,10 @@ constexpr double cWarmup = PlaybackClock::cSampleWindow;
 
 struct NetworkConditions
 {
-    // Like RunLocalUpdates, the owner sends on the first of its frames that is at least this long after its previous snapshot
+    // The owner sends on the first of its frames that is at least this long after its previous snapshot
     double SnapshotInterval = 30.0;
+    // Or, like RunLocalUpdates, on the player's send grid (SendGrid.h); SnapshotInterval is then not used
+    bool SendsOnGrid = false;
     // From then on the owner sends less often, like when an NPC leaves combat
     double SlowdownTime = 0.0;
     double SlowSnapshotInterval = 0.0;
@@ -62,12 +66,23 @@ SimulationResult Simulate(const NetworkConditions& acConditions)
 
     std::vector<InFlightSnapshot> snapshots;
     double lastCaptureTime = -acConditions.SnapshotInterval;
+    SendGrid::Schedule grid{SendGrid::cMovementInterval, SendGrid::cMovementSlack};
     for (double captureTime = 0.0; captureTime < acConditions.Duration;
          captureTime += acConditions.OwnerFrameTime + (acConditions.OwnerFrameJitter > 0.0 ? frameJitter(random) : 0.0))
     {
-        const bool cIsSlow = acConditions.SlowSnapshotInterval > 0.0 && captureTime >= acConditions.SlowdownTime;
-        if (captureTime - lastCaptureTime < (cIsSlow ? acConditions.SlowSnapshotInterval : acConditions.SnapshotInterval))
-            continue;
+        if (acConditions.SendsOnGrid)
+        {
+            const auto cOwnerNow = std::chrono::steady_clock::time_point{} + std::chrono::hours(1) +
+                                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::milli>(captureTime));
+            if (!grid.IsDue(cOwnerNow))
+                continue;
+        }
+        else
+        {
+            const bool cIsSlow = acConditions.SlowSnapshotInterval > 0.0 && captureTime >= acConditions.SlowdownTime;
+            if (captureTime - lastCaptureTime < (cIsSlow ? acConditions.SlowSnapshotInterval : acConditions.SnapshotInterval))
+                continue;
+        }
 
         lastCaptureTime = captureTime;
 
@@ -187,6 +202,70 @@ TEST_CASE("Playback clock", "[client.playback_clock]")
         REQUIRE(result.IsAlwaysSmooth);
         REQUIRE(static_cast<double>(result.StarvedFrames) < 0.01 * static_cast<double>(result.Frames));
         REQUIRE(result.MaxDelay < 90.0);
+    }
+
+    SECTION("Does not run out of snapshots when an owner on the send grid skips a frame now and then")
+    {
+        // Faster than the grid's 30 a second, the owner sends most frames and skips one every so often, leaving a two-frame gap
+        for (const double fps : {29.0, 31.0, 33.0, 36.0, 40.0, 45.0})
+        {
+            CAPTURE(fps);
+            NetworkConditions conditions;
+            conditions.SendsOnGrid = true;
+            conditions.OwnerFrameTime = 1000.0 / fps;
+            conditions.OwnerFrameJitter = 2.0;
+            conditions.MaxJitter = 5.0;
+            conditions.Duration = 30000.0;
+
+            const auto result = Simulate(conditions);
+
+            REQUIRE(result.IsAlwaysSmooth);
+            REQUIRE(static_cast<double>(result.StarvedFrames) < 0.005 * static_cast<double>(result.Frames));
+            REQUIRE(result.MaxDelay < 110.0);
+        }
+    }
+
+    SECTION("One long frame of the owner does not hold the delay up afterwards")
+    {
+        // A steady owner on the grid, then a single 100 ms hitch: the longest gap leaves it out
+        PlaybackClock clock;
+        double now = 0.0;
+        uint64_t tick = 1000;
+        for (; now < 3000.0; tick += 33, now += 33.0)
+            clock.AddSample(now, tick);
+        const double cSteadyDelay = clock.GetTargetDelay();
+
+        tick += 100;
+        now += 100.0;
+        clock.AddSample(now, tick);
+        REQUIRE(clock.GetLongestRecentGap() == Approx(33.0));
+
+        // Only the average of the newest gaps (cRecentGaps) still holds it for that many snapshots, as before
+        for (size_t i = 0; i < PlaybackClock::cRecentGaps; ++i)
+        {
+            tick += 33;
+            now += 33.0;
+            clock.AddSample(now, tick);
+        }
+        REQUIRE(clock.GetTargetDelay() < cSteadyDelay + 3.0);
+    }
+
+    SECTION("Plays a fast PC on the send grid about as close as before")
+    {
+        for (const double fps : {60.0, 75.0, 144.0})
+        {
+            CAPTURE(fps);
+            NetworkConditions conditions;
+            conditions.SendsOnGrid = true;
+            conditions.OwnerFrameTime = 1000.0 / fps;
+            conditions.OwnerFrameJitter = 1.0;
+
+            const auto result = Simulate(conditions);
+
+            REQUIRE(result.IsAlwaysSmooth);
+            REQUIRE(result.StarvedFrames == 0);
+            REQUIRE(result.MaxDelay < 90.0);
+        }
     }
 
     SECTION("Is not thrown off by a long frame on our side")

@@ -12,6 +12,7 @@
 #include <Messages/SafePointRequest.h>
 #include <Messages/NotifyDownedState.h>
 
+#include <ReviveHold.h>
 #include <ReviveRules.h>
 
 #include "MessageRoundTrip.h"
@@ -170,4 +171,19 @@ TEST_CASE("a player not revived respawns at the party leader's safe point, else 
     REQUIRE(ReviveRules::ChooseRespawnPoint(true, false) == RespawnPoint::kPartyLeader);
     REQUIRE(ReviveRules::ChooseRespawnPoint(false, true) == RespawnPoint::kOwn);
     REQUIRE(ReviveRules::ChooseRespawnPoint(false, false) == RespawnPoint::kGameDefault);
+}
+
+TEST_CASE("a hold stays on its downed player while the hand is still on them", "[revive]")
+{
+    // No hold yet: the first downed player touched, or nobody.
+    CHECK(ReviveHold::Target(0, false, 0) == 0);
+    CHECK(ReviveHold::Target(0, false, 7) == 7);
+
+    // Holding player 9, and player 7 earlier in the list comes into reach too: the hold stays on 9.
+    CHECK(ReviveHold::Target(9, true, 7) == 9);
+    CHECK(ReviveHold::Target(9, true, 9) == 9);
+
+    // The hand left player 9: the next one touched, or nobody.
+    CHECK(ReviveHold::Target(9, false, 7) == 7);
+    CHECK(ReviveHold::Target(9, false, 0) == 0);
 }
